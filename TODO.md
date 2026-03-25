@@ -1,5 +1,19 @@
 # TODO
 
+## Network lifecycle management
+
+Currently `setup` starts the default libvirt network and enables autostart, so
+it runs permanently. Consider instead: removing autostart from `setup`, and
+having `up` start the network if it is not already running. This would mean the
+network is not running at boot and only comes up when a VM is needed.
+
+Stopping the network on `halt`/`destroy` is riskier — migrant.sh would need to
+confirm no other VMs (including non-migrant ones) are still using it before
+bringing the network down. The simplest safe heuristic is to stop the network
+only if `virsh list` returns no running domains, but this is a blunt instrument.
+Given that the default network is cheap (one bridge interface and a dnsmasq
+process), it may not be worth the added complexity to stop it proactively.
+
 ## Shared folder security
 
 Two unresolved attack vectors from a malicious guest:
