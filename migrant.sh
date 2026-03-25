@@ -651,7 +651,9 @@ cmd_ssh() {
     echo "Error: could not determine username from cloud-init.yml." >&2
     exit 1
   fi
-  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${user}@$(get_vm_ip_or_die)" "$@"
+  # LogLevel=ERROR suppresses the "Permanently added ... to known hosts" warning
+  # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
+  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "${user}@$(get_vm_ip_or_die)" "$@"
 }
 
 cmd_status() {
