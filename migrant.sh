@@ -517,8 +517,9 @@ MIGRANT_QEMU_EOF
     cat > "$expected_network_hook" << 'MIGRANT_NETWORK_EOF'
 #!/bin/bash
 # Managed by migrant.sh
+# Libvirt network hook args: $1=network-name $2=operation $3=sub-operation $4=extra
 if [[ "$1" == "default" && "$2" == "started" ]]; then
-  sysctl -w "net.ipv4.conf.${3}.rp_filter=0"
+  sysctl -w "net.ipv4.conf.virbr0.rp_filter=0"
 fi
 MIGRANT_NETWORK_EOF
     if [[ -f "$network_hook" ]] && cmp -s "$expected_network_hook" "$network_hook"; then
