@@ -1,0 +1,31 @@
+#cloud-config
+users:
+  - name: agent
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: "agent"
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDotO5erTRlNWn5fcHjskFdwxDDEaJ3Q/vXfWMK6kpefLA6K3G1r/TH57lDsXpNIuUwt/61JCu7ShWLqrmBeVkhnPj8eBjRLg6UtFumXXDRCCHHLjd8nyZqyVHHNd0ygSwC26F+o5s87W2tkZLZjqvym69xLHlIpE2vxndE/Bk/idBm9ZyWBVANJvEs7CTOpxb+G8C08o6IfcpIP+Qf7P/4ydgNWDWAKWJHbJ+rfzkdsRenfcuN3WVa47jzItM3K0ZL6C7FB6F1FS3uTG9ahGBOltzfx6WKlnuOKwzLmNl7SE6I2otMGQv7O7dw4/qWIE8BWHcb6QBtNvwGY29mJ0nX cardno:0006_04545135
+
+package_update: true
+packages:
+  - git
+  - unzip
+
+runcmd:
+  - mkdir -p /home/agent/workspace
+  - echo "workspace /home/agent/workspace virtiofs defaults 0 0" >> /etc/fstab
+  - mount /home/agent/workspace
+  # write_files runs before users-groups, so any file it writes to /home/agent
+  # ends up owned by root. Create home dir files in runcmd instead, then fix
+  # ownership in one sweep before running anything as agent.
+  - chown -R agent:agent /home/agent
+  # ~/.local/bin is not in the default PATH. Add it system-wide so that tools
+  # installed there (e.g. claude) are available without shell rc file changes.
+  - echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/local-bin.sh
+  - sudo -u agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+  - sudo -u agent bash -c 'echo "alias claude-yolo=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
+  - sudo -u agent bash -c 'echo "alias c=\"cd ~/workspace && claude --dangerously-skip-permissions\"" >> ~/.bash_aliases'
+  - curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh

@@ -1,0 +1,30 @@
+# VM identity
+VM_NAME="claude"
+# OS variant hint passed to virt-install for guest tuning (machine type, firmware,
+# virtio drivers, etc.). Should match the guest OS. Run 'osinfo-query os | grep ubuntu'
+# to find the right value when upgrading.
+OS_VARIANT="ubuntu25.10"
+
+# Resources
+RAM_MB=4096
+VCPUS=2
+DISK_GB=20
+
+# Base image
+IMAGE_URL="https://cloud-images.ubuntu.com/releases/questing/release/ubuntu-25.10-server-cloudimg-amd64.img"
+
+# Shared folders — format is "host_absolute_or_relative_path:guest_tag"
+# The guest_tag is what you mount inside the VM, e.g.:
+#   sudo mount -t virtiofs workspace /home/agent/workspace
+SHARED_FOLDERS=(
+  "$(pwd)/workspace:workspace"
+)
+
+# Network — one entry per NIC, using virt-install --network syntax
+NETWORKS=(
+  "network=default"
+)
+
+# Block the VM from initiating connections to the host and from reaching other
+# hosts on the local network. Requires 'migrant.sh setup' to have been run.
+NETWORK_ISOLATION=true
