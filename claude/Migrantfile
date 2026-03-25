@@ -28,3 +28,8 @@ NETWORKS=(
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true
+
+# Use a dedicated passphrase-less SSH key for migrant.sh VMs, stored at
+# ~/.ssh/migrant. Run 'migrant.sh pubkey' to print the public key, then add
+# it to cloud-init.yml under ssh_authorized_keys.
+MANAGED_SSH_KEY=true

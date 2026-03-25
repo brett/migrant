@@ -189,8 +189,19 @@ section for the drop-in configuration.
 
 The `claude/` subdirectory contains a ready-to-use example for running
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in an
-isolated VM. Copy it, add your SSH public key to `cloud-init.yml`, and
-run `migrant.sh up`.
+isolated VM. Copy it, then follow the managed key setup:
+
+```bash
+cd claude
+migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
+```
+
+Paste the output into `cloud-init.yml` under `ssh_authorized_keys`, then:
+
+```bash
+migrant.sh up
+migrant.sh ssh
+```
 
 ---
 
@@ -206,6 +217,7 @@ migrant.sh halt               # Gracefully shut down the VM
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ssh                # SSH into the VM as the configured user
 migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive shell
+migrant.sh pubkey             # Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
 migrant.sh ip                 # Print the VM's IP address
 migrant.sh status             # Show the VM's current state and snapshot availability
 migrant.sh snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down
@@ -307,9 +319,50 @@ users:
 ```
 
 `migrant.sh ssh` looks up the VM's IP address and SSHes in as the first
-user defined in `cloud-init.yml`. It will exit with an error if no
-`ssh_authorized_keys` entry is found in `cloud-init.yml` — add your
-public key before running `migrant.sh up`:
+user defined in `cloud-init.yml`.
+
+Host key verification is disabled (`StrictHostKeyChecking=no`,
+`UserKnownHostsFile=/dev/null`) because these VMs are ephemeral —
+rebuilding a VM generates a new host key at the same IP, which would
+cause a standard SSH client to refuse the connection.
+
+#### Managed SSH key (recommended)
+
+Setting `MANAGED_SSH_KEY=true` in `Migrantfile` tells migrant.sh to
+manage a dedicated passphrase-less SSH key at `~/.ssh/migrant`. The key
+is shared across all VMs that have this option enabled. On first use,
+the key is generated automatically.
+
+First-time setup:
+
+```bash
+migrant.sh pubkey    # generates the key if needed; prints the public key
+```
+
+Paste the output into `cloud-init.yml` under `ssh_authorized_keys`, then
+create the VM:
+
+```yaml
+users:
+  - name: agent
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA... migrant
+```
+
+```bash
+migrant.sh up
+migrant.sh ssh       # uses ~/.ssh/migrant automatically
+```
+
+Only the managed key is offered to the server (`IdentitiesOnly=yes`) —
+keys from the SSH agent and default identity files are not tried.
+
+#### Manual key management
+
+Without `MANAGED_SSH_KEY=true`, migrant.sh expects you to have added
+your own public key to `cloud-init.yml` and will error if
+`ssh_authorized_keys` is absent. SSH will use whichever keys are
+available in your agent or default identity files:
 
 ```yaml
 users:
@@ -318,10 +371,7 @@ users:
       - ssh-ed25519 AAAA... you@host
 ```
 
-Host key verification is disabled (`StrictHostKeyChecking=no`,
-`UserKnownHostsFile=/dev/null`) because these VMs are ephemeral —
-rebuilding a VM generates a new host key at the same IP, which would
-cause a standard SSH client to refuse the connection.
+#### Remote commands
 
 Arguments after `--` are passed through as a remote command:
 

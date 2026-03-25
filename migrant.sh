@@ -9,6 +9,7 @@ set -euo pipefail
 export LIBVIRT_DEFAULT_URI="qemu:///system"
 
 SUBCOMMAND="${1:-}"
+MANAGED_KEY_PATH="$HOME/.ssh/migrant"
 
 # Resolve the VM directory: MIGRANT_DIR env var takes precedence over CWD.
 # Tilde in MIGRANT_DIR is expanded manually because it is not expanded when
@@ -38,6 +39,7 @@ Commands:
   console             Open a serial console session (exit with Ctrl+])
   ssh [-- cmd...]     SSH into the VM as the configured user; optionally run a
                       remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
+  pubkey              Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
   ip                  Print the VM's IP address
   status              Show the VM's current state and snapshot availability
   snapshot            Shut down the VM and save a snapshot of its disk;
@@ -628,6 +630,24 @@ cmd_reset() {
   cmd_up
 }
 
+ensure_managed_key() {
+  if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
+    echo "Generating managed SSH key at $MANAGED_KEY_PATH..." >&2
+    ssh-keygen -t ed25519 -f "$MANAGED_KEY_PATH" -N "" -C "migrant" >/dev/null
+    echo "  Add the public key to cloud-init.yml under ssh_authorized_keys:" >&2
+    echo "    $(cat "${MANAGED_KEY_PATH}.pub")" >&2
+  fi
+}
+
+cmd_pubkey() {
+  if [[ "${MANAGED_SSH_KEY:-}" != "true" ]]; then
+    echo "Error: MANAGED_SSH_KEY is not enabled in Migrantfile." >&2
+    exit 1
+  fi
+  ensure_managed_key
+  cat "${MANAGED_KEY_PATH}.pub"
+}
+
 cmd_console() {
   require_running
   virsh console "$VM_NAME"
@@ -640,20 +660,36 @@ cmd_ip() {
 
 cmd_ssh() {
   require_running
-  if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
-    echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
-    echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
-    exit 1
-  fi
   local user
   user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
   if [[ -z "$user" ]]; then
     echo "Error: could not determine username from cloud-init.yml." >&2
     exit 1
   fi
+
   # LogLevel=ERROR suppresses the "Permanently added ... to known hosts" warning
   # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
-  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "${user}@$(get_vm_ip_or_die)" "$@"
+  local ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
+    ensure_managed_key
+    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+      echo "Warning: no ssh_authorized_keys found in cloud-init.yml." >&2
+      echo "  Run 'migrant.sh pubkey' and add the output, then rebuild with" >&2
+      echo "  'migrant.sh destroy && migrant.sh up'." >&2
+    fi
+    # IdentitiesOnly=yes prevents SSH from trying keys from the agent or
+    # default identity files — only the managed migrant key is attempted.
+    ssh_opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
+  else
+    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+      echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
+      echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
+      exit 1
+    fi
+  fi
+
+  ssh "${ssh_opts[@]}" "${user}@$(get_vm_ip_or_die)" "$@"
 }
 
 cmd_status() {
@@ -696,6 +732,7 @@ case "$SUBCOMMAND" in
   destroy)      require_config; cmd_destroy ;;
   console)      require_config; cmd_console ;;
   ssh)          require_config; cmd_ssh "${@:2}" ;;
+  pubkey)       require_config; cmd_pubkey ;;
   ip)           require_config; cmd_ip ;;
   status)       require_config; cmd_status ;;
   snapshot)     require_config; cmd_snapshot ;;
