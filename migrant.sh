@@ -351,54 +351,6 @@ cmd_setup() {
     echo "  Firewall backend '$current_backend' — no change needed."
   fi
 
-  # --- default network ---
-  echo ""
-  if virsh net-info default &>/dev/null; then
-    echo "Default libvirt network already exists."
-    if ! virsh net-list | grep -qw "default"; then
-      echo "  Starting default network..."
-      virsh net-start default
-    fi
-    if ! virsh net-info default | grep -q "Autostart:.*yes"; then
-      virsh net-autostart default
-      echo "  Autostart enabled."
-    fi
-  else
-    echo "Creating default libvirt network..."
-    cat > "$net_xml" << 'NET_EOF'
-<network>
-  <name>default</name>
-  <forward mode="nat"/>
-  <bridge name="virbr0" stp="on" delay="0"/>
-  <mac address="52:54:00:0a:cd:21"/>
-  <ip address="192.168.122.1" netmask="255.255.255.0">
-    <dhcp>
-      <range start="192.168.122.2" end="192.168.122.254"/>
-    </dhcp>
-  </ip>
-</network>
-NET_EOF
-    virsh net-define "$net_xml"
-    virsh net-autostart default
-    virsh net-start default
-    echo "  Default network created and started."
-  fi
-
-  # --- images directory permissions ---
-  echo ""
-  if [[ ! -d "$IMAGES_DIR" ]]; then
-    echo "Creating images directory $IMAGES_DIR..."
-    sudo mkdir -p "$IMAGES_DIR"
-  fi
-  if [[ -w "$IMAGES_DIR" ]]; then
-    echo "Images directory $IMAGES_DIR is already writable."
-  else
-    echo "Granting libvirt group write access to $IMAGES_DIR..."
-    sudo chown root:libvirt "$IMAGES_DIR"
-    sudo chmod g+rwx "$IMAGES_DIR"
-    echo "  Done."
-  fi
-
   # --- qemu hook (network isolation) ---
   echo ""
   cat > "$expected_qemu_hook" << 'MIGRANT_QEMU_EOF'
@@ -538,6 +490,54 @@ MIGRANT_NETWORK_EOF
       install_hook "$expected_network_hook" "$network_hook"
       echo "  Installed."
     fi
+  fi
+
+  # --- default network ---
+  echo ""
+  if virsh net-info default &>/dev/null; then
+    echo "Default libvirt network already exists."
+    if ! virsh net-list | grep -qw "default"; then
+      echo "  Starting default network..."
+      virsh net-start default
+    fi
+    if ! virsh net-info default | grep -q "Autostart:.*yes"; then
+      virsh net-autostart default
+      echo "  Autostart enabled."
+    fi
+  else
+    echo "Creating default libvirt network..."
+    cat > "$net_xml" << 'NET_EOF'
+<network>
+  <name>default</name>
+  <forward mode="nat"/>
+  <bridge name="virbr0" stp="on" delay="0"/>
+  <mac address="52:54:00:0a:cd:21"/>
+  <ip address="192.168.122.1" netmask="255.255.255.0">
+    <dhcp>
+      <range start="192.168.122.2" end="192.168.122.254"/>
+    </dhcp>
+  </ip>
+</network>
+NET_EOF
+    virsh net-define "$net_xml"
+    virsh net-autostart default
+    virsh net-start default
+    echo "  Default network created and started."
+  fi
+
+  # --- images directory permissions ---
+  echo ""
+  if [[ ! -d "$IMAGES_DIR" ]]; then
+    echo "Creating images directory $IMAGES_DIR..."
+    sudo mkdir -p "$IMAGES_DIR"
+  fi
+  if [[ -w "$IMAGES_DIR" ]]; then
+    echo "Images directory $IMAGES_DIR is already writable."
+  else
+    echo "Granting libvirt group write access to $IMAGES_DIR..."
+    sudo chown root:libvirt "$IMAGES_DIR"
+    sudo chmod g+rwx "$IMAGES_DIR"
+    echo "  Done."
   fi
 
   echo ""
