@@ -58,7 +58,9 @@ Each project directory contains two files:
   provisions the VM on first boot
 
 The `migrant.sh` script lives in your `PATH` and reads these files from
-the current directory, just like `vagrant` reads a `Vagrantfile`.
+the current directory by default, just like `vagrant` reads a `Vagrantfile`.
+Alternatively, set the `MIGRANT_DIR` environment variable to point at the
+project directory and run `migrant.sh` from anywhere (see [MIGRANT_DIR](#migrant_dir)).
 
 On first `migrant.sh up`, the script:
 
@@ -194,7 +196,8 @@ run `migrant.sh up`.
 
 ## Usage
 
-All commands are run from the project directory containing `Migrantfile`.
+Run commands from the project directory containing `Migrantfile`, or set
+`MIGRANT_DIR` to run from anywhere (see [MIGRANT_DIR](#migrant_dir)).
 
 ```bash
 migrant.sh setup              # One-time host setup (run once after install)
@@ -231,6 +234,38 @@ migrant.sh snapshot  # saves a clean copy of the disk; VM stays down after
 migrant.sh up        # bring it back up to continue working
 migrant.sh reset     # later: wipe and rebuild from the snapshot
 ```
+
+### MIGRANT_DIR
+
+Set `MIGRANT_DIR` to the path of a project directory to run any command
+without `cd`-ing into it first:
+
+```bash
+MIGRANT_DIR=~/migrant/claude migrant.sh up
+MIGRANT_DIR=~/migrant/claude migrant.sh halt
+```
+
+The typical use is to define a shell alias:
+
+```bash
+alias cm="MIGRANT_DIR=$HOME/migrant/claude migrant.sh"
+```
+
+After which you can manage the VM from anywhere:
+
+```bash
+cm up
+cm halt
+cm ssh
+```
+
+Note: use `$HOME` rather than `~` when defining the alias, since `~` inside
+quotes is not expanded by the shell and would be passed to the script
+literally.
+
+Shared folder paths in `Migrantfile` that do not begin with `/` are always
+resolved relative to the `Migrantfile`'s directory, regardless of where
+`migrant.sh` is invoked from.
 
 ### Waiting for the VM to be ready
 

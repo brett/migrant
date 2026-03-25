@@ -17,7 +17,7 @@ IMAGE_URL="https://cloud-images.ubuntu.com/releases/questing/release/ubuntu-25.1
 # The guest_tag is what you mount inside the VM, e.g.:
 #   sudo mount -t virtiofs workspace /home/agent/workspace
 SHARED_FOLDERS=(
-  "$(pwd)/workspace:workspace"
+  "workspace:workspace"
 )
 
 # Network — one entry per NIC, using virt-install --network syntax

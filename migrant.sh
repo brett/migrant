@@ -9,8 +9,19 @@ set -euo pipefail
 export LIBVIRT_DEFAULT_URI="qemu:///system"
 
 SUBCOMMAND="${1:-}"
-CONFIG_FILE="$(pwd)/Migrantfile"
-CLOUD_INIT_FILE="$(pwd)/cloud-init.yml"
+
+# Resolve the VM directory: MIGRANT_DIR env var takes precedence over CWD.
+# Tilde in MIGRANT_DIR is expanded manually because it is not expanded when
+# the variable is set via an env var prefix (e.g. MIGRANT_DIR='~/foo' cmd).
+if [[ -n "${MIGRANT_DIR:-}" ]]; then
+  _migrant_dir="${MIGRANT_DIR/#~/$HOME}"
+  VM_DIR="$(realpath "$_migrant_dir")"
+else
+  VM_DIR="$(pwd)"
+fi
+
+CONFIG_FILE="$VM_DIR/Migrantfile"
+CLOUD_INIT_FILE="$VM_DIR/cloud-init.yml"
 IMAGES_DIR="/var/lib/libvirt/images"
 
 usage() {
@@ -33,14 +44,15 @@ Commands:
                       VM stays down afterward
   reset               Destroy the VM and rebuild it from the last snapshot
 
-Each command reads Migrantfile and cloud-init.yml from the current directory.
+Each command reads Migrantfile and cloud-init.yml from the current directory,
+or from the directory specified by the MIGRANT_DIR environment variable.
 EOF
   exit "${1:-1}"
 }
 
 require_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Error: No Migrantfile file found in $(pwd)" >&2
+    echo "Error: No Migrantfile found in $VM_DIR" >&2
     exit 1
   fi
   # shellcheck source=/dev/null
@@ -131,7 +143,7 @@ wait_for_shutdown() {
 
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
-    echo "Error: No cloud-init.yml file found in $(pwd)" >&2
+    echo "Error: No cloud-init.yml found in $VM_DIR" >&2
     exit 1
   fi
 
@@ -225,6 +237,8 @@ EOF
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
     local host_path="${shared_folder%%:*}"
     local guest_tag="${shared_folder##*:}"
+    # Relative paths are resolved relative to the VM directory (where Migrantfile lives).
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
     mkdir -p "$host_path"
     extra_args+=(--filesystem "source=$host_path,target=$guest_tag,driver.type=virtiofs")
     has_shared_folders=true
