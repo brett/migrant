@@ -19,8 +19,8 @@ by an isolated Claude Code
 agent](https://en.wikipedia.org/wiki/Eating_your_own_dog_food), but I would not
 call it, as The Kids say, "vibe-coded". Design decisions were made by me (a
 [real human being](https://www.youtube.com/watch?v=-DSVDcw6iW8)). I am
-hyper-critical of Claude's shell scripting abilities, reading and questioning
-every line, and often redirected it down another path.
+hyper-critical of Claude's shell scripting abilities. I read and question
+every line, often redirecting it down another path.
 
 ---
 
