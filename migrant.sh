@@ -111,9 +111,10 @@ get_vm_ip_or_die() {
 }
 
 wait_for_ip() {
-  echo "Waiting for '$VM_NAME' to obtain an IP address..." >&2
+  local timeout=120
+  echo "Waiting up to ${timeout}s for '$VM_NAME' to obtain an IP address..." >&2
   local ip
-  local deadline=$(( SECONDS + 120 ))
+  local deadline=$(( SECONDS + timeout ))
   while true; do
     ip=$(get_vm_ip)
     [[ -n "$ip" ]] && break
@@ -131,8 +132,9 @@ wait_for_ip() {
 }
 
 wait_for_shutdown() {
-  echo "Waiting for '$VM_NAME' to shut down..." >&2
-  local deadline=$(( SECONDS + 60 ))
+  local timeout=60
+  echo "Waiting up to ${timeout}s for '$VM_NAME' to shut down..." >&2
+  local deadline=$(( SECONDS + timeout ))
   while true; do
     local state
     state=$(virsh domstate "$VM_NAME" 2>/dev/null) || break
@@ -151,8 +153,9 @@ wait_for_ssh() {
   local user="$1" ip="$2"
   shift 2
   local ssh_opts=("$@")
-  echo "Waiting for SSH on '$VM_NAME'..." >&2
-  local deadline=$(( SECONDS + 60 ))
+  local timeout=60
+  echo "Waiting up to ${timeout}s for SSH on '$VM_NAME'..." >&2
+  local deadline=$(( SECONDS + timeout ))
   while true; do
     if ssh "${ssh_opts[@]}" -o ConnectTimeout=3 -o BatchMode=yes \
         "${user}@${ip}" exit 2>/dev/null; then
