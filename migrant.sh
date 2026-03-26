@@ -692,9 +692,14 @@ cmd_reset() {
   # new random MAC would cause those rules to match nothing and leave the VM
   # with no network.
   local macs=()
-  while IFS= read -r mac; do
-    [[ -n "$mac" ]] && macs+=("$mac")
-  done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
+  if virsh dominfo "$VM_NAME" &>/dev/null; then
+    while IFS= read -r mac; do
+      [[ -n "$mac" ]] && macs+=("$mac")
+    done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
+  else
+    echo "Warning: VM '$VM_NAME' domain not found; MAC addresses cannot be preserved." >&2
+    echo "  Network may not work after reset. Run 'migrant.sh destroy && migrant.sh up' instead." >&2
+  fi
 
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
