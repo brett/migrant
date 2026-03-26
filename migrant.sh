@@ -46,7 +46,7 @@ Commands:
                       remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
   console             Open a serial console session (exit with Ctrl+])
   ip                  Print the VM's IP address
-  pubkey              Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
+  pubkey              Generate the managed SSH key if needed and print its public key
   storage             List IMAGES_DIR contents grouped by base images and VMs,
                       with file sizes; works without a Migrantfile
 
@@ -203,6 +203,7 @@ cmd_up() {
       echo "VM '$VM_NAME' is already running."
       return
     fi
+    check_managed_key_match start
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     virsh start "$VM_NAME"
     wait_for_ip
@@ -214,18 +215,25 @@ cmd_up() {
     return
   fi
 
+  local from_snapshot=false
+  [[ -f "$SNAPSHOT_PATH" ]] && from_snapshot=true
+
+  if [[ "$from_snapshot" == true ]]; then
+    check_managed_key_match reset
+  else
+    check_managed_key_match create
+  fi
+
   check_kvm
 
   echo "VM '$VM_NAME' not found. Creating..."
 
   mkdir -p "$IMAGES_DIR"
 
-  local from_snapshot=false
   local base_image_path
-  if [[ -f "$SNAPSHOT_PATH" ]]; then
+  if [[ "$from_snapshot" == true ]]; then
     echo "Using snapshot: $SNAPSHOT_PATH"
     base_image_path="$SNAPSHOT_PATH"
-    from_snapshot=true
   else
     base_image_path="$IMAGES_DIR/$base_image"
     if [[ ! -f "$base_image_path" ]]; then
@@ -710,6 +718,57 @@ vm_has_ssh() {
   grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"
 }
 
+# Print the key material (base64 field) of the first key in cloud-init.yml
+# whose comment is "migrant". Prints nothing if no such key is present.
+cloud_init_managed_key_material() {
+  grep -E '^\s*-?\s*(ssh|ecdsa|sk)-' "$CLOUD_INIT_FILE" \
+    | awk '$NF == "migrant" { print $(NF-1); exit }'
+}
+
+# Verify the host-side managed key matches what is in cloud-init.yml.
+# Exits with an error if there is a mismatch. $1 is the context:
+#   create — first-time VM creation (cloud-init will install the key)
+#   reset  — rebuild from snapshot (key is baked into the snapshot)
+#   start  — starting a stopped VM (key is already installed)
+check_managed_key_match() {
+  local context="$1"
+  local ci_material
+  ci_material=$(cloud_init_managed_key_material)
+  [[ -z "$ci_material" ]] && return 0
+
+  if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
+    echo "Error: cloud-init.yml contains a managed SSH key (comment: 'migrant')" >&2
+    echo "  but ~/.ssh/migrant was not found on this host." >&2
+    if [[ "$context" == "create" ]]; then
+      echo "  Run 'migrant.sh pubkey' to generate the key, update cloud-init.yml," >&2
+      echo "  then re-run 'migrant.sh up'." >&2
+    else
+      echo "  Restore ~/.ssh/migrant, or update cloud-init.yml with a new key" >&2
+      echo "  (via 'migrant.sh pubkey') and run 'migrant.sh destroy && migrant.sh up'." >&2
+    fi
+    exit 1
+  fi
+
+  if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
+    echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
+    exit 1
+  fi
+
+  local host_material
+  host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
+
+  if [[ "$ci_material" != "$host_material" ]]; then
+    echo "Error: the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
+    echo "  Update cloud-init.yml with the output of 'migrant.sh pubkey'," >&2
+    if [[ "$context" == "create" ]]; then
+      echo "  then re-run 'migrant.sh up'." >&2
+    else
+      echo "  then run 'migrant.sh destroy && migrant.sh up' to rebuild." >&2
+    fi
+    exit 1
+  fi
+}
+
 get_ssh_user() {
   local user
   user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
@@ -721,6 +780,9 @@ get_ssh_user() {
 }
 
 # Populate the named array variable with SSH client options.
+# If cloud-init.yml contains a key with comment "migrant", the managed key
+# at ~/.ssh/migrant is used exclusively. Otherwise SSH uses whatever keys
+# are available in the agent or default identity files.
 # Usage: build_ssh_opts ARRAY_NAME
 build_ssh_opts() {
   # shellcheck disable=SC2178
@@ -728,18 +790,34 @@ build_ssh_opts() {
   # LogLevel=ERROR suppresses the "Permanently added ... to known hosts" warning
   # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
   _opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
-    ensure_managed_key
-    if ! vm_has_ssh; then
-      echo "Warning: no ssh_authorized_keys found in cloud-init.yml." >&2
-      echo "  Run 'migrant.sh pubkey' and add the output, then rebuild with" >&2
+
+  local managed_material
+  managed_material=$(cloud_init_managed_key_material)
+
+  if [[ -n "$managed_material" ]]; then
+    if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
+      echo "Error: cloud-init.yml references a managed SSH key but ~/.ssh/migrant not found." >&2
+      echo "  Restore the key file, or update cloud-init.yml and rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
+      exit 1
+    fi
+    if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
+      echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
+      exit 1
+    fi
+    local host_material
+    host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
+    if [[ "$managed_material" != "$host_material" ]]; then
+      echo "Error: the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
+      echo "  Update cloud-init.yml with 'migrant.sh pubkey' and rebuild with" >&2
+      echo "  'migrant.sh destroy && migrant.sh up'." >&2
+      exit 1
     fi
     _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
   else
     if ! vm_has_ssh; then
       echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
-      echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
+      echo "  Add your public key and rebuild with 'migrant.sh destroy && migrant.sh up'." >&2
       exit 1
     fi
   fi
@@ -758,16 +836,10 @@ ensure_managed_key() {
   if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
     echo "Generating managed SSH key at $MANAGED_KEY_PATH..." >&2
     ssh-keygen -t ed25519 -f "$MANAGED_KEY_PATH" -N "" -C "migrant" >/dev/null
-    echo "  Add the public key to cloud-init.yml under ssh_authorized_keys:" >&2
-    echo "    $(cat "${MANAGED_KEY_PATH}.pub")" >&2
   fi
 }
 
 cmd_pubkey() {
-  if [[ "${MANAGED_SSH_KEY:-}" != "true" ]]; then
-    echo "Error: MANAGED_SSH_KEY is not enabled in Migrantfile." >&2
-    exit 1
-  fi
   ensure_managed_key
   cat "${MANAGED_KEY_PATH}.pub"
 }
@@ -812,7 +884,7 @@ cmd_provision() {
 
   local ansible_args=(-i "${ip}," -u "$user")
   ansible_args+=(--ssh-extra-args="${ssh_opts[*]}")
-  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
+  if [[ -n "$(cloud_init_managed_key_material)" ]]; then
     ansible_args+=(--private-key "$MANAGED_KEY_PATH")
   fi
 

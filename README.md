@@ -216,14 +216,16 @@ isolated VM. It uses both provisioning methods:
 The `cloud-init.yml` also contains the equivalent cloud-init-only setup
 commented out, as a reference for using either approach.
 
-First, generate or print the managed SSH key (required for Ansible provisioning):
+First, generate the managed SSH key and add it to `cloud-init.yml`
+(required for Ansible provisioning):
 
 ```bash
 cd claude
 migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 ```
 
-Paste the output into `cloud-init.yml` under `ssh_authorized_keys`, then:
+Paste the output into `cloud-init.yml` under `ssh_authorized_keys`. The
+comment must remain `migrant` so migrant.sh recognises it. Then:
 
 ```bash
 migrant.sh up        # creates VM, runs cloud-init + Ansible; blocks until ready
@@ -250,7 +252,7 @@ migrant.sh ssh                # SSH into the VM as the configured user
 migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive shell
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
-migrant.sh pubkey             # Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
+migrant.sh pubkey             # Generate the managed SSH key if needed and print its public key
 migrant.sh storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
 ```
 
@@ -361,19 +363,19 @@ cause a standard SSH client to refuse the connection.
 
 #### Managed SSH key (recommended)
 
-Setting `MANAGED_SSH_KEY=true` in `Migrantfile` tells migrant.sh to
-manage a dedicated passphrase-less SSH key at `~/.ssh/migrant`. The key
-is shared across all VMs that have this option enabled. On first use,
-the key is generated automatically.
+migrant.sh can manage a dedicated passphrase-less SSH key at
+`~/.ssh/migrant`, shared across all VMs that use it. This is detected
+automatically: if `cloud-init.yml` contains a key whose comment is
+`migrant`, migrant.sh uses `~/.ssh/migrant` exclusively for SSH
+connections (`IdentitiesOnly=yes`).
 
 First-time setup:
 
 ```bash
-migrant.sh pubkey    # generates the key if needed; prints the public key
+migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 ```
 
-Paste the output into `cloud-init.yml` under `ssh_authorized_keys`, then
-create the VM:
+Paste the output into `cloud-init.yml` under `ssh_authorized_keys`:
 
 ```yaml
 users:
@@ -382,20 +384,25 @@ users:
       - ssh-ed25519 AAAA... migrant
 ```
 
+Then create the VM:
+
 ```bash
 migrant.sh up
 migrant.sh ssh       # uses ~/.ssh/migrant automatically
 ```
 
-Only the managed key is offered to the server (`IdentitiesOnly=yes`) —
-keys from the SSH agent and default identity files are not tried.
+migrant.sh verifies at `up` time that the key in `cloud-init.yml` matches
+`~/.ssh/migrant.pub` and errors early if not, since a mismatch would mean
+the VM boots with a key the host cannot use. If `~/.ssh/migrant` is ever
+lost, run `migrant.sh pubkey` to regenerate it, update `cloud-init.yml`,
+and rebuild with `migrant.sh destroy && migrant.sh up`.
 
 #### Manual key management
 
-Without `MANAGED_SSH_KEY=true`, migrant.sh expects you to have added
+Without a `migrant`-commented key, migrant.sh expects you to have added
 your own public key to `cloud-init.yml` and will error if
-`ssh_authorized_keys` is absent. SSH will use whichever keys are
-available in your agent or default identity files:
+`ssh_authorized_keys` is absent. SSH uses whichever keys are available
+in your agent or default identity files:
 
 ```yaml
 users:
