@@ -9,23 +9,26 @@ users:
     ssh_authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
 
-package_update: true
-packages:
-  - git
-  - unzip
+# Package installation and software setup are handled by Ansible (playbook.yml).
+# To provision without Ansible, remove playbook.yml and uncomment the blocks below.
+# package_update: true
+# packages:
+#   - git
+#   - unzip
 
 runcmd:
+  # Bootstrap: create shared folder mount point.
+  # Runs as root before SSH is available and cannot be done by Ansible.
   - mkdir -p /home/agent/workspace
   - echo "workspace /home/agent/workspace virtiofs defaults 0 0" >> /etc/fstab
   - mount /home/agent/workspace
-  # write_files runs before users-groups, so any file it writes to /home/agent
-  # ends up owned by root. Create home dir files in runcmd instead, then fix
-  # ownership in one sweep before running anything as agent.
-  - chown -R agent:agent /home/agent
-  # ~/.local/bin is not in the default PATH. Add it system-wide so that tools
-  # installed there (e.g. claude) are available without shell rc file changes.
-  - echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/local-bin.sh
-  - sudo -u agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-  - sudo -u agent bash -c 'echo "alias claude-yolo=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
-  - sudo -u agent bash -c 'echo "alias c=\"cd ~/workspace && claude --dangerously-skip-permissions\"" >> ~/.bash_aliases'
-  - curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+
+# Without Ansible, also add these runcmd entries:
+#   # write_files runs before users-groups, so any file it writes to /home/agent
+#   # ends up owned by root. Fix ownership before running anything as agent.
+#   - chown -R agent:agent /home/agent
+#   - echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/local-bin.sh
+#   - sudo -u agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+#   - sudo -u agent bash -c 'echo "alias claude-yolo=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
+#   - sudo -u agent bash -c 'echo "alias c=\"cd ~/workspace && claude --dangerously-skip-permissions\"" >> ~/.bash_aliases'
+#   - curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh

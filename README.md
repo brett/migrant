@@ -49,13 +49,17 @@ smaller hypervisor attack surface compared to VirtualBox, this makes
 
 ## How it works
 
-Each project directory contains two files:
+Each project directory contains these files:
 
 - **`Migrantfile`** — a sourced bash file declaring VM name, resources,
   image, and shared folders
 - **`cloud-init.yml`** — a standard
   [cloud-init](https://cloudinit.readthedocs.io/) user-data file that
-  provisions the VM on first boot
+  handles first-boot system setup: creating users, configuring SSH keys,
+  and mounting shared folders
+- **`playbook.yml`** (optional) — an [Ansible](https://docs.ansible.com/)
+  playbook for ongoing configuration management: installing packages,
+  deploying dotfiles, and anything that may change over the VM's lifetime
 
 The `migrant.sh` script lives in your `PATH` and reads these files from
 the current directory by default, just like `vagrant` reads a `Vagrantfile`.
@@ -69,8 +73,11 @@ On first `migrant.sh up`, the script:
    (copy-on-write — fast, no full copy)
 3. Packages your `cloud-init.yml` into a seed ISO
 4. Calls `virt-install` to define and start the VM
-5. cloud-init runs inside the VM on first boot to install packages,
-   create users, mount shared folders, etc.
+5. cloud-init runs inside the VM on first boot to create users, configure
+   SSH keys, and mount shared folders
+6. If `playbook.yml` is present, waits for cloud-init to finish, then runs
+   `ansible-playbook` to complete provisioning; `up` blocks until done and
+   the VM is fully ready when it returns
 
 On subsequent `migrant.sh up` calls, the VM already exists so the script
 simply starts it with `virsh start`.
@@ -109,6 +116,16 @@ sudo pacman -S qemu-base libvirt virt-install dnsmasq xorriso
 `dnsmasq` must be installed so libvirt can use its binary for guest
 DHCP/DNS, but do not enable the dnsmasq systemd service — libvirt
 manages its own dnsmasq process internally.
+
+If you plan to use Ansible provisioning (`playbook.yml`), also install:
+
+```bash
+sudo pacman -S ansible
+```
+
+Ansible runs on the host and connects to the VM over SSH. An SSH key must
+be configured in `cloud-init.yml` (see [Managed SSH key](#managed-ssh-key-recommended))
+before running Ansible.
 
 ### 2. Install migrant.sh
 
@@ -189,7 +206,17 @@ section for the drop-in configuration.
 
 The `claude/` subdirectory contains a ready-to-use example for running
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in an
-isolated VM. Copy it, then follow the managed key setup:
+isolated VM. It uses both provisioning methods:
+
+- **`cloud-init.yml`** handles system bootstrap: creating the `agent` user,
+  configuring SSH, and mounting the shared folder
+- **`playbook.yml`** handles software setup: installing packages, claude-code,
+  uv, and bash aliases
+
+The `cloud-init.yml` also contains the equivalent cloud-init-only setup
+commented out, as a reference for using either approach.
+
+First, generate or print the managed SSH key (required for Ansible provisioning):
 
 ```bash
 cd claude
@@ -199,7 +226,7 @@ migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 Paste the output into `cloud-init.yml` under `ssh_authorized_keys`, then:
 
 ```bash
-migrant.sh up
+migrant.sh up        # creates VM, runs cloud-init + Ansible; blocks until ready
 migrant.sh ssh
 ```
 
@@ -211,18 +238,19 @@ Run commands from the project directory containing `Migrantfile`, or set
 `MIGRANT_DIR` to run from anywhere (see [MIGRANT_DIR](#migrant_dir)).
 
 ```bash
-migrant.sh setup              # One-time host setup (run once after install)
-migrant.sh up                 # Create or start the VM; waits until ready
+migrant.sh setup              # One-time host setup: configures libvirt networking and installs firewall hooks
+migrant.sh up                 # Create or start the VM; runs Ansible on first create; waits until ready
 migrant.sh halt               # Gracefully shut down the VM
-migrant.sh console            # Open a serial console session (exit with Ctrl+])
+migrant.sh destroy            # Stop and permanently delete the VM, its disk, and any snapshots
+migrant.sh provision          # Run the Ansible playbook (playbook.yml) against the running VM
+migrant.sh snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down afterward
+migrant.sh reset              # Destroy the VM and rebuild it from the last snapshot
+migrant.sh status             # Show the VM's current state and snapshot availability
 migrant.sh ssh                # SSH into the VM as the configured user
 migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive shell
-migrant.sh pubkey             # Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
+migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
-migrant.sh status             # Show the VM's current state and snapshot availability
-migrant.sh snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down
-migrant.sh reset              # Destroy the VM and rebuild it from the last snapshot
-migrant.sh destroy            # Stop and permanently delete the VM, its disk, and any snapshots
+migrant.sh pubkey             # Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
 ```
 
 ### Typical workflow
@@ -230,21 +258,25 @@ migrant.sh destroy            # Stop and permanently delete the VM, its disk, an
 ```bash
 # First time
 cd ~/my-agent-vm
-migrant.sh up
-migrant.sh console
+migrant.sh up          # creates VM, runs cloud-init + Ansible; blocks until ready
+migrant.sh ssh         # connect and do any manual one-time setup (e.g. auth)
+migrant.sh snapshot    # save this known-good state
 
 # Day-to-day
 migrant.sh up       # start
 migrant.sh halt     # stop when done
 
-# Start fresh
+# Restore to snapshot
+migrant.sh reset    # wipe and rebuild from snapshot; Ansible does not re-run
+                    # (the snapshot already contains its output)
+
+# Update provisioning after changing playbook.yml
+migrant.sh up
+migrant.sh provision   # re-run the Ansible playbook; VM stays running
+
+# Start completely fresh
 migrant.sh destroy
 migrant.sh up
-
-# Save state and restore later
-migrant.sh snapshot  # saves a clean copy of the disk; VM stays down after
-migrant.sh up        # bring it back up to continue working
-migrant.sh reset     # later: wipe and rebuild from the snapshot
 ```
 
 ### MIGRANT_DIR

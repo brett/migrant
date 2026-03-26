@@ -40,24 +40,3 @@ host). Possible mitigations to explore:
   `qemu-img` enforces it as a hard limit rather than a soft advisory
 - Explore whether `virtiofsd` or the host kernel supports per-share quota
   enforcement
-
-## Ansible integration
-
-Cloud-init is first-boot only. For ongoing configuration changes (adding
-packages, updating config files, changing runcmd behaviour) the options are
-currently: SSH in and run commands manually, or `destroy` + `up`. Neither
-scales well.
-
-Consider adding optional Ansible support as a configuration management layer
-on top of cloud-init:
-- Cloud-init handles the one-time bootstrap (user creation, shared folder
-  mount, base packages)
-- An Ansible playbook (e.g. `playbook.yml` alongside `Migrantfile`) handles
-  everything that may need to change over the VM's lifetime
-- `migrant.sh provision` could run `ansible-playbook` against the VM's IP,
-  re-applying the playbook idempotently without a destroy/up cycle
-- The pre-baked image snapshot workflow (below) could also run the playbook
-  before snapshotting, so rebuilt VMs start fully configured
-
-This would also make it easier to manage multiple VMs with different roles
-from a shared set of roles/tasks.

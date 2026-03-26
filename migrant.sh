@@ -33,18 +33,20 @@ Commands:
   setup               One-time host setup: configures libvirt networking and
                       installs firewall hooks
   up                  Create the VM if it does not exist, or start it if stopped;
-                      waits until the VM has a network address
+                      runs Ansible provisioning (if playbook.yml exists) on first
+                      create; waits until the VM is fully ready
   halt                Gracefully shut down the VM
   destroy             Stop and permanently delete the VM, its disk, and any snapshots
-  console             Open a serial console session (exit with Ctrl+])
-  ssh [-- cmd...]     SSH into the VM as the configured user; optionally run a
-                      remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
-  pubkey              Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
-  ip                  Print the VM's IP address
-  status              Show the VM's current state and snapshot availability
+  provision           Run the Ansible playbook (playbook.yml) against the running VM
   snapshot            Shut down the VM and save a snapshot of its disk;
                       VM stays down afterward
   reset               Destroy the VM and rebuild it from the last snapshot
+  status              Show the VM's current state and snapshot availability
+  ssh [-- cmd...]     SSH into the VM as the configured user; optionally run a
+                      remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
+  console             Open a serial console session (exit with Ctrl+])
+  ip                  Print the VM's IP address
+  pubkey              Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
 
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
@@ -143,6 +145,25 @@ wait_for_shutdown() {
 }
 
 
+wait_for_ssh() {
+  local user="$1" ip="$2"
+  shift 2
+  local ssh_opts=("$@")
+  echo "Waiting for SSH on '$VM_NAME'..." >&2
+  local deadline=$(( SECONDS + 60 ))
+  while true; do
+    if ssh "${ssh_opts[@]}" -o ConnectTimeout=3 -o BatchMode=yes \
+        "${user}@${ip}" exit 2>/dev/null; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Error: timed out waiting for SSH on '$VM_NAME'." >&2
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
     echo "Error: No cloud-init.yml found in $VM_DIR" >&2
@@ -189,10 +210,12 @@ cmd_up() {
 
   mkdir -p "$IMAGES_DIR"
 
+  local from_snapshot=false
   local base_image_path
   if [[ -f "$SNAPSHOT_PATH" ]]; then
     echo "Using snapshot: $SNAPSHOT_PATH"
     base_image_path="$SNAPSHOT_PATH"
+    from_snapshot=true
   else
     base_image_path="$IMAGES_DIR/$base_image"
     if [[ ! -f "$base_image_path" ]]; then
@@ -275,10 +298,32 @@ EOF
     "${extra_args[@]}"
 
   wait_for_ip
-  echo "" >&2
-  echo "Note: cloud-init is still provisioning in the background." >&2
-  echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
-  echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
+
+  if [[ "$from_snapshot" == false ]] && [[ -f "$VM_DIR/playbook.yml" ]]; then
+    local user ssh_opts ip
+    user=$(get_ssh_user)
+    build_ssh_opts ssh_opts
+    ip=$(get_vm_ip_or_die)
+
+    wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
+
+    echo "Waiting for cloud-init to finish..." >&2
+    if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
+      echo "" >&2
+      echo "Error: cloud-init failed on '$VM_NAME'." >&2
+      echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
+      exit 1
+    fi
+    echo "cloud-init done." >&2
+
+    cmd_provision
+    echo "VM '$VM_NAME' is ready." >&2
+  elif [[ "$from_snapshot" == false ]]; then
+    echo "" >&2
+    echo "Note: cloud-init is still provisioning in the background." >&2
+    echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
+    echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
+  fi
 }
 
 install_hook() {
@@ -630,6 +675,41 @@ cmd_reset() {
   cmd_up
 }
 
+get_ssh_user() {
+  local user
+  user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
+  if [[ -z "$user" ]]; then
+    echo "Error: could not determine username from cloud-init.yml." >&2
+    exit 1
+  fi
+  echo "$user"
+}
+
+# Populate the named array variable with SSH client options.
+# Usage: build_ssh_opts ARRAY_NAME
+build_ssh_opts() {
+  # shellcheck disable=SC2178
+  local -n _opts=$1
+  # LogLevel=ERROR suppresses the "Permanently added ... to known hosts" warning
+  # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
+  _opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
+    ensure_managed_key
+    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+      echo "Warning: no ssh_authorized_keys found in cloud-init.yml." >&2
+      echo "  Run 'migrant.sh pubkey' and add the output, then rebuild with" >&2
+      echo "  'migrant.sh destroy && migrant.sh up'." >&2
+    fi
+    _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
+  else
+    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+      echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
+      echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
+      exit 1
+    fi
+  fi
+}
+
 ensure_managed_key() {
   if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
     echo "Generating managed SSH key at $MANAGED_KEY_PATH..." >&2
@@ -660,36 +740,52 @@ cmd_ip() {
 
 cmd_ssh() {
   require_running
-  local user
-  user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
-  if [[ -z "$user" ]]; then
-    echo "Error: could not determine username from cloud-init.yml." >&2
+  local user ssh_opts
+  user=$(get_ssh_user)
+  build_ssh_opts ssh_opts
+  # $@ intentionally expands on the client side — these are arguments to the
+  # ssh command itself (e.g. a remote command to run), not strings to be passed
+  # through to the remote shell for expansion.
+  # shellcheck disable=SC2029
+  ssh "${ssh_opts[@]}" "${user}@$(get_vm_ip_or_die)" "$@"
+}
+
+cmd_provision() {
+  require_running
+
+  if ! command -v ansible-playbook &>/dev/null; then
+    echo "Error: ansible-playbook not found. Install Ansible to use provisioning." >&2
     exit 1
   fi
 
-  # LogLevel=ERROR suppresses the "Permanently added ... to known hosts" warning
-  # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
-  local ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-
-  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
-    ensure_managed_key
-    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
-      echo "Warning: no ssh_authorized_keys found in cloud-init.yml." >&2
-      echo "  Run 'migrant.sh pubkey' and add the output, then rebuild with" >&2
-      echo "  'migrant.sh destroy && migrant.sh up'." >&2
-    fi
-    # IdentitiesOnly=yes prevents SSH from trying keys from the agent or
-    # default identity files — only the managed migrant key is attempted.
-    ssh_opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
-  else
-    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
-      echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
-      echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
-      exit 1
-    fi
+  local playbook="$VM_DIR/playbook.yml"
+  if [[ ! -f "$playbook" ]]; then
+    echo "No playbook.yml found in $VM_DIR — nothing to provision." >&2
+    return 0
   fi
 
-  ssh "${ssh_opts[@]}" "${user}@$(get_vm_ip_or_die)" "$@"
+  local user ssh_opts
+  user=$(get_ssh_user)
+  build_ssh_opts ssh_opts
+
+  local ip
+  ip=$(get_vm_ip_or_die)
+
+  local ansible_args=(-i "${ip}," -u "$user")
+  ansible_args+=(--ssh-extra-args="${ssh_opts[*]}")
+  if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
+    ansible_args+=(--private-key "$MANAGED_KEY_PATH")
+  fi
+
+  echo "Running Ansible playbook..." >&2
+  if ANSIBLE_HOST_KEY_CHECKING=false ansible-playbook "${ansible_args[@]}" "$playbook"; then
+    echo "Ansible provisioning complete." >&2
+  else
+    echo "" >&2
+    echo "Error: Ansible provisioning failed. The VM is still running." >&2
+    echo "  Fix playbook.yml and run 'migrant.sh provision' to retry." >&2
+    exit 1
+  fi
 }
 
 cmd_status() {
@@ -737,6 +833,7 @@ case "$SUBCOMMAND" in
   status)       require_config; cmd_status ;;
   snapshot)     require_config; cmd_snapshot ;;
   reset)        require_config; cmd_reset ;;
+  provision)    require_config; cmd_provision ;;
   -h|--help|help) usage 0 ;;
   *)              usage ;;
 esac

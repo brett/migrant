@@ -1,0 +1,71 @@
+---
+- name: Provision claude agent VM
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - unzip
+        state: present
+        update_cache: true
+
+    - name: Add ~/.local/bin to PATH system-wide
+      ansible.builtin.lineinfile:
+        path: /etc/profile.d/local-bin.sh
+        line: 'export PATH="$HOME/.local/bin:$PATH"'
+        regexp: '^export PATH=.*\.local/bin'
+        create: true
+        mode: "0644"
+
+    - name: Download claude-code installer
+      ansible.builtin.get_url:
+        url: https://claude.ai/install.sh
+        dest: /tmp/claude-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install claude-code
+      ansible.builtin.command:
+        cmd: /tmp/claude-install.sh
+        creates: /home/agent/.local/bin/claude
+      become: true
+      become_user: agent
+      environment:
+        HOME: /home/agent
+
+    - name: Download uv installer
+      ansible.builtin.get_url:
+        url: https://astral.sh/uv/install.sh
+        dest: /tmp/uv-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install uv
+      ansible.builtin.command:
+        cmd: /tmp/uv-install.sh
+        creates: /usr/local/bin/uv
+      environment:
+        UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Configure bash alias claude-yolo
+      ansible.builtin.lineinfile:
+        path: /home/agent/.bash_aliases
+        line: 'alias claude-yolo="claude --dangerously-skip-permissions"'
+        regexp: '^alias claude-yolo='
+        create: true
+        mode: "0644"
+      become: true
+      become_user: agent
+
+    - name: Configure bash alias c
+      ansible.builtin.lineinfile:
+        path: /home/agent/.bash_aliases
+        line: 'alias c="cd ~/workspace && claude --dangerously-skip-permissions"'
+        regexp: '^alias c='
+        create: true
+        mode: "0644"
+      become: true
+      become_user: agent
