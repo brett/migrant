@@ -35,6 +35,13 @@ careful consideration. Key containment properties to preserve:
 - When adding a subcommand: update `usage()`, the `case` statement, and the
   README command list together
 
+## SSH is optional
+
+A user may not define `ssh_authorized_keys` in `cloud-init.yml`. New features
+should work without SSH where possible — `vm_has_ssh()` can be used to check.
+When SSH is genuinely required (as with Ansible provisioning), document that
+clearly and fail with a helpful error rather than silently misbehaving.
+
 ## How VMs are identified
 
 - libvirt domains are tagged with `--description "managed-by=migrant.sh"` at
