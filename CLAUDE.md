@@ -35,12 +35,42 @@ careful consideration. Key containment properties to preserve:
 - When adding a subcommand: update `usage()`, the `case` statement, and the
   README command list together
 
+## Provisioning architecture
+
+- **cloud-init** (`cloud-init.yml`): required — `migrant.sh up` will error
+  without it. Must define at least one user and handle virtiofs mounting.
+  Runs on first boot only, before SSH is available. Using it for additional
+  provisioning (packages, etc.) is optional — that can be left to Ansible
+  instead. cloud-init does not re-run on an existing VM, but the
+  `destroy` + `up` workflow effectively replaces it.
+- **Ansible** (`playbook.yml`): fully optional. Runs after SSH is up and can
+  be re-run at any time with `migrant.sh provision`. Use for packages, config
+  files, dotfiles, and anything that may need updating over the VM's lifetime.
+
+If a provisioning task can be deferred to Ansible, it should be — cloud-init
+is harder to iterate on since it requires a full rebuild to re-run.
+
 ## SSH is optional
 
 A user may not define `ssh_authorized_keys` in `cloud-init.yml`. New features
 should work without SSH where possible — `vm_has_ssh()` can be used to check.
 When SSH is genuinely required (as with Ansible provisioning), document that
 clearly and fail with a helpful error rather than silently misbehaving.
+
+## Migrantfile is sourced as bash
+
+`require_config` sources the Migrantfile directly into the script's shell
+process. This gives users full bash — variables, functions, conditionals — but
+also means the Migrantfile runs as the invoking user with no sandboxing. Do not
+add features that encourage putting untrusted content in a Migrantfile.
+
+## libvirt hook gotcha: never call virsh from within a hook
+
+libvirtd holds a per-domain lock when invoking hooks. Calling `virsh` against
+that domain from inside a hook will deadlock — the hook waits for libvirtd,
+which waits for the hook. The qemu hook reads
+`/etc/libvirt/qemu/{name}.xml` directly as a workaround. Any future hook code
+must follow the same pattern.
 
 ## How VMs are identified
 
