@@ -869,8 +869,6 @@ cmd_storage() {
     local virsh_output
     if virsh_output=$(virsh list --all --name 2>/dev/null); then
       virsh_queried=true
-    fi
-    if [[ "$virsh_queried" == true ]]; then
       local vname
       while IFS= read -r vname; do
         [[ -z "$vname" ]] && continue
@@ -940,9 +938,10 @@ cmd_storage() {
 
     # Collect existing files; skip if none present (e.g. VM stored elsewhere)
     local vm_files=()
-    [[ -f "$IMAGES_DIR/$disk_file" ]] && vm_files+=("$IMAGES_DIR/$disk_file")
-    [[ -f "$IMAGES_DIR/$iso_file" ]]  && vm_files+=("$IMAGES_DIR/$iso_file")
-    [[ -f "$IMAGES_DIR/$snap_file" ]] && vm_files+=("$IMAGES_DIR/$snap_file")
+    local has_disk=false has_iso=false has_snap=false
+    [[ -f "$IMAGES_DIR/$disk_file" ]] && { vm_files+=("$IMAGES_DIR/$disk_file"); has_disk=true; }
+    [[ -f "$IMAGES_DIR/$iso_file" ]]  && { vm_files+=("$IMAGES_DIR/$iso_file");  has_iso=true;  }
+    [[ -f "$IMAGES_DIR/$snap_file" ]] && { vm_files+=("$IMAGES_DIR/$snap_file"); has_snap=true; }
     [[ ${#vm_files[@]} -eq 0 ]] && continue
     (( vm_count++ )) || true
 
@@ -955,12 +954,9 @@ cmd_storage() {
     fi
 
     echo "    $label ($vm_total):"
-    [[ -f "$IMAGES_DIR/$disk_file" ]] && \
-      echo "        Disk:     $disk_file ($(image_file_size "$IMAGES_DIR/$disk_file"))"
-    [[ -f "$IMAGES_DIR/$iso_file" ]] && \
-      echo "        Seed ISO: $iso_file ($(image_file_size "$IMAGES_DIR/$iso_file"))"
-    [[ -f "$IMAGES_DIR/$snap_file" ]] && \
-      echo "        Snapshot: $snap_file ($(image_file_size "$IMAGES_DIR/$snap_file"))"
+    $has_disk && echo "        Disk:     $disk_file ($(image_file_size "$IMAGES_DIR/$disk_file"))"
+    $has_iso  && echo "        Seed ISO: $iso_file ($(image_file_size "$IMAGES_DIR/$iso_file"))"
+    $has_snap && echo "        Snapshot: $snap_file ($(image_file_size "$IMAGES_DIR/$snap_file"))"
   done
   if [[ $vm_count -eq 0 ]]; then
     echo "    (none)"
