@@ -37,18 +37,10 @@ careful consideration. Key containment properties to preserve:
 
 ## Provisioning architecture
 
-- **cloud-init** (`cloud-init.yml`): required — `migrant.sh up` will error
-  without it. Must define at least one user and handle virtiofs mounting.
-  Runs on first boot only, before SSH is available. Using it for additional
-  provisioning (packages, etc.) is optional — that can be left to Ansible
-  instead. cloud-init does not re-run on an existing VM, but the
-  `destroy` + `up` workflow effectively replaces it.
-- **Ansible** (`playbook.yml`): fully optional. Runs after SSH is up and can
-  be re-run at any time with `migrant.sh provision`. Use for packages, config
-  files, dotfiles, and anything that may need updating over the VM's lifetime.
-
-If a provisioning task can be deferred to Ansible, it should be — cloud-init
-is harder to iterate on since it requires a full rebuild to re-run.
+`cloud-init.yml` is required; `playbook.yml` is optional. cloud-init runs
+before SSH is available and cannot be re-run without a full `destroy` + `up`.
+Ansible runs after SSH is up and can be re-run at any time. Prefer Ansible for
+anything that doesn't need to happen before SSH.
 
 ## SSH is optional
 
