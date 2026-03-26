@@ -36,6 +36,26 @@
       environment:
         HOME: /home/agent
 
+    - name: Ensure ~/.claude directory exists
+      ansible.builtin.file:
+        path: /home/agent/.claude
+        state: directory
+        mode: "0700"
+      become: true
+      become_user: agent
+
+    # This is an example of how to push a Claude Code settings file from the
+    # host to the VM at provision time. If the source file does not exist on
+    # the host, the task will error but Ansible will continue regardless.
+    - name: Copy claude settings to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/settings.json
+        dest: /home/agent/.claude/settings.json
+        mode: "0600"
+      become: true
+      become_user: agent
+      ignore_errors: true # noqa: ignore-errors
+
     - name: Download uv installer
       ansible.builtin.get_url:
         url: https://astral.sh/uv/install.sh
