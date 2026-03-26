@@ -201,7 +201,7 @@ cmd_up() {
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     virsh start "$VM_NAME"
     wait_for_ip
-    if grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+    if vm_has_ssh; then
       local user ssh_opts ip
       resolve_ssh_conn user ssh_opts ip
       wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
@@ -678,6 +678,10 @@ cmd_reset() {
   cmd_up
 }
 
+vm_has_ssh() {
+  grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"
+}
+
 get_ssh_user() {
   local user
   user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
@@ -698,14 +702,14 @@ build_ssh_opts() {
   _opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
   if [[ "${MANAGED_SSH_KEY:-}" == "true" ]]; then
     ensure_managed_key
-    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+    if ! vm_has_ssh; then
       echo "Warning: no ssh_authorized_keys found in cloud-init.yml." >&2
       echo "  Run 'migrant.sh pubkey' and add the output, then rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
     fi
     _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
   else
-    if ! grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+    if ! vm_has_ssh; then
       echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
       echo "Add your public key and rebuild the VM with 'migrant.sh destroy && migrant.sh up'." >&2
       exit 1
