@@ -201,6 +201,11 @@ cmd_up() {
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     virsh start "$VM_NAME"
     wait_for_ip
+    if grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"; then
+      local user ssh_opts ip
+      resolve_ssh_conn user ssh_opts ip
+      wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
+    fi
     return
   fi
 
@@ -301,9 +306,7 @@ EOF
 
   if [[ "$from_snapshot" == false ]] && [[ -f "$VM_DIR/playbook.yml" ]]; then
     local user ssh_opts ip
-    user=$(get_ssh_user)
-    build_ssh_opts ssh_opts
-    ip=$(get_vm_ip_or_die)
+    resolve_ssh_conn user ssh_opts ip
 
     wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
 
@@ -710,6 +713,15 @@ build_ssh_opts() {
   fi
 }
 
+# Populate three caller variables with SSH connection details.
+# Usage: resolve_ssh_conn user_var opts_var ip_var
+resolve_ssh_conn() {
+  local -n _rsc_user=$1 _rsc_ip=$3
+  _rsc_user=$(get_ssh_user)
+  build_ssh_opts "$2"
+  _rsc_ip=$(get_vm_ip_or_die)
+}
+
 ensure_managed_key() {
   if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
     echo "Generating managed SSH key at $MANAGED_KEY_PATH..." >&2
@@ -740,14 +752,13 @@ cmd_ip() {
 
 cmd_ssh() {
   require_running
-  local user ssh_opts
-  user=$(get_ssh_user)
-  build_ssh_opts ssh_opts
+  local user ssh_opts ip
+  resolve_ssh_conn user ssh_opts ip
   # $@ intentionally expands on the client side — these are arguments to the
   # ssh command itself (e.g. a remote command to run), not strings to be passed
   # through to the remote shell for expansion.
   # shellcheck disable=SC2029
-  ssh "${ssh_opts[@]}" "${user}@$(get_vm_ip_or_die)" "$@"
+  ssh "${ssh_opts[@]}" "${user}@${ip}" "$@"
 }
 
 cmd_provision() {
@@ -764,12 +775,8 @@ cmd_provision() {
     return 0
   fi
 
-  local user ssh_opts
-  user=$(get_ssh_user)
-  build_ssh_opts ssh_opts
-
-  local ip
-  ip=$(get_vm_ip_or_die)
+  local user ssh_opts ip
+  resolve_ssh_conn user ssh_opts ip
 
   local ansible_args=(-i "${ip}," -u "$user")
   ansible_args+=(--ssh-extra-args="${ssh_opts[*]}")
