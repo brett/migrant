@@ -47,6 +47,8 @@ Commands:
   console             Open a serial console session (exit with Ctrl+])
   ip                  Print the VM's IP address
   pubkey              Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
+  storage             List IMAGES_DIR contents grouped by base images and VMs,
+                      with file sizes; works without a Migrantfile
 
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
@@ -832,6 +834,151 @@ cmd_status() {
   fi
 }
 
+# Print the human-readable disk usage of a single file.
+image_file_size() {
+  du -sh "$1" 2>/dev/null | cut -f1 || echo "?"
+}
+
+cmd_storage() {
+  if [[ ! -d "$IMAGES_DIR" ]]; then
+    echo "Directory: $IMAGES_DIR (not found)"
+    return
+  fi
+
+  local total_size
+  total_size=$(du -sh "$IMAGES_DIR" 2>/dev/null | cut -f1 || echo "?")
+  echo "Directory: $IMAGES_DIR ($total_size)"
+
+  # Collect basenames of all regular files in IMAGES_DIR, sorted
+  local all_files=()
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && all_files+=("$f")
+  done < <(find "$IMAGES_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort)
+
+  # --- Discover migrant-managed VM names ---
+
+  # libvirt_vm_set: VMs currently defined in libvirt with managed-by=migrant.sh.
+  # migrant_vm_set: superset — also includes VMs found only via orphaned files.
+  # virsh_queried: only annotate '(destroyed)' when we successfully asked libvirt,
+  # to avoid falsely marking all VMs as destroyed when libvirtd is not running.
+  local -A libvirt_vm_set=()
+  local -A migrant_vm_set=()
+  local virsh_queried=false
+
+  if command -v virsh &>/dev/null; then
+    local virsh_output
+    if virsh_output=$(virsh list --all --name 2>/dev/null); then
+      virsh_queried=true
+    fi
+    if [[ "$virsh_queried" == true ]]; then
+      local vname
+      while IFS= read -r vname; do
+        [[ -z "$vname" ]] && continue
+        if virsh desc "$vname" 2>/dev/null | grep -q "managed-by=migrant.sh"; then
+          libvirt_vm_set["$vname"]=1
+          migrant_vm_set["$vname"]=1
+        fi
+      done <<< "$virsh_output"
+    fi
+  fi
+
+  # From seed ISOs: *-seed.iso naming is unique to migrant.sh; catches VMs
+  # that no longer exist in libvirt (e.g. after 'destroy' with leftover files)
+  local f
+  for f in "${all_files[@]+"${all_files[@]}"}"; do
+    if [[ "$f" == *-seed.iso ]]; then
+      migrant_vm_set["${f%-seed.iso}"]=1
+    fi
+  done
+
+  local migrant_vms=()
+  if [[ ${#migrant_vm_set[@]} -gt 0 ]]; then
+    while IFS= read -r vname; do
+      [[ -n "$vname" ]] && migrant_vms+=("$vname")
+    done < <(printf '%s\n' "${!migrant_vm_set[@]}" | sort)
+  fi
+
+  # Mark all VM-associated files as categorized
+  local -A categorized=()
+  local vm disk_file iso_file snap_file
+  for vm in "${migrant_vms[@]+"${migrant_vms[@]}"}"; do
+    disk_file="${vm}.qcow2"
+    iso_file="${vm}-seed.iso"
+    snap_file="${vm}-snapshot.qcow2"
+    [[ -f "$IMAGES_DIR/$disk_file" ]] && categorized["$disk_file"]=1
+    [[ -f "$IMAGES_DIR/$iso_file" ]]  && categorized["$iso_file"]=1
+    [[ -f "$IMAGES_DIR/$snap_file" ]] && categorized["$snap_file"]=1
+  done
+
+  # Base images: .img files (downloaded cloud images) not belonging to a VM
+  local base_images=()
+  for f in "${all_files[@]+"${all_files[@]}"}"; do
+    [[ -n "${categorized[$f]:-}" ]] && continue
+    if [[ "$f" == *.img ]]; then
+      base_images+=("$f")
+      categorized["$f"]=1
+    fi
+  done
+
+  # --- Output ---
+
+  echo "Base Images:"
+  if [[ ${#base_images[@]} -eq 0 ]]; then
+    echo "    (none)"
+  else
+    for f in "${base_images[@]}"; do
+      echo "    $f ($(image_file_size "$IMAGES_DIR/$f"))"
+    done
+  fi
+
+  echo "VMs:"
+  local vm_count=0
+  for vm in "${migrant_vms[@]+"${migrant_vms[@]}"}"; do
+    disk_file="${vm}.qcow2"
+    iso_file="${vm}-seed.iso"
+    snap_file="${vm}-snapshot.qcow2"
+
+    # Collect existing files; skip if none present (e.g. VM stored elsewhere)
+    local vm_files=()
+    [[ -f "$IMAGES_DIR/$disk_file" ]] && vm_files+=("$IMAGES_DIR/$disk_file")
+    [[ -f "$IMAGES_DIR/$iso_file" ]]  && vm_files+=("$IMAGES_DIR/$iso_file")
+    [[ -f "$IMAGES_DIR/$snap_file" ]] && vm_files+=("$IMAGES_DIR/$snap_file")
+    [[ ${#vm_files[@]} -eq 0 ]] && continue
+    (( vm_count++ )) || true
+
+    local vm_total
+    vm_total=$(du -sch "${vm_files[@]}" 2>/dev/null | tail -1 | cut -f1 || echo "?")
+
+    local label="$vm"
+    if [[ "$virsh_queried" == true && -z "${libvirt_vm_set[$vm]:-}" ]]; then
+      label="$vm (destroyed)"
+    fi
+
+    echo "    $label ($vm_total):"
+    [[ -f "$IMAGES_DIR/$disk_file" ]] && \
+      echo "        Disk:     $disk_file ($(image_file_size "$IMAGES_DIR/$disk_file"))"
+    [[ -f "$IMAGES_DIR/$iso_file" ]] && \
+      echo "        Seed ISO: $iso_file ($(image_file_size "$IMAGES_DIR/$iso_file"))"
+    [[ -f "$IMAGES_DIR/$snap_file" ]] && \
+      echo "        Snapshot: $snap_file ($(image_file_size "$IMAGES_DIR/$snap_file"))"
+  done
+  if [[ $vm_count -eq 0 ]]; then
+    echo "    (none)"
+  fi
+
+  # Other: files not matched by any category above
+  local other_files=()
+  for f in "${all_files[@]+"${all_files[@]}"}"; do
+    [[ -z "${categorized[$f]:-}" ]] && other_files+=("$f")
+  done
+  if [[ ${#other_files[@]} -gt 0 ]]; then
+    echo "Other:"
+    for f in "${other_files[@]}"; do
+      echo "    $f ($(image_file_size "$IMAGES_DIR/$f"))"
+    done
+  fi
+}
+
 case "$SUBCOMMAND" in
   setup)        cmd_setup ;;
   up)           require_config; cmd_up ;;
@@ -845,6 +992,7 @@ case "$SUBCOMMAND" in
   snapshot)     require_config; cmd_snapshot ;;
   reset)        require_config; cmd_reset ;;
   provision)    require_config; cmd_provision ;;
+  storage)      cmd_storage ;;
   -h|--help|help) usage 0 ;;
   *)              usage ;;
 esac

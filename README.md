@@ -251,6 +251,7 @@ migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive sh
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
 migrant.sh pubkey             # Print the managed SSH public key (requires MANAGED_SSH_KEY=true)
+migrant.sh storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
 ```
 
 ### Typical workflow
@@ -414,6 +415,38 @@ migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log
 
 `migrant.sh ip` prints the VM's IP address, which is useful for
 scripting or for connecting with tools other than SSH.
+
+### storage
+
+`migrant.sh storage` can be run from any directory, with or without a
+`Migrantfile`. It lists everything in `IMAGES_DIR`, grouped by category:
+
+```
+$ migrant.sh storage
+Directory: /var/lib/libvirt/images (4.7G)
+Base Images:
+    ubuntu-25.10-server-cloudimg-amd64.img (785M)
+VMs:
+    claude (4.1G):
+        Disk:     claude.qcow2 (1.1G)
+        Seed ISO: claude-seed.iso (372K)
+        Snapshot: claude-snapshot.qcow2 (3.0G)
+    old-vm (900M) (destroyed):
+        Disk:     old-vm.qcow2 (528M)
+        Seed ISO: old-vm-seed.iso (372K)
+Other:
+    someone-elses-vm.qcow2 (2.0G)
+```
+
+`(destroyed)` means the VM's files are still on disk but the VM no longer
+exists in libvirt. `migrant.sh destroy` removes both the libvirt domain and
+its image files, so this should not normally occur — it typically means the
+VM was undefined directly with `virsh undefine`, or the files were left
+behind after some other manual intervention. They are safe to remove.
+
+Files in the **Other** category are not managed by migrant.sh — they may
+belong to VMs defined outside of migrant.sh, or be leftover files from
+other tools.
 
 ---
 
