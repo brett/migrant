@@ -280,8 +280,17 @@ EOF
     extra_args+=(--memorybacking "source.type=memfd,access.mode=shared")
   fi
 
+  local reset_macs=()
+  read -r -a reset_macs <<< "${_MIGRANT_RESET_MACS:-}"
+  local nic_index=0
   for nic in "${NETWORKS[@]+"${NETWORKS[@]}"}"; do
-    extra_args+=(--network "$nic")
+    local mac="${reset_macs[$nic_index]:-}"
+    if [[ -n "$mac" ]]; then
+      extra_args+=(--network "${nic},mac=${mac}")
+    else
+      extra_args+=(--network "$nic")
+    fi
+    (( nic_index++ )) || true
   done
 
   local vm_description="managed-by=migrant.sh"
@@ -675,9 +684,18 @@ cmd_reset() {
     exit 1
   fi
 
+  # Preserve MAC addresses so the rebuilt VM gets the same NICs as the
+  # snapshot. cloud-init writes netplan rules that match by MAC address; a
+  # new random MAC would cause those rules to match nothing and leave the VM
+  # with no network.
+  local macs=()
+  while IFS= read -r mac; do
+    [[ -n "$mac" ]] && macs+=("$mac")
+  done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
+
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
-  cmd_up
+  _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
 }
 
 vm_has_ssh() {
