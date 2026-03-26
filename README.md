@@ -75,12 +75,13 @@ On first `migrant.sh up`, the script:
 4. Calls `virt-install` to define and start the VM
 5. cloud-init runs inside the VM on first boot to create users, configure
    SSH keys, and mount shared folders
-6. If `playbook.yml` is present, waits for cloud-init to finish, then runs
-   `ansible-playbook` to complete provisioning; `up` blocks until done and
-   the VM is fully ready when it returns
+6. If `playbook.yml` is present, waits for SSH to become available, waits
+   for cloud-init to finish, then runs `ansible-playbook` to complete
+   provisioning; `up` blocks until done and the VM is fully ready when it
+   returns
 
 On subsequent `migrant.sh up` calls, the VM already exists so the script
-simply starts it with `virsh start`.
+starts it with `virsh start`, then waits for SSH if configured.
 
 Destroying the VM with `migrant.sh destroy` removes the libvirt domain
 and deletes the VM's disk, seed ISO, and any snapshot, leaving the
@@ -241,7 +242,7 @@ Run commands from the project directory containing `Migrantfile`, or set
 
 ```bash
 migrant.sh setup              # One-time host setup: configures libvirt networking and installs firewall hooks
-migrant.sh up                 # Create or start the VM; runs Ansible on first create; waits until ready
+migrant.sh up                 # Create the VM if it does not exist, or start it if stopped; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready
 migrant.sh halt               # Gracefully shut down the VM
 migrant.sh destroy            # Stop and permanently delete the VM, its disk, and any snapshots
 migrant.sh provision          # Run the Ansible playbook (playbook.yml) against the running VM
@@ -316,14 +317,22 @@ resolved relative to the `Migrantfile`'s directory, regardless of where
 
 ### Waiting for the VM to be ready
 
-`migrant.sh up` blocks until the VM obtains a DHCP lease rather than
-returning immediately after the VM starts. If the VM stops running
-while waiting (e.g. due to a crash or misconfiguration), `up` exits
-with an error rather than waiting indefinitely.
+`migrant.sh up` always blocks until the VM obtains a DHCP lease. If the
+VM stops running while waiting (e.g. due to a crash or misconfiguration),
+`up` exits with an error rather than waiting indefinitely.
 
-Note that a DHCP lease signals that the network stack is up, not that
-cloud-init has finished provisioning. On a first boot, packages may
-still be installing when `up` returns.
+If SSH is configured in `cloud-init.yml` (`ssh_authorized_keys` present),
+`up` additionally waits until SSH is available before returning. This
+applies both when starting a stopped VM and when creating one with
+`playbook.yml`.
+
+If `playbook.yml` is present, `up` goes further still: it waits for
+cloud-init to finish and then runs Ansible, returning only when the VM
+is fully provisioned.
+
+Without `playbook.yml`, the IP and SSH waits are the only signals that
+the VM is ready. On a first boot, packages may still be installing in
+the background when `up` returns.
 
 ### Serial console vs SSH
 
