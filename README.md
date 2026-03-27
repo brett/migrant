@@ -111,7 +111,7 @@ Intel VT-x / AMD-V (sometimes labelled "Virtualization Technology" or
 ### 1. Install dependencies
 
 ```bash
-sudo pacman -S qemu-base libvirt virt-install dnsmasq xorriso
+sudo pacman -S qemu-base libvirt virt-install dnsmasq libisoburn
 ```
 
 `dnsmasq` must be installed so libvirt can use its binary for guest
