@@ -1006,11 +1006,11 @@ cmd_storage() {
     [[ -f "$IMAGES_DIR/$snap_file" ]] && categorized["$snap_file"]=1
   done
 
-  # Base images: .img files (downloaded cloud images) not belonging to a VM
+  # Base images: .img or .qcow2 files (downloaded cloud images) not belonging to a VM
   local base_images=()
   for f in "${all_files[@]+"${all_files[@]}"}"; do
     [[ -n "${categorized[$f]:-}" ]] && continue
-    if [[ "$f" == *.img ]]; then
+    if [[ "$f" == *.img || "$f" == *.qcow2 ]]; then
       base_images+=("$f")
       categorized["$f"]=1
     fi
