@@ -80,42 +80,14 @@
       environment:
         UV_INSTALL_DIR: /usr/local/bin
 
-    - name: Configure bash alias c
-      ansible.builtin.lineinfile:
-        path: /home/agent/.bash_aliases
-        line: 'alias c="cd ~/workspace && claude --dangerously-skip-permissions"'
-        regexp: '^alias c='
-        create: true
-        mode: "0644"
-      become: true
-      become_user: agent
-
-    - name: Configure bash alias cc
-      ansible.builtin.lineinfile:
-        path: /home/agent/.bash_aliases
-        line: 'alias cc="claude --dangerously-skip-permissions"'
-        regexp: '^alias cc='
-        create: true
-        mode: "0644"
-      become: true
-      become_user: agent
-
-    - name: Configure bash alias ccc
-      ansible.builtin.lineinfile:
-        path: /home/agent/.bash_aliases
-        line: 'alias ccc="claude --dangerously-skip-permissions --continue"'
-        regexp: '^alias ccc='
-        create: true
-        mode: "0644"
-      become: true
-      become_user: agent
-
-    - name: Configure bash alias ccr
-      ansible.builtin.lineinfile:
-        path: /home/agent/.bash_aliases
-        line: 'alias ccr="claude --dangerously-skip-permissions --resume"'
-        regexp: '^alias ccr='
-        create: true
+    - name: Copy bash aliases to VM
+      ansible.builtin.copy:
+        content: |
+          alias c="cd ~/workspace && claude --dangerously-skip-permissions"
+          alias cc="claude --dangerously-skip-permissions"
+          alias ccc="claude --dangerously-skip-permissions --continue"
+          alias ccr="claude --dangerously-skip-permissions --resume"
+        dest: /home/agent/.bash_aliases
         mode: "0644"
       become: true
       become_user: agent
