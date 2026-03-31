@@ -57,6 +57,15 @@
       become_user: agent
       ignore_errors: true # noqa: ignore-errors
 
+    - name: Copy global CLAUDE.md to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/CLAUDE.md
+        dest: /home/agent/.claude/CLAUDE.md
+        mode: "0600"
+      become: true
+      become_user: agent
+      ignore_errors: true # noqa: ignore-errors
+
     - name: Download uv installer
       ansible.builtin.get_url:
         url: https://astral.sh/uv/install.sh
