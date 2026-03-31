@@ -29,6 +29,8 @@ runcmd:
 #   - chown -R agent:agent /home/agent
 #   - echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/local-bin.sh
 #   - sudo -u agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-#   - sudo -u agent bash -c 'echo "alias claude-yolo=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
 #   - sudo -u agent bash -c 'echo "alias c=\"cd ~/workspace && claude --dangerously-skip-permissions\"" >> ~/.bash_aliases'
+#   - sudo -u agent bash -c 'echo "alias cc=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
+#   - sudo -u agent bash -c 'echo "alias ccc=\"claude --dangerously-skip-permissions --continue\"" > ~/.bash_aliases'
+#   - sudo -u agent bash -c 'echo "alias ccr=\"claude --dangerously-skip-permissions --resume\"" > ~/.bash_aliases'
 #   - curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
