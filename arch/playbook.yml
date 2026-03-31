@@ -1,0 +1,35 @@
+---
+- name: Provision arch VM
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install base-devel and git
+      # base-devel is the Arch equivalent of Debian's build-essential: it
+      # provides gcc, make, binutils, and the other tools required to build
+      # packages from source (including AUR packages via makepkg).
+      community.general.pacman:
+        name:
+          - base-devel
+          - git
+        state: present
+        update_cache: true
+        extra_args: --needed
+
+    - name: Clone yay-bin from AUR
+      ansible.builtin.git:
+        repo: https://aur.archlinux.org/yay-bin.git
+        dest: /home/migrant/yay-build
+        version: master
+      become: true
+      become_user: migrant
+
+    - name: Build and install yay
+      # makepkg must run as a non-root user; the migrant user's passwordless
+      # sudo allows the install step (-i) to escalate without a prompt.
+      ansible.builtin.command:
+        cmd: makepkg -si --noconfirm
+        chdir: /home/migrant/yay-build
+        creates: /usr/bin/yay
+      become: true
+      become_user: migrant

@@ -1,0 +1,29 @@
+# VM identity
+VM_NAME="arch"
+# OS variant hint passed to virt-install for guest tuning. Run
+# 'osinfo-query os | grep arch' to find the right value if this changes.
+OS_VARIANT="archlinux"
+
+# Resources
+RAM_MB=4096
+VCPUS=2
+DISK_GB=20
+
+# Base image — official Arch Linux cloud image
+IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+
+# Shared folders — format is "host_absolute_or_relative_path:guest_tag"
+# The guest_tag is what you mount inside the VM, e.g.:
+#   sudo mount -t virtiofs workspace /home/migrant/workspace
+SHARED_FOLDERS=(
+  "workspace:workspace"
+)
+
+# Network — one entry per NIC, using virt-install --network syntax
+NETWORKS=(
+  "network=default"
+)
+
+# Block the VM from initiating connections to the host and from reaching other
+# hosts on the local network. Requires 'migrant.sh setup' to have been run.
+NETWORK_ISOLATION=true
