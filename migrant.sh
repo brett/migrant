@@ -185,6 +185,13 @@ cmd_up() {
 
   local base_image="${IMAGE_URL##*/}"
 
+  # Start the default network if it exists but is not active.
+  if virsh net-info default &>/dev/null \
+      && ! virsh net-list --name | grep -qw "^default$"; then
+    echo "Starting default libvirt network..."
+    virsh net-start default
+  fi
+
   if virsh dominfo "$VM_NAME" &>/dev/null; then
     local current_base
     current_base=$(qemu-img info "$DISK_PATH" 2>/dev/null \
@@ -599,13 +606,9 @@ MIGRANT_NETWORK_EOF
   echo ""
   if virsh net-info default &>/dev/null; then
     echo "Default libvirt network already exists."
-    if ! virsh net-list | grep -qw "default"; then
-      echo "  Starting default network..."
-      virsh net-start default
-    fi
-    if ! virsh net-info default | grep -q "Autostart:.*yes"; then
-      virsh net-autostart default
-      echo "  Autostart enabled."
+    if virsh net-info default | grep -q "Autostart:.*yes"; then
+      virsh net-autostart default --disable
+      echo "  Autostart disabled — 'migrant.sh up' will start it on demand."
     fi
   else
     echo "Creating default libvirt network..."
@@ -623,9 +626,7 @@ MIGRANT_NETWORK_EOF
 </network>
 NET_EOF
     virsh net-define "$net_xml"
-    virsh net-autostart default
-    virsh net-start default
-    echo "  Default network created and started."
+    echo "  Default network defined."
   fi
 
   # --- images directory permissions ---
@@ -670,6 +671,18 @@ cmd_halt() {
   fi
   virsh shutdown "$VM_NAME"
   echo "VM '$VM_NAME' is shutting down."
+
+  # Hint to stop the network if no other VMs are running.
+  # $VM_NAME itself is still listed as running until the OS powers off,
+  # so exclude it from the check.
+  local other_running
+  other_running=$(virsh list --state-running --name \
+    | grep -v "^${VM_NAME}$" | grep -c '[^[:space:]]' || true)
+  if (( other_running == 0 )) \
+      && virsh net-list --name 2>/dev/null | grep -qw "^default$"; then
+    echo "To stop the libvirt network when done:"
+    echo "  virsh --connect qemu:///system net-destroy default"
+  fi
 }
 
 cmd_destroy() {
