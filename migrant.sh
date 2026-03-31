@@ -34,7 +34,8 @@ Commands:
                       installs firewall hooks
   up                  Create the VM if it does not exist, or start it if stopped;
                       runs Ansible provisioning (if playbook.yml exists) on first
-                      create; waits until the VM is fully ready
+                      create; waits until the VM is fully ready; connects
+                      automatically if AUTOCONNECT is set in the Migrantfile
   halt                Gracefully shut down the VM
   destroy             Stop and permanently delete the VM, its disk, and any snapshots
   provision           Run the Ansible playbook (playbook.yml) against the running VM
@@ -201,17 +202,23 @@ cmd_up() {
     state=$(virsh domstate "$VM_NAME")
     if [[ "$state" == "running" ]]; then
       echo "VM '$VM_NAME' is already running."
+      do_autoconnect
       return
     fi
     check_managed_key_match start
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     virsh start "$VM_NAME"
+    if [[ "${AUTOCONNECT:-}" == "console" ]]; then
+      do_autoconnect
+      return
+    fi
     wait_for_ip
-    if vm_has_ssh; then
+    if vm_has_ssh && [[ "${AUTOCONNECT:-}" != "ssh" ]]; then
       local user ssh_opts ip
       resolve_ssh_conn user ssh_opts ip
       wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
     fi
+    do_autoconnect
     return
   fi
 
@@ -324,6 +331,14 @@ EOF
     --boot hd \
     "${extra_args[@]}"
 
+  # AUTOCONNECT=console with no provisioning needed: attach immediately after
+  # the VM starts, letting the user watch the boot. Skip wait_for_ip entirely.
+  if [[ "${AUTOCONNECT:-}" == "console" ]] \
+      && { [[ "$from_snapshot" == true ]] || [[ ! -f "$VM_DIR/playbook.yml" ]]; }; then
+    do_autoconnect
+    return
+  fi
+
   wait_for_ip
 
   if [[ "$from_snapshot" == false ]] && [[ -f "$VM_DIR/playbook.yml" ]]; then
@@ -349,6 +364,8 @@ EOF
     echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
     echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
   fi
+
+  do_autoconnect
 }
 
 install_hook() {
@@ -847,6 +864,30 @@ cmd_pubkey() {
 cmd_console() {
   require_running
   virsh console "$VM_NAME"
+}
+
+# Called at the end of cmd_up to connect to the VM when AUTOCONNECT is set.
+# For AUTOCONNECT=ssh, waits for SSH if not already ready, then connects.
+# For AUTOCONNECT=console, attaches the serial console immediately.
+do_autoconnect() {
+  case "${AUTOCONNECT:-}" in
+    ssh)
+      if ! vm_has_ssh; then
+        echo "Note: AUTOCONNECT=ssh is set but no ssh_authorized_keys found in cloud-init.yml — skipping autoconnect." >&2
+        return
+      fi
+      local user ssh_opts ip
+      resolve_ssh_conn user ssh_opts ip
+      wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
+      # SC2029: user@ip intentionally expands on the client side.
+      # shellcheck disable=SC2029
+      ssh "${ssh_opts[@]}" "${user}@${ip}"
+      ;;
+    console)
+      echo "Attaching console (exit with Ctrl+])..." >&2
+      virsh console "$VM_NAME"
+      ;;
+  esac
 }
 
 cmd_ip() {

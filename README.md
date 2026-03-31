@@ -242,7 +242,7 @@ Run commands from the project directory containing `Migrantfile`, or set
 
 ```bash
 migrant.sh setup              # One-time host setup: configures libvirt networking and installs firewall hooks
-migrant.sh up                 # Create the VM if it does not exist, or start it if stopped; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready
+migrant.sh up                 # Create the VM if it does not exist, or start it if stopped; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
 migrant.sh halt               # Gracefully shut down the VM
 migrant.sh destroy            # Stop and permanently delete the VM, its disk, and any snapshots
 migrant.sh provision          # Run the Ansible playbook (playbook.yml) against the running VM
@@ -317,8 +317,10 @@ resolved relative to the `Migrantfile`'s directory, regardless of where
 
 ### Waiting for the VM to be ready
 
-`migrant.sh up` always blocks until the VM obtains a DHCP lease. If the
-VM stops running while waiting (e.g. due to a crash or misconfiguration),
+`migrant.sh up` blocks until the VM obtains a DHCP lease (unless
+`AUTOCONNECT=console` is set and no `playbook.yml` is present, in which
+case it attaches the console immediately after the VM starts). If the VM
+stops running while waiting (e.g. due to a crash or misconfiguration),
 `up` exits with an error rather than waiting indefinitely.
 
 If SSH is configured in `cloud-init.yml` (`ssh_authorized_keys` present),
@@ -333,6 +335,19 @@ is fully provisioned.
 Without `playbook.yml`, the IP and SSH waits are the only signals that
 the VM is ready. On a first boot, packages may still be installing in
 the background when `up` returns.
+
+Setting `AUTOCONNECT` in the Migrantfile causes `up` to connect
+automatically once the VM is ready, without needing a separate
+`migrant.sh ssh` or `migrant.sh console` invocation:
+
+```bash
+AUTOCONNECT=ssh      # connect via SSH after up completes
+AUTOCONNECT=console  # attach serial console immediately after the VM starts
+```
+
+`AUTOCONNECT=console` skips the IP and SSH waits and attaches as soon
+as the VM starts, so the boot output is visible. If `playbook.yml` is
+present, provisioning runs first and the console attaches afterward.
 
 ### Serial console vs SSH
 

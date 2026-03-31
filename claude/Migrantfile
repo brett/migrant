@@ -29,3 +29,6 @@ NETWORKS=(
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true
 
+# Optional: automatically connect after 'migrant.sh up' finishes.
+# Unset by default. Set to "ssh" or "console" to enable.
+AUTOCONNECT=ssh
