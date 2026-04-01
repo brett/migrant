@@ -252,12 +252,14 @@ cmd_up() {
 
   local base_image="${IMAGE_URL##*/}"
 
-  # Start the default network if it exists but is not active.
-  if virsh net-info default &>/dev/null \
-      && ! virsh net-list --name | grep -qw "^default$"; then
-    echo "Starting default libvirt network..."
-    virsh net-start default
-  fi
+  # Start any configured networks that exist but are not active.
+  for _net in "${LIBVIRT_NETWORKS[@]+"${LIBVIRT_NETWORKS[@]}"}"; do
+    if virsh net-info "$_net" &>/dev/null \
+        && ! virsh net-list --name | grep -qx "$_net"; then
+      echo "Starting libvirt network '$_net'..."
+      virsh net-start "$_net"
+    fi
+  done
 
   if virsh dominfo "$VM_NAME" &>/dev/null; then
     local current_base
