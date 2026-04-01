@@ -104,13 +104,13 @@ SHARED_FOLDER_SIZE_GB=10
 
 ### 1. `usage()`
 
-Add `mount` and `unmount` to the usage string:
+Add `mount` and `unmount` entries to the usage heredoc (descriptions must match the
+README word-for-word, per CLAUDE.md). Insert after the `status` entry:
 
-```bash
-usage() {
-  echo "Usage: migrant.sh <setup|up|halt|destroy|console|ssh|ip|status|mount|unmount>" >&2
-  exit 1
-}
+```
+  mount               Mount the shared folder loop image for host-side access;
+                      creates the image if it does not exist
+  unmount             Unmount the shared folder loop image
 ```
 
 ### 2. `cmd_up` — create image if absent
@@ -129,6 +129,9 @@ In the shared folder loop inside `cmd_up`, after the existing `mkdir -p "$host_p
 for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
   local host_path="${shared_folder%%:*}"
   local guest_tag="${shared_folder##*:}"
+  # Relative paths are resolved relative to the VM directory, matching the
+  # existing SHARED_FOLDERS handling already in cmd_up.
+  [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
   local img_path="${host_path%/}.img"
   local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
 
@@ -163,16 +166,17 @@ printed so the user knows it persists:
 
 ```bash
 cmd_destroy() {
-  local disk_path="/var/lib/libvirt/images/${VM_NAME}.qcow2"
-  local seed_iso="/var/lib/libvirt/images/${VM_NAME}-seed.iso"
-  virsh destroy "$VM_NAME" 2>/dev/null || true
-  virsh undefine "$VM_NAME" --remove-all-storage 2>/dev/null || true
-  rm -f "$disk_path" "$seed_iso"
+  if ! virsh dominfo "$VM_NAME" &>/dev/null; then
+    echo "VM '$VM_NAME' does not exist."
+    return
+  fi
+  teardown_vm
   echo "VM '$VM_NAME' destroyed."
 
   # Print paths of any loop images that were preserved
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
     local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
     local img_path="${host_path%/}.img"
     if [[ -f "$img_path" ]]; then
       echo "Shared folder image preserved at: $img_path"
@@ -181,6 +185,11 @@ cmd_destroy() {
   done
 }
 ```
+
+The VM files are deleted by `teardown_vm` (the shared helper already used by
+`cmd_destroy` and `cmd_reset`); no need to inline `virsh destroy` / `rm` here.
+The QEMU hook fires `release` during `teardown_vm`, which unmounts the image
+automatically before the loop above runs.
 
 ### 4. `cmd_mount` (new subcommand)
 
@@ -292,35 +301,47 @@ allowed to propagate. The user must close any open files and retry.
 
 ### 6. Dispatch table
 
+Add `mount` and `unmount` to the existing `case` statement:
+
 ```bash
 case "$SUBCOMMAND" in
-  setup)   cmd_setup ;;
-  up)      require_config; cmd_up ;;
-  halt)    require_config; cmd_halt ;;
-  destroy) require_config; cmd_destroy ;;
-  console) require_config; cmd_console ;;
-  ssh)     require_config; cmd_ssh ;;
-  ip)      require_config; cmd_ip ;;
-  status)  require_config; cmd_status ;;
-  mount)   require_config; cmd_mount ;;
-  unmount) require_config; cmd_unmount ;;
-  *)       usage ;;
+  setup)            cmd_setup ;;
+  up)               require_config; cmd_up ;;
+  halt)             require_config; cmd_halt ;;
+  destroy)          require_config; cmd_destroy ;;
+  console)          require_config; cmd_console ;;
+  ssh)              require_config; cmd_ssh "${@:2}" ;;
+  pubkey)           require_config; cmd_pubkey ;;
+  ip)               require_config; cmd_ip ;;
+  snapshot)         require_config; cmd_snapshot ;;
+  reset)            require_config; cmd_reset ;;
+  provision)        require_config; cmd_provision ;;
+  storage)          cmd_storage ;;
+  mount)            require_config; cmd_mount ;;
+  unmount)          require_config; cmd_unmount ;;
+  -h|--help|help)   usage 0 ;;
+  *)                usage ;;
 esac
 ```
 
 
 ## Changes to the QEMU hook (via `cmd_setup`)
 
-### Restructuring the hook for two concerns
+### A separate hook file, not a restructured one
 
-The current hook exits early if `network-isolation=true` is absent. The new shared
-folder logic must run for **all** managed VMs, not just isolated ones. The hook is
-restructured into two independent sections: shared folder mounts (always runs) and
-network isolation firewall rules (guarded by the `network-isolation` flag).
+The script now installs hooks into subdirectories (`qemu.d/`, `network.d/`) rather
+than single files. libvirtd calls every executable in `qemu.d/` in order, so the
+shared-folder logic can live in its own file — **`/etc/libvirt/hooks/qemu.d/migrant-loop`**
+— leaving the existing `qemu.d/migrant` (network isolation) completely untouched.
 
-### New hook content
+The new hook has no network-isolation guard at all: it only checks
+`managed-by=migrant.sh` and handles `prepare`/`release` for all managed VMs.
 
-The full hook heredoc written by `cmd_setup`:
+`cmd_setup` gains a third hook installation block, using the same
+compare-and-reinstall pattern already used for `qemu.d/migrant` and
+`network.d/migrant`.
+
+### New hook file: `qemu.d/migrant-loop`
 
 ```bash
 #!/bin/bash
@@ -329,19 +350,11 @@ The full hook heredoc written by `cmd_setup`:
 VM_NAME="$1"
 OPERATION="$2"
 
-# Read the domain XML directly rather than via virsh — hooks are invoked
-# synchronously while libvirtd holds the per-domain lock, so calling virsh
-# against the same domain from within a hook would deadlock.
+# Check the domain description from the persistent XML file rather than via
+# virsh: hooks are invoked synchronously while libvirtd holds the per-domain
+# lock, so calling virsh against the same domain from within a hook deadlocks.
 local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
 grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
-
-has_network_isolation=false
-grep -q "network-isolation=true" "$local_xml" 2>/dev/null \
-  && has_network_isolation=true
-
-# ---------------------------------------------------------------------------
-# Shared folder loop image — mount on prepare, unmount on release
-# ---------------------------------------------------------------------------
 
 # Extract the source directory for each virtiofs filesystem from the domain XML.
 # python3 is used for robust XML parsing; it is available on all target systems.
@@ -390,81 +403,9 @@ unmount_shared_folders() {
   done < <(virtiofs_sources)
 }
 
-# ---------------------------------------------------------------------------
-# Network isolation firewall rules
-# ---------------------------------------------------------------------------
-
-apply_rules() {
-  local vm="$1"
-
-  # Locate the tap interface via /proc rather than virsh (deadlock avoidance).
-  local iface=""
-  local qemu_pid
-  qemu_pid=$(pgrep -f -- "guest=${vm}," 2>/dev/null | head -n1)
-  if [[ -n "$qemu_pid" ]]; then
-    for fd in /proc/"${qemu_pid}"/fd/*; do
-      [[ "$(readlink "$fd" 2>/dev/null)" == "/dev/net/tun" ]] || continue
-      local candidate
-      candidate=$(awk '/^iff:/{print $2}' \
-        "/proc/${qemu_pid}/fdinfo/$(basename "$fd")" 2>/dev/null)
-      if [[ -n "$candidate" ]]; then
-        iface="$candidate"
-        break
-      fi
-    done
-  fi
-
-  if [[ -z "$iface" ]]; then
-    echo "migrant: no tap interface found for $vm" >&2
-    return 1
-  fi
-
-  mkdir -p /run/migrant
-  echo "$iface" > "/run/migrant/${vm}.iface"
-
-  iptables -N "MIGRANT_${vm}" 2>/dev/null || iptables -F "MIGRANT_${vm}"
-  iptables -A "MIGRANT_${vm}" -m conntrack --ctstate NEW -j REJECT
-  iptables -I INPUT -i "$iface" -j "MIGRANT_${vm}"
-
-  iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 \
-    ! -d 192.168.122.0/24 -j REJECT
-}
-
-remove_rules() {
-  local vm="$1"
-  local iface
-  iface=$(cat "/run/migrant/${vm}.iface" 2>/dev/null) || return 0
-  [[ -z "$iface" ]] && return 0
-
-  iptables -D INPUT -i "$iface" -j "MIGRANT_${vm}" 2>/dev/null || true
-  iptables -F "MIGRANT_${vm}" 2>/dev/null || true
-  iptables -X "MIGRANT_${vm}" 2>/dev/null || true
-
-  iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 \
-    ! -d 192.168.122.0/24 -j REJECT 2>/dev/null || true
-
-  rm -f "/run/migrant/${vm}.iface"
-}
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-
 case "$OPERATION" in
-  prepare)
-    mount_shared_folders
-    ;;
-  started)
-    $has_network_isolation && apply_rules "$VM_NAME"
-    ;;
-  release)
-    $has_network_isolation && remove_rules "$VM_NAME"
-    unmount_shared_folders
-    ;;
+  prepare) mount_shared_folders ;;
+  release) unmount_shared_folders ;;
 esac
 ```
 
@@ -561,6 +502,12 @@ the project directory. This is consistent but might be surprising. The conventio
 should be documented — for the standard Migrantfile pattern of `$(pwd)/workspace`,
 the image is always in the project directory.
 
+**`cmd_reset` requires no changes.** `reset` calls `teardown_vm keep_snapshot`
+(which fires the hook's `release`, unmounting the image) and then re-runs `cmd_up`
+(which recreates the VM; the hook fires `prepare` and remounts the image before
+virtiofsd starts). The loop image is preserved across resets because it is in the
+project directory, not in `IMAGES_DIR`.
+
 **Existing users upgrading.** Users with an existing VM (plain directory, no loop
 image) must re-run `migrant.sh setup` to install the updated hook, then
 `migrant.sh destroy && migrant.sh up` to recreate the VM with the loop image. Their
@@ -587,10 +534,10 @@ The README should note that `*.img` files must not be committed.
 
 ## Summary of files changed
 
-| File | Change |
-|---|---|
-| `migrant.sh` | `usage()`, `cmd_up`, `cmd_destroy`, new `cmd_mount`, new `cmd_unmount`, updated hook heredoc in `cmd_setup` (with "already installed" bug fixed) |
-| `claude/Migrantfile` | Add `SHARED_FOLDER_SIZE_GB=10` |
-| `claude/.gitignore` | Add `*.img` (new file) |
-| `README.md` | Security notes, prerequisites, new subcommands, migration note |
-| `TODO.md` | Mark symlink traversal and disk exhaustion items as resolved |
+| File                    | Change                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| `migrant.sh`            | `usage()`, `cmd_up`, `cmd_destroy`, new `cmd_mount`, new `cmd_unmount`, new hook block in `cmd_setup` for `qemu.d/migrant-loop` |
+| `claude/Migrantfile`    | Add `SHARED_FOLDER_SIZE_GB=10`                                                                   |
+| `claude/.gitignore`     | Add `*.img` (new file)                                                                           |
+| `README.md`             | Security notes, prerequisites, new subcommands, migration note                                   |
+| `TODO.md`               | Mark symlink traversal and disk exhaustion items as resolved                                     |
