@@ -150,6 +150,23 @@ wait_for_shutdown() {
     fi
     sleep 2
   done
+
+  # If shared folder isolation is enabled, wait for the QEMU hook to unmount
+  # the loop images (it does so on the "release" event, just after VM stop).
+  if [[ "${SHARED_FOLDER_ISOLATION:-false}" == "true" ]]; then
+    local unmount_deadline=$(( SECONDS + 10 ))
+    for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+      local host_path="${shared_folder%%:*}"
+      [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+      while mountpoint -q "$host_path" 2>/dev/null; do
+        if (( SECONDS >= unmount_deadline )); then
+          echo "Error: timed out waiting for '$host_path' to unmount." >&2
+          exit 75
+        fi
+        sleep 1
+      done
+    done
+  fi
 }
 
 
@@ -812,14 +829,13 @@ cmd_halt() {
     return
   fi
   virsh shutdown "$VM_NAME"
-  echo "VM '$VM_NAME' is shutting down."
+  wait_for_shutdown
+  echo "VM '$VM_NAME' has stopped."
 
   # Hint to stop the network if no other VMs are running.
-  # $VM_NAME itself is still listed as running until the OS powers off,
-  # so exclude it from the check.
   local other_running
   other_running=$(virsh list --state-running --name \
-    | grep -v "^${VM_NAME}$" | grep -c '[^[:space:]]' || true)
+    | grep -c '[^[:space:]]' || true)
   if (( other_running == 0 )) \
       && virsh net-list --name 2>/dev/null | grep -qw "^default$"; then
     echo "To stop the libvirt network when done:"
