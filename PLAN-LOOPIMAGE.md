@@ -145,28 +145,23 @@ local vm_description="managed-by=migrant.sh"
   && vm_description+=",shared-folder-isolation=false"
 ```
 
-Image creation (`truncate` + `mkfs.ext4`) requires no root. It belongs in `cmd_up`
-so the image is ready before the QEMU hook fires its `prepare` event. The creation
-block only runs on the first `up` path (the one that reaches `virt-install`); for
-an existing stopped VM the image was already created and the hook re-mounts it.
+Image creation (`truncate` + `mkfs.ext4`) requires no root. It must run in **both**
+`cmd_up` paths — first creation (reaching `virt-install`) and restart of an existing
+stopped VM (reaching `virsh start`) — so that a missing image is always recreated
+before the QEMU hook fires `prepare`. This means the normal remediation for a deleted
+image is simply `migrant.sh up`; the user never needs `migrant.sh mount` for routine
+operation.
 
-In the shared folder loop inside `cmd_up`, replace the existing `mkdir -p` +
-`--filesystem` block:
+Extract a helper that both paths call:
 
 ```bash
-local use_loop_image=true
-[[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && use_loop_image=false
-
-for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-  local host_path="${shared_folder%%:*}"
-  local guest_tag="${shared_folder##*:}"
-  # Relative paths are resolved relative to the VM directory, matching the
-  # existing SHARED_FOLDERS handling already in cmd_up.
-  [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
-
-  if [[ "$use_loop_image" == true ]]; then
+ensure_shared_folder_images() {
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
+  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
+  for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
     local img_path="${host_path%/}.img"
-    local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
     if [[ ! -f "$img_path" ]]; then
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
@@ -176,8 +171,23 @@ for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
         exit 1
       fi
     fi
-  fi
+  done
+}
+```
 
+Call it in the restart path just before `virsh start`, and in the first-creation path
+just before `virt-install`. In the first-creation path, also replace the existing
+`mkdir -p` + `--filesystem` block to resolve relative paths and omit the now-separate
+image creation:
+
+```bash
+local use_loop_image=true
+[[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && use_loop_image=false
+
+for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+  local host_path="${shared_folder%%:*}"
+  local guest_tag="${shared_folder##*:}"
+  [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
   mkdir -p "$host_path"
   extra_args+=(--filesystem "source=$host_path,target=$guest_tag,driver.type=virtiofs")
   has_shared_folders=true
@@ -427,7 +437,7 @@ mount_shared_folders() {
       # isolation and must not be left thinking it is in effect when it is not.
       # A non-zero exit from a prepare hook causes libvirt to abort VM startup.
       echo "migrant: error: shared folder image not found: $img_path" >&2
-      echo "migrant: run 'migrant.sh mount' to recreate it, then start the VM again" >&2
+      echo "migrant: run 'migrant.sh up' to recreate it" >&2
       exit 1
     fi
 
@@ -524,12 +534,13 @@ run `migrant.sh mount` as usual.
 returns nothing and both `mount_shared_folders` and `unmount_shared_folders` are
 no-ops. `cmd_mount` and `cmd_unmount` print "No shared folders configured" and return.
 
-**Image does not exist at VM start.** If the image file has been deleted and the VM is
-started with `SHARED_FOLDER_ISOLATION=true` (the default), the hook exits non-zero
-during `prepare`, aborting the VM start. libvirt surfaces the error; the user is
-directed to run `migrant.sh mount` to recreate the image before starting again. This
-is preferable to silently serving an unprotected directory while the user believes
-isolation is in effect.
+**Image does not exist at VM start.** `cmd_up` calls `ensure_shared_folder_images`
+before both `virsh start` and `virt-install`, so a missing image is recreated
+automatically and the hook always finds it. The hook's `exit 1` guard is therefore
+only reachable if someone calls `virsh start` directly, bypassing `migrant.sh up`.
+In that case libvirt surfaces the error and the user is directed to run
+`migrant.sh up` to recover. This is preferable to silently serving an unprotected
+directory while the user believes isolation is in effect.
 
 **`SHARED_FOLDER_SIZE_GB` changed after image already exists.** The new value has no
 effect on an existing image — `mkfs.ext4` has already run. A warning in `cmd_up` is
