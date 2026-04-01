@@ -1,0 +1,33 @@
+# VM identity
+VM_NAME="nixos"
+# OS variant hint passed to virt-install for guest tuning. NixOS is not in
+# osinfo-db, so we use a generic recent-Linux value.
+OS_VARIANT="linux2022"
+
+# Resources
+RAM_MB=4096
+VCPUS=2
+DISK_GB=20
+
+# Base image — built locally by flake.nix, NOT downloaded from a URL.
+# You must build the image first:
+#   nix build .#nixos-image
+# The resulting qcow2 lands in $VM_DIR/result/nixos.qcow2.
+# curl supports file:// protocol, so migrant.sh handles this transparently.
+IMAGE_URL="file://$(realpath "$VM_DIR/result/nixos-base.qcow2")"
+
+# Shared folders — format is "host_absolute_or_relative_path:guest_tag"
+# The guest_tag is what you mount inside the VM, e.g.:
+#   sudo mount -t virtiofs workspace /home/migrant/workspace
+SHARED_FOLDERS=(
+  "workspace:workspace"
+)
+
+# Network — one entry per NIC, using virt-install --network syntax
+NETWORKS=(
+  "network=default"
+)
+
+# Block the VM from initiating connections to the host and from reaching other
+# hosts on the local network. Requires 'migrant.sh setup' to have been run.
+NETWORK_ISOLATION=true

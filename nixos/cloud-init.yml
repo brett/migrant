@@ -1,0 +1,21 @@
+#cloud-config
+users:
+  - name: migrant
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /run/current-system/sw/bin/bash
+    lock_passwd: false
+    plain_text_passwd: "migrant"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1AATI6dk16HSURV2WjhjYaDhQc9+7hHb/nyZ77JOS8 migrant
+
+
+# Package installation and software setup are baked into the image via flake.nix.
+
+runcmd:
+  # NixOS manages fstab declaratively and uses systemd mount units, so
+  # neither appending to /etc/fstab nor bare `mount <path>` works from
+  # cloud-init. Use an explicit mount command instead.
+  - mkdir -p /home/migrant/workspace
+  - mount -t virtiofs workspace /home/migrant/workspace
+  - chown migrant:users /home/migrant/workspace
