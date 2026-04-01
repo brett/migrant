@@ -43,6 +43,9 @@ Commands:
                       VM stays down afterward
   reset               Destroy the VM and rebuild it from the last snapshot
   status              Show the VM's current state and snapshot availability
+  mount               Mount the shared folder loop image for host-side access;
+                      creates the image if it does not exist
+  unmount             Unmount the shared folder loop image
   ssh [-- cmd...]     SSH into the VM as the configured user; optionally run a
                       remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
   console             Open a serial console session (exit with Ctrl+])
@@ -170,6 +173,41 @@ wait_for_ssh() {
   done
 }
 
+ensure_shared_folder_images() {
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
+  local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
+  if [[ ! -f "$loop_hook" ]]; then
+    echo "Error: shared folder isolation is enabled but the loop image hook is not installed." >&2
+    echo "  Run 'migrant.sh setup' first, then re-run this command." >&2
+    exit 1
+  fi
+  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
+  for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local img_path="${host_path%/}.img"
+    if [[ -f "$img_path" ]]; then
+      local actual_size
+      actual_size=$(du --apparent-size -b "$img_path" 2>/dev/null | cut -f1 || echo 0)
+      local expected_size=$(( size_gb * 1024 * 1024 * 1024 ))
+      if (( actual_size != expected_size )); then
+        echo "Note: $img_path is $(( actual_size / 1024 / 1024 / 1024 ))G" \
+          "but SHARED_FOLDER_SIZE_GB=${size_gb}." >&2
+        echo "  To resize: halt the VM, back up workspace/ contents," \
+          "run 'rm $img_path', then 'migrant.sh up'." >&2
+      fi
+    else
+      echo "Creating ${size_gb}G shared folder image at $img_path..."
+      truncate -s "${size_gb}G" "$img_path"
+      if ! mkfs.ext4 -F -q "$img_path"; then
+        rm -f "$img_path"
+        echo "Error: mkfs.ext4 failed for $img_path." >&2
+        exit 1
+      fi
+    fi
+  done
+}
+
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
     echo "Error: No cloud-init.yml found in $VM_DIR" >&2
@@ -214,6 +252,7 @@ cmd_up() {
     fi
     check_managed_key_match start
     echo "VM '$VM_NAME' exists but is not running. Starting..."
+    ensure_shared_folder_images
     virsh start "$VM_NAME"
     if [[ "${AUTOCONNECT:-}" == "console" ]]; then
       do_autoconnect
@@ -288,6 +327,8 @@ EOF
     "$cloud_init_dir/user-data" \
     "$cloud_init_dir/meta-data"
 
+  ensure_shared_folder_images
+
   local extra_args=()
   local has_shared_folders=false
 
@@ -319,9 +360,10 @@ EOF
   done
 
   local vm_description="managed-by=migrant.sh"
-  if [[ "${NETWORK_ISOLATION:-}" == "true" ]]; then
-    vm_description="managed-by=migrant.sh,network-isolation=true"
-  fi
+  [[ "${NETWORK_ISOLATION:-}" == "true" ]] \
+    && vm_description+=",network-isolation=true"
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
+    && vm_description+=",shared-folder-isolation=false"
 
   virt-install \
     --name "$VM_NAME" \
@@ -567,6 +609,101 @@ MIGRANT_QEMU_EOF
     echo "  Installed."
   fi
 
+  # --- qemu hook (loop image mount/unmount) ---
+  echo ""
+  local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
+  local expected_loop_hook
+  expected_loop_hook=$(mktemp)
+  # Update the trap to also clean up this tempfile
+  # shellcheck disable=SC2064
+  trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook'" EXIT
+
+  cat > "$expected_loop_hook" << 'MIGRANT_LOOP_EOF'
+#!/bin/bash
+# Managed by migrant.sh
+
+VM_NAME="$1"
+OPERATION="$2"
+
+# Check the domain description from the persistent XML file rather than via
+# virsh: hooks are invoked synchronously while libvirtd holds the per-domain
+# lock, so calling virsh against the same domain from within a hook deadlocks.
+local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
+grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
+grep -q "shared-folder-isolation=false" "$local_xml" 2>/dev/null && exit 0
+
+# Extract the source directory for each virtiofs filesystem from the domain XML.
+# python3 is used for robust XML parsing; it is available on all target systems.
+virtiofs_sources() {
+  python3 - "$local_xml" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
+tree = ET.parse(sys.argv[1])
+for fs in tree.findall('.//filesystem'):
+    drv = fs.find('driver')
+    if drv is not None and drv.get('type') == 'virtiofs':
+        src = fs.find('source')
+        if src is not None and src.get('dir'):
+            print(src.get('dir'))
+PYEOF
+}
+
+mount_shared_folders() {
+  while IFS= read -r source_dir; do
+    [[ -z "$source_dir" ]] && continue
+    local img_path="${source_dir%/}.img"
+
+    if [[ ! -f "$img_path" ]]; then
+      # Image absent despite isolation being enabled. Refuse to start rather
+      # than silently serve an unprotected directory — the user opted into
+      # isolation and must not be left thinking it is in effect when it is not.
+      # A non-zero exit from a prepare hook causes libvirt to abort VM startup.
+      echo "migrant: error: shared folder image not found: $img_path" >&2
+      echo "migrant: run 'migrant.sh up' to recreate it" >&2
+      exit 1
+    fi
+
+    if mountpoint -q "$source_dir" 2>/dev/null; then
+      # Already mounted — idempotent, nothing to do.
+      continue
+    fi
+
+    mkdir -p "$source_dir"
+    mount -o loop,nosymfollow "$img_path" "$source_dir" \
+      || echo "migrant: failed to mount $img_path at $source_dir" >&2
+  done < <(virtiofs_sources)
+}
+
+unmount_shared_folders() {
+  while IFS= read -r source_dir; do
+    [[ -z "$source_dir" ]] && continue
+    if mountpoint -q "$source_dir" 2>/dev/null; then
+      umount "$source_dir" \
+        || echo "migrant: failed to unmount $source_dir" >&2
+    fi
+  done < <(virtiofs_sources)
+}
+
+case "$OPERATION" in
+  prepare) mount_shared_folders ;;
+  release) unmount_shared_folders ;;
+esac
+MIGRANT_LOOP_EOF
+  if [[ -f "$loop_hook" ]] && cmp -s "$expected_loop_hook" "$loop_hook"; then
+    echo "Shared folder loop image hook already up to date."
+  else
+    if [[ ! -f "$loop_hook" ]]; then
+      echo "Installing shared folder loop image hook ($loop_hook)."
+      echo "  When a migrant.sh-managed VM starts, the shared folder loop image"
+      echo "  will be mounted with nosymfollow before virtiofsd starts."
+      echo "  The image is unmounted automatically when the VM stops."
+    else
+      echo "Shared folder loop image hook is outdated, reinstalling ($loop_hook)."
+    fi
+    echo "  Elevated permissions are required to write to /etc/libvirt/hooks/."
+    install_hook "$expected_loop_hook" "$loop_hook"
+    echo "  Installed."
+  fi
+
   # --- network hook (rp_filter) ---
   echo ""
   local default_rp_filter
@@ -692,6 +829,17 @@ cmd_destroy() {
   fi
   teardown_vm
   echo "VM '$VM_NAME' destroyed."
+
+  # Print paths of any loop images that were preserved
+  for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local img_path="${host_path%/}.img"
+    if [[ -f "$img_path" ]]; then
+      echo "Shared folder image preserved at: $img_path"
+      echo "  To delete it: rm '$img_path'"
+    fi
+  done
 }
 
 cmd_snapshot() {
@@ -953,6 +1101,97 @@ cmd_provision() {
   fi
 }
 
+cmd_mount() {
+  if [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
+    echo "No shared folders configured in Migrantfile."
+    return
+  fi
+
+  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+    echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to mount."
+    return
+  fi
+
+  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
+  local vm_running=false
+  if virsh dominfo "$VM_NAME" &>/dev/null \
+      && [[ "$(virsh domstate "$VM_NAME")" == "running" ]]; then
+    vm_running=true
+  fi
+
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local img_path="${host_path%/}.img"
+
+    if mountpoint -q "$host_path" 2>/dev/null; then
+      if $vm_running; then
+        echo "$host_path: mounted (VM is running — host and guest share access)."
+      else
+        echo "$host_path: already mounted."
+      fi
+      continue
+    fi
+
+    # Image is not mounted. Refuse if VM is running — mounting under an active
+    # virtiofsd session is unsafe and indicates something went wrong.
+    if $vm_running; then
+      echo "Error: VM '$VM_NAME' is running but $host_path is not mounted." >&2
+      echo "  The QEMU hook should have mounted it. Check the hook is installed" >&2
+      echo "  by re-running 'migrant.sh setup', then halt and restart the VM." >&2
+      exit 1
+    fi
+
+    # Create the image if it does not exist.
+    if [[ ! -f "$img_path" ]]; then
+      echo "Creating ${size_gb}G shared folder image at $img_path..."
+      truncate -s "${size_gb}G" "$img_path"
+      if ! mkfs.ext4 -F -q "$img_path"; then
+        rm -f "$img_path"
+        echo "Error: mkfs.ext4 failed for $img_path." >&2
+        exit 1
+      fi
+    fi
+
+    mkdir -p "$host_path"
+    echo "Mounting $img_path at $host_path (requires sudo)..."
+    sudo mount -o loop,nosymfollow "$img_path" "$host_path"
+    echo "  Mounted. Unmount with 'migrant.sh unmount' when done."
+  done
+}
+
+cmd_unmount() {
+  if [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
+    echo "No shared folders configured in Migrantfile."
+    return
+  fi
+
+  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+    echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to unmount."
+    return
+  fi
+
+  # Refuse if VM is running — unmounting would break virtiofsd.
+  if virsh dominfo "$VM_NAME" &>/dev/null \
+      && [[ "$(virsh domstate "$VM_NAME")" == "running" ]]; then
+    echo "Error: VM '$VM_NAME' is running." >&2
+    echo "  Halt the VM with 'migrant.sh halt' before unmounting." >&2
+    exit 1
+  fi
+
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+
+    if mountpoint -q "$host_path" 2>/dev/null; then
+      echo "Unmounting $host_path (requires sudo)..."
+      sudo umount "$host_path"
+    else
+      echo "$host_path: not mounted."
+    fi
+  done
+}
+
 cmd_status() {
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
     echo "VM '$VM_NAME' has not been created. Run 'migrant.sh up' to create it."
@@ -1137,6 +1376,8 @@ case "$SUBCOMMAND" in
   pubkey)       require_config; cmd_pubkey ;;
   ip)           require_config; cmd_ip ;;
   status)       require_config; cmd_status ;;
+  mount)        require_config; cmd_mount ;;
+  unmount)      require_config; cmd_unmount ;;
   snapshot)     require_config; cmd_snapshot ;;
   reset)        require_config; cmd_reset ;;
   provision)    require_config; cmd_provision ;;

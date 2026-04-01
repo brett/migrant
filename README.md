@@ -167,6 +167,10 @@ This performs all remaining configuration automatically:
   when a VM with `NETWORK_ISOLATION=true` starts, blocking it from
   initiating new connections to the host and from reaching other hosts on
   the local network; removes the rules when the VM stops
+- **Shared folder loop image hook** (`/etc/libvirt/hooks/qemu.d/migrant-loop`):
+  mounts the shared folder loop image with `nosymfollow` before the VM
+  starts, and unmounts it after the VM stops; applies to all
+  migrant.sh-managed VMs unless `SHARED_FOLDER_ISOLATION=false`
 - **rp_filter hook** (`/etc/libvirt/hooks/network.d/migrant`): sets `rp_filter=0`
   on `virbr0` when the default network starts; only installed if
   `net.ipv4.conf.default.rp_filter` is non-zero (the case on the
@@ -249,6 +253,8 @@ migrant.sh provision          # Run the Ansible playbook (playbook.yml) against 
 migrant.sh snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down afterward
 migrant.sh reset              # Destroy the VM and rebuild it from the last snapshot
 migrant.sh status             # Show the VM's current state and snapshot availability
+migrant.sh mount              # Mount the shared folder loop image for host-side access; creates the image if it does not exist
+migrant.sh unmount            # Unmount the shared folder loop image
 migrant.sh ssh                # SSH into the VM as the configured user
 migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive shell
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
@@ -540,7 +546,81 @@ The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant.sh setup` to have been run to install the libvirt
 hook.
 
-That said, the shared folder is a real path on your host machine. Be
-aware that anything the agent writes to `/home/agent/workspace` inside
-the VM (the mount point in the example configuration) lands on your
-host disk. Scope the shared folder to only what the agent needs.
+### Shared folder isolation
+
+By default, the shared folder is backed by a fixed-size ext4 loop image
+(`workspace.img` alongside your `Migrantfile`). This provides two
+protections:
+
+- **Symlink traversal prevention**: the image is mounted with the
+  `nosymfollow` kernel flag. Host processes — your shell, editors, file
+  watchers — cannot follow symlinks that the VM planted inside the share
+  to reach files elsewhere on the host (e.g. `~/.ssh`, `/etc/passwd`).
+  The flag is enforced at the VFS level and cannot be bypassed from
+  userspace. `virtiofsd` itself is already safe due to its `pivot_root`
+  sandbox, but this protects all other host processes.
+
+- **Disk exhaustion prevention**: the image has a fixed size set by
+  `SHARED_FOLDER_SIZE_GB` in the `Migrantfile` (default: 10 GB). The
+  guest cannot write more than this cap. The image is sparse — actual
+  host disk usage starts at ~67 MB and grows with contents; the full cap
+  is never paid upfront.
+
+The loop image is mounted automatically by the QEMU hook when the VM
+starts, and unmounted when it stops. While the VM is halted, the
+workspace files are inside the image and not directly accessible on the
+host. To access them:
+
+```bash
+migrant.sh mount    # mounts workspace.img → workspace/ (requires sudo)
+# ... read, write, copy files in workspace/ ...
+migrant.sh unmount  # unmounts (requires sudo)
+```
+
+`migrant.sh mount` can also be used to pre-populate the workspace before
+the first `migrant.sh up`.
+
+To opt out of the loop image and use a plain host directory instead, set
+`SHARED_FOLDER_ISOLATION=false` in the `Migrantfile`. This restores the
+pre-loop-image behaviour (no size cap, no symlink protection) and is
+appropriate only if you trust the VM's workload.
+
+Add `*.img` to `.gitignore` to avoid committing the loop image to source
+control. The `e2fsprogs` package (`mkfs.ext4`) must be installed on the
+host; it is standard on all Linux distributions.
+
+---
+
+## Migrating an existing VM to the loop image
+
+If you have an existing VM created before the loop image was introduced
+(i.e., `workspace/` is a plain host directory with no `workspace.img`),
+`destroy` is not required. The VM definition is reused as-is:
+
+```bash
+# 1. Re-run setup to install the new shared folder hook
+migrant.sh setup
+
+# 2. Halt the VM if it is running
+migrant.sh halt
+
+# 3. Move workspace contents out
+mv workspace/ ~/workspace-backup/
+
+# 4. Start the VM — this creates workspace.img, mounts it, then starts
+migrant.sh up
+
+# 5. Copy files into the now-mounted workspace/
+cp -a ~/workspace-backup/. workspace/
+```
+
+Alternatively, pre-populate the image before starting the VM:
+
+```bash
+migrant.sh halt
+mv workspace/ ~/workspace-backup/
+migrant.sh mount            # creates workspace.img and mounts it
+cp -a ~/workspace-backup/. workspace/
+migrant.sh unmount
+migrant.sh up
+```
