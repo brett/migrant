@@ -89,7 +89,7 @@ from the domain XML — no separate config file is required.
 
 ## Changes to `Migrantfile` (example: `claude/Migrantfile`)
 
-Add `SHARED_FOLDER_SIZE_GB` with a comment:
+Add `SHARED_FOLDER_SIZE_GB` and `SHARED_FOLDER_ISOLATION` with comments:
 
 ```bash
 # Shared folder loop image size in gigabytes. A sparse ext4 image of this size
@@ -97,7 +97,22 @@ Add `SHARED_FOLDER_SIZE_GB` with a comment:
 # image starts at ~67 MB on disk and grows with contents up to this cap.
 # Add workspace.img (or *.img) to .gitignore to avoid committing it.
 SHARED_FOLDER_SIZE_GB=10
+
+# Set to false to share a plain host directory instead of a loop image.
+# The loop image is on by default: it caps how much the VM can write to the
+# shared folder and prevents host processes from following symlinks the VM
+# planted inside the share to reach files elsewhere on the host. Turn it
+# off only if you trust the VM's workload.
+# (Compare NETWORK_ISOLATION, which defaults to false and must be opted in to.)
+# Changing this after VM creation requires 'migrant.sh destroy && migrant.sh up'.
+#SHARED_FOLDER_ISOLATION=false
 ```
+
+`SHARED_FOLDER_ISOLATION` is named after `NETWORK_ISOLATION` — both describe the
+security outcome rather than the mechanism. The default directions differ (network
+isolation is opt-in; shared folder isolation is opt-out) because a plain directory
+share is the backwards-compatible baseline, whereas the loop image is new hardening.
+The comment makes the default explicit so there is no ambiguity.
 
 
 ## Changes to `migrant.sh`
@@ -113,35 +128,53 @@ README word-for-word, per CLAUDE.md). Insert after the `status` entry:
   unmount             Unmount the shared folder loop image
 ```
 
-### 2. `cmd_up` — create image if absent
+### 2. `cmd_up` — encode the flag; create image if isolation is on
 
-Image creation (`truncate` + `mkfs.ext4`) requires no root and can run as the current
-user. It belongs in `cmd_up` so the image is ready before the QEMU hook fires its
-`prepare` event.
+`SHARED_FOLDER_ISOLATION` defaults to `true`. When it is `false`, `cmd_up` behaves
+exactly as it does today (plain `mkdir -p` + `--filesystem`). When it is `true`
+(or unset), image creation is added.
 
-The creation block runs only when the VM is being created for the first time (the path
-that reaches `virt-install`). For an existing stopped VM being restarted, the image
-was already created on first `up` and the hook re-mounts it automatically.
-
-In the shared folder loop inside `cmd_up`, after the existing `mkdir -p "$host_path"`:
+The flag is encoded into the VM description tag at `virt-install` time, alongside
+`network-isolation`, so the hook can read it without touching the Migrantfile:
 
 ```bash
+local vm_description="managed-by=migrant.sh"
+[[ "${NETWORK_ISOLATION:-}" == "true" ]] \
+  && vm_description+=",network-isolation=true"
+[[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
+  && vm_description+=",shared-folder-isolation=false"
+```
+
+Image creation (`truncate` + `mkfs.ext4`) requires no root. It belongs in `cmd_up`
+so the image is ready before the QEMU hook fires its `prepare` event. The creation
+block only runs on the first `up` path (the one that reaches `virt-install`); for
+an existing stopped VM the image was already created and the hook re-mounts it.
+
+In the shared folder loop inside `cmd_up`, replace the existing `mkdir -p` +
+`--filesystem` block:
+
+```bash
+local use_loop_image=true
+[[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && use_loop_image=false
+
 for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
   local host_path="${shared_folder%%:*}"
   local guest_tag="${shared_folder##*:}"
   # Relative paths are resolved relative to the VM directory, matching the
   # existing SHARED_FOLDERS handling already in cmd_up.
   [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
-  local img_path="${host_path%/}.img"
-  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
 
-  if [[ ! -f "$img_path" ]]; then
-    echo "Creating ${size_gb}G shared folder image at $img_path..."
-    truncate -s "${size_gb}G" "$img_path"
-    if ! mkfs.ext4 -F -q "$img_path"; then
-      rm -f "$img_path"
-      echo "Error: mkfs.ext4 failed for $img_path." >&2
-      exit 1
+  if [[ "$use_loop_image" == true ]]; then
+    local img_path="${host_path%/}.img"
+    local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
+    if [[ ! -f "$img_path" ]]; then
+      echo "Creating ${size_gb}G shared folder image at $img_path..."
+      truncate -s "${size_gb}G" "$img_path"
+      if ! mkfs.ext4 -F -q "$img_path"; then
+        rm -f "$img_path"
+        echo "Error: mkfs.ext4 failed for $img_path." >&2
+        exit 1
+      fi
     fi
   fi
 
@@ -214,6 +247,11 @@ cmd_mount() {
     return
   fi
 
+  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+    echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to mount."
+    return
+  fi
+
   local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
   local vm_running=false
   if virsh dominfo "$VM_NAME" &>/dev/null \
@@ -223,6 +261,7 @@ cmd_mount() {
 
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
     local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
     local img_path="${host_path%/}.img"
 
     if mountpoint -q "$host_path" 2>/dev/null; then
@@ -272,6 +311,11 @@ guest's view of the filesystem.
 cmd_unmount() {
   if [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
     echo "No shared folders configured in Migrantfile."
+    return
+  fi
+
+  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+    echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to unmount."
     return
   fi
 
@@ -355,6 +399,7 @@ OPERATION="$2"
 # lock, so calling virsh against the same domain from within a hook deadlocks.
 local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
 grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
+grep -q "shared-folder-isolation=false" "$local_xml" 2>/dev/null && exit 0
 
 # Extract the source directory for each virtiofs filesystem from the domain XML.
 # python3 is used for robust XML parsing; it is available on all target systems.
@@ -377,9 +422,13 @@ mount_shared_folders() {
     local img_path="${source_dir%/}.img"
 
     if [[ ! -f "$img_path" ]]; then
-      # No image file alongside this source dir — it is a plain directory share.
-      # Skip silently; virtiofsd will serve the directory as-is.
-      continue
+      # Image absent despite isolation being enabled. Refuse to start rather
+      # than silently serve an unprotected directory — the user opted into
+      # isolation and must not be left thinking it is in effect when it is not.
+      # A non-zero exit from a prepare hook causes libvirt to abort VM startup.
+      echo "migrant: error: shared folder image not found: $img_path" >&2
+      echo "migrant: run 'migrant.sh mount' to recreate it, then start the VM again" >&2
+      exit 1
     fi
 
     if mountpoint -q "$source_dir" 2>/dev/null; then
@@ -476,12 +525,11 @@ returns nothing and both `mount_shared_folders` and `unmount_shared_folders` are
 no-ops. `cmd_mount` and `cmd_unmount` print "No shared folders configured" and return.
 
 **Image does not exist at VM start.** If the image file has been deleted and the VM is
-started, the hook's `mount_shared_folders` detects `! -f "$img_path"` and skips
-mounting. virtiofsd serves an empty plain directory (no `nosymfollow`, no size cap —
-degraded security). The correct remedy is to run `migrant.sh mount` to recreate the
-image, then `migrant.sh destroy && migrant.sh up`. This edge case does not need to
-be detected in `cmd_up` for the "existing stopped VM" path, but a warning could be
-added in future.
+started with `SHARED_FOLDER_ISOLATION=true` (the default), the hook exits non-zero
+during `prepare`, aborting the VM start. libvirt surfaces the error; the user is
+directed to run `migrant.sh mount` to recreate the image before starting again. This
+is preferable to silently serving an unprotected directory while the user believes
+isolation is in effect.
 
 **`SHARED_FOLDER_SIZE_GB` changed after image already exists.** The new value has no
 effect on an existing image — `mkfs.ext4` has already run. A warning in `cmd_up` is
@@ -537,7 +585,7 @@ The README should note that `*.img` files must not be committed.
 | File                    | Change                                                                                           |
 | ----------------------- | ------------------------------------------------------------------------------------------------ |
 | `migrant.sh`            | `usage()`, `cmd_up`, `cmd_destroy`, new `cmd_mount`, new `cmd_unmount`, new hook block in `cmd_setup` for `qemu.d/migrant-loop` |
-| `claude/Migrantfile`    | Add `SHARED_FOLDER_SIZE_GB=10`                                                                   |
+| `claude/Migrantfile`    | Add `SHARED_FOLDER_SIZE_GB=10`; add commented-out `SHARED_FOLDER_ISOLATION=false` with explanation |
 | `claude/.gitignore`     | Add `*.img` (new file)                                                                           |
 | `README.md`             | Security notes, prerequisites, new subcommands, migration note                                   |
 | `TODO.md`               | Mark symlink traversal and disk exhaustion items as resolved                                     |
