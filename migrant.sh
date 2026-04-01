@@ -596,7 +596,7 @@ apply_rules() {
   iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
   iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
   iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 192.168.122.0/24 -j ACCEPT
+  iptables -I FORWARD -i "$iface" -d 192.168.200.0/24 -j ACCEPT
 }
 
 remove_rules() {
@@ -611,7 +611,7 @@ remove_rules() {
 
   iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
   iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 192.168.122.0/24 -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i "$iface" -d 192.168.200.0/24 -j ACCEPT 2>/dev/null || true
   iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
 
   rm -f "/run/migrant/${vm}.iface"
@@ -748,8 +748,8 @@ MIGRANT_LOOP_EOF
 #!/bin/bash
 # Managed by migrant.sh
 # Libvirt network hook args: $1=network-name $2=operation $3=sub-operation $4=extra
-if [[ "$1" == "default" && "$2" == "started" ]]; then
-  sysctl -w "net.ipv4.conf.virbr0.rp_filter=0"
+if [[ "$1" == "migrant" && "$2" == "started" ]]; then
+  sysctl -w "net.ipv4.conf.virbr-migrant.rp_filter=0"
 fi
 MIGRANT_NETWORK_EOF
     if [[ -f "$network_hook" ]] && cmp -s "$expected_network_hook" "$network_hook"; then
@@ -770,31 +770,31 @@ MIGRANT_NETWORK_EOF
     fi
   fi
 
-  # --- default network ---
+  # --- migrant network ---
   echo ""
-  if virsh net-info default &>/dev/null; then
-    echo "Default libvirt network already exists."
-    if virsh net-info default | grep -q "Autostart:.*yes"; then
-      virsh net-autostart default --disable
+  if virsh net-info migrant &>/dev/null; then
+    echo "Migrant libvirt network already exists."
+    if virsh net-info migrant | grep -q "Autostart:.*yes"; then
+      virsh net-autostart migrant --disable
       echo "  Autostart disabled — 'migrant.sh up' will start it on demand."
     fi
   else
-    echo "Creating default libvirt network..."
+    echo "Creating migrant libvirt network..."
     cat > "$net_xml" << 'NET_EOF'
 <network>
-  <name>default</name>
+  <name>migrant</name>
   <forward mode="nat"/>
-  <bridge name="virbr0" stp="on" delay="0"/>
+  <bridge name="virbr-migrant" stp="on" delay="0"/>
   <mac address="52:54:00:0a:cd:21"/>
-  <ip address="192.168.122.1" netmask="255.255.255.0">
+  <ip address="192.168.200.1" netmask="255.255.255.0">
     <dhcp>
-      <range start="192.168.122.2" end="192.168.122.254"/>
+      <range start="192.168.200.2" end="192.168.200.254"/>
     </dhcp>
   </ip>
 </network>
 NET_EOF
     virsh net-define "$net_xml"
-    echo "  Default network defined."
+    echo "  Migrant network defined."
   fi
 
   # --- images directory permissions ---

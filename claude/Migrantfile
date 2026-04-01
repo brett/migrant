@@ -22,7 +22,7 @@ SHARED_FOLDERS=(
 
 # Network — one entry per NIC, using virt-install --network syntax
 NETWORKS=(
-  "network=default"
+  "network=migrant"
 )
 
 # Shared folder loop image size in gigabytes. A sparse ext4 image of this size

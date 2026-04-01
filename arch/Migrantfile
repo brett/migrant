@@ -21,7 +21,7 @@ SHARED_FOLDERS=(
 
 # Network — one entry per NIC, using virt-install --network syntax
 NETWORKS=(
-  "network=default"
+  "network=migrant"
 )
 
 # Share a plain host directory instead of a loop image.

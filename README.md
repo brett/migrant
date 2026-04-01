@@ -158,8 +158,8 @@ This performs all remaining configuration automatically:
 - **Firewall backend**: detects whether the host uses legacy iptables or
   nftables and configures `/etc/libvirt/network.conf` accordingly — the
   backend must match, or VMs will boot but get no DHCP lease
-- **Default network**: creates (defines) the `default` NAT network
-  (`virbr0`, 192.168.122.0/24) if it does not already exist; the network
+- **Migrant network**: creates (defines) the `migrant` NAT network
+  (`virbr-migrant`, 192.168.200.0/24) if it does not already exist; the network
   is started on demand by `migrant.sh up`
 - **Images directory**: creates `/var/lib/libvirt/images/` if it does not
   exist, and grants the `libvirt` group write access so VM disks can be
@@ -173,7 +173,7 @@ This performs all remaining configuration automatically:
   starts, and unmounts it after the VM stops; applies to all
   migrant.sh-managed VMs unless `SHARED_FOLDER_ISOLATION=false`
 - **rp_filter hook** (`/etc/libvirt/hooks/network.d/migrant`): sets `rp_filter=0`
-  on `virbr0` when the default network starts; only installed if
+  on `virbr-migrant` when the migrant network starts; only installed if
   `net.ipv4.conf.default.rp_filter` is non-zero (the case on the
   `linux-hardened` kernel, where the default causes DHCP to fail)
 
@@ -188,9 +188,9 @@ configurations:
 
 - The Workstation and Server example configs both include a `forward`
   chain with `policy drop`. This drops all packets routed between
-  interfaces, blocking VM traffic on `virbr0`. Any nftables config
+  interfaces, blocking VM traffic on `virbr-migrant`. Any nftables config
   must either omit the `forward` chain or add explicit accept rules
-  for `virbr0` traffic.
+  for `virbr-migrant` traffic.
 
 - Both example configs start with `flush ruleset`. Reloading
   `nftables.service` will wipe libvirt's rules until libvirt restarts.
@@ -357,7 +357,7 @@ present, provisioning runs first and the console attaches afterward.
 
 ### Network lifecycle
 
-`migrant.sh up` starts the `default` libvirt network (`virbr0`) automatically
+`migrant.sh up` starts the `migrant` libvirt network (`virbr-migrant`, 192.168.200.0/24) automatically
 if it exists but is not currently active. `migrant.sh setup` only creates
 (defines) the network — starting it is left to `up` so the network is not
 running unnecessarily when no VMs are in use.
@@ -552,7 +552,7 @@ added that:
   responses from the host are still delivered, as those are tracked as
   existing connections)
 - Block the VM from reaching RFC 1918 addresses on the local network,
-  other than the libvirt subnet itself (192.168.122.0/24)
+  other than the libvirt subnet itself (192.168.200.0/24)
 
 The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant.sh setup` to have been run to install the libvirt
