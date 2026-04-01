@@ -197,6 +197,21 @@ wait_for_ssh() {
   done
 }
 
+verify_shared_folder_mounts() {
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
+  [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    local host_path="${shared_folder%%:*}"
+    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    if ! mountpoint -q "$host_path" 2>/dev/null; then
+      echo "Error: VM started but '$host_path' is not mounted." >&2
+      echo "  The QEMU prepare hook may have failed." >&2
+      echo "  Check: sudo journalctl -u libvirtd -g migrant" >&2
+      exit 1
+    fi
+  done
+}
+
 ensure_shared_folder_images() {
   [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
@@ -285,6 +300,7 @@ cmd_up() {
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
     virsh start "$VM_NAME"
+    verify_shared_folder_mounts
     if [[ "${AUTOCONNECT:-}" == "console" ]]; then
       do_autoconnect
       return
@@ -410,6 +426,8 @@ EOF
     --import \
     --boot hd \
     "${extra_args[@]}"
+
+  verify_shared_folder_mounts
 
   # AUTOCONNECT=console with no provisioning needed: attach immediately after
   # the VM starts, letting the user watch the boot. Skip wait_for_ip entirely.
@@ -679,8 +697,17 @@ PYEOF
 }
 
 mount_shared_folders() {
-  while IFS= read -r source_dir; do
-    [[ -z "$source_dir" ]] && continue
+  local sources=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && sources+=("$line")
+  done < <(virtiofs_sources)
+
+  if [[ ${#sources[@]} -eq 0 ]]; then
+    echo "migrant: no virtiofs filesystems found in $local_xml" >&2
+    return
+  fi
+
+  for source_dir in "${sources[@]}"; do
     local img_path="${source_dir%/}.img"
 
     if [[ ! -f "$img_path" ]]; then
@@ -694,29 +721,47 @@ mount_shared_folders() {
     fi
 
     if mountpoint -q "$source_dir" 2>/dev/null; then
-      # Already mounted — idempotent, nothing to do.
+      echo "migrant: $source_dir already mounted" >&2
       continue
     fi
 
     mkdir -p "$source_dir"
-    mount -o loop,nosymfollow "$img_path" "$source_dir" \
-      || echo "migrant: failed to mount $img_path at $source_dir" >&2
-  done < <(virtiofs_sources)
+    if mount -o loop,nosymfollow "$img_path" "$source_dir"; then
+      echo "migrant: mounted $img_path at $source_dir" >&2
+    else
+      echo "migrant: failed to mount $img_path at $source_dir" >&2
+    fi
+  done
 }
 
 unmount_shared_folders() {
-  while IFS= read -r source_dir; do
-    [[ -z "$source_dir" ]] && continue
-    if mountpoint -q "$source_dir" 2>/dev/null; then
-      umount "$source_dir" \
-        || echo "migrant: failed to unmount $source_dir" >&2
-    fi
+  local sources=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && sources+=("$line")
   done < <(virtiofs_sources)
+
+  for source_dir in "${sources[@]}"; do
+    if mountpoint -q "$source_dir" 2>/dev/null; then
+      if umount "$source_dir"; then
+        echo "migrant: unmounted $source_dir" >&2
+      else
+        echo "migrant: failed to unmount $source_dir" >&2
+      fi
+    else
+      echo "migrant: $source_dir not mounted, skipping" >&2
+    fi
+  done
 }
 
 case "$OPERATION" in
-  prepare) mount_shared_folders ;;
-  release) unmount_shared_folders ;;
+  prepare)
+    echo "migrant: loop-hook prepare ${VM_NAME}" >&2
+    mount_shared_folders
+    ;;
+  release)
+    echo "migrant: loop-hook release ${VM_NAME}" >&2
+    unmount_shared_folders
+    ;;
 esac
 MIGRANT_LOOP_EOF
   if [[ -f "$loop_hook" ]] && cmp -s "$expected_loop_hook" "$loop_hook"; then
