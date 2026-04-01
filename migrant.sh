@@ -839,18 +839,34 @@ cmd_halt() {
   wait_for_shutdown
   echo "VM '$VM_NAME' has stopped."
 
-  # Hint to stop the network if no other VMs are running.
-  local other_running
-  other_running=$(virsh list --state-running --name \
-    | grep -c '[^[:space:]]' || true)
-  if (( other_running == 0 )); then
-    for _net in "${LIBVIRT_NETWORKS[@]+"${LIBVIRT_NETWORKS[@]}"}"; do
-      if virsh net-list --name 2>/dev/null | grep -qw "^${_net}$"; then
-        echo "To stop the libvirt network when done:"
-        echo "  virsh --connect qemu:///system net-destroy ${_net}"
-      fi
-    done
-  fi
+  # Destroy libvirt networks that are no longer in use.
+  for _net in "${LIBVIRT_NETWORKS[@]+"${LIBVIRT_NETWORKS[@]}"}"; do
+    virsh net-list --name 2>/dev/null | grep -qw "^${_net}$" || continue
+
+    # Get list of other running VMs.
+    local running_vms
+    mapfile -t running_vms < <(virsh list --state-running --name \
+      | grep '[^[:space:]]' || true)
+
+    local in_use=false
+    if (( ${#running_vms[@]} > 0 )); then
+      # Other VMs are running; check if any use this network.
+      for _vm in "${running_vms[@]}"; do
+        if virsh domiflist "$_vm" 2>/dev/null | awk 'NR>2 {print $4}' \
+            | grep -qw "^${_net}$"; then
+          in_use=true
+          break
+        fi
+      done
+    fi
+
+    if [[ "$in_use" == "true" ]]; then
+      echo "Network '${_net}' is still in use by other VMs; leaving it running."
+    else
+      echo "Stopping libvirt network '${_net}'..."
+      virsh net-destroy "${_net}" 2>/dev/null || true
+    fi
+  done
 }
 
 cmd_destroy() {
