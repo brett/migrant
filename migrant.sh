@@ -199,7 +199,7 @@ ensure_shared_folder_images() {
     else
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
-      if ! mkfs.ext4 -F -q "$img_path"; then
+      if ! mkfs.ext4 -F -q -E root_owner "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
@@ -1146,7 +1146,7 @@ cmd_mount() {
     if [[ ! -f "$img_path" ]]; then
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
-      if ! mkfs.ext4 -F -q "$img_path"; then
+      if ! mkfs.ext4 -F -q -E root_owner "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
