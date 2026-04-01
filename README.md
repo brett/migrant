@@ -158,8 +158,9 @@ This performs all remaining configuration automatically:
 - **Firewall backend**: detects whether the host uses legacy iptables or
   nftables and configures `/etc/libvirt/network.conf` accordingly — the
   backend must match, or VMs will boot but get no DHCP lease
-- **Default network**: creates and starts the `default` NAT network
-  (`virbr0`, 192.168.122.0/24) if it does not already exist
+- **Default network**: creates (defines) the `default` NAT network
+  (`virbr0`, 192.168.122.0/24) if it does not already exist; the network
+  is started on demand by `migrant.sh up`
 - **Images directory**: creates `/var/lib/libvirt/images/` if it does not
   exist, and grants the `libvirt` group write access so VM disks can be
   created without `sudo`
@@ -255,8 +256,7 @@ migrant.sh reset              # Destroy the VM and rebuild it from the last snap
 migrant.sh status             # Show the VM's current state and snapshot availability
 migrant.sh mount              # Mount the shared folder loop image for host-side access; creates the image if it does not exist
 migrant.sh unmount            # Unmount the shared folder loop image
-migrant.sh ssh                # SSH into the VM as the configured user
-migrant.sh ssh -- <cmd>       # Run a command over SSH without an interactive shell
+migrant.sh ssh [-- cmd...]    # SSH into the VM as the configured user; optionally run a remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
 migrant.sh pubkey             # Generate the managed SSH key if needed and print its public key
@@ -354,6 +354,18 @@ AUTOCONNECT=console  # attach serial console immediately after the VM starts
 `AUTOCONNECT=console` skips the IP and SSH waits and attaches as soon
 as the VM starts, so the boot output is visible. If `playbook.yml` is
 present, provisioning runs first and the console attaches afterward.
+
+### Network lifecycle
+
+`migrant.sh up` starts the `default` libvirt network (`virbr0`) automatically
+if it exists but is not currently active. `migrant.sh setup` only creates
+(defines) the network — starting it is left to `up` so the network is not
+running unnecessarily when no VMs are in use.
+
+`migrant.sh halt` shuts down any libvirt networks listed in the `NETWORKS`
+config that are no longer in use. If other running VMs are still attached to a
+network, it is left running; otherwise it is stopped. This keeps the libvirt
+bridge interfaces off the host when idle.
 
 ### Serial console vs SSH
 
