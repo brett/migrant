@@ -199,7 +199,10 @@ ensure_shared_folder_images() {
     else
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
-      if ! mkfs.ext4 -F -q -E root_owner "$img_path"; then
+      # root_owner: image is created as root so the guest can write to it.
+      # ^has_journal,^resize_inode: no journal (no benefit for loopback) and no
+      # resize_inode (prevents mkfs from creating a lost+found directory).
+      if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
@@ -1146,7 +1149,10 @@ cmd_mount() {
     if [[ ! -f "$img_path" ]]; then
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
-      if ! mkfs.ext4 -F -q -E root_owner "$img_path"; then
+      # root_owner: image is created as root so the guest can write to it.
+      # ^has_journal,^resize_inode: no journal (no benefit for loopback) and no
+      # resize_inode (prevents mkfs from creating a lost+found directory).
+      if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
