@@ -74,6 +74,13 @@ require_config() {
   DISK_PATH="$IMAGES_DIR/${VM_NAME}.qcow2"
   SEED_ISO="$IMAGES_DIR/${VM_NAME}-seed.iso"
   SNAPSHOT_PATH="$IMAGES_DIR/${VM_NAME}-snapshot.qcow2"
+
+  LIBVIRT_NETWORKS=()
+  for _nic in "${NETWORKS[@]+"${NETWORKS[@]}"}"; do
+    if [[ "$_nic" =~ (^|,)network=([^,]+) ]]; then
+      LIBVIRT_NETWORKS+=("${BASH_REMATCH[2]}")
+    fi
+  done
 }
 
 require_vm() {
@@ -836,10 +843,13 @@ cmd_halt() {
   local other_running
   other_running=$(virsh list --state-running --name \
     | grep -c '[^[:space:]]' || true)
-  if (( other_running == 0 )) \
-      && virsh net-list --name 2>/dev/null | grep -qw "^default$"; then
-    echo "To stop the libvirt network when done:"
-    echo "  virsh --connect qemu:///system net-destroy default"
+  if (( other_running == 0 )); then
+    for _net in "${LIBVIRT_NETWORKS[@]+"${LIBVIRT_NETWORKS[@]}"}"; do
+      if virsh net-list --name 2>/dev/null | grep -qw "^${_net}$"; then
+        echo "To stop the libvirt network when done:"
+        echo "  virsh --connect qemu:///system net-destroy ${_net}"
+      fi
+    done
   fi
 }
 
