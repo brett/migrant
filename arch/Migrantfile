@@ -24,6 +24,10 @@ NETWORKS=(
   "network=default"
 )
 
+# Share a plain host directory instead of a loop image.
+# This VM is used for building AUR packages, not wrangling malicious AI agents.
+SHARED_FOLDER_ISOLATION=false
+
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true
