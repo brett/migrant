@@ -28,6 +28,11 @@ careful consideration. Key containment properties to preserve:
 - Be DRY, but not at the cost of meaningful complexity — discuss trade-offs
   before refactoring
 
+## Exit codes
+
+Non-zero exits follow sysexits.h semantics. Reserve `1` for runtime state
+errors with no sharper category (e.g. VM not running, VM not created).
+
 ## README sync
 
 - Command descriptions in `usage()` and in the README command list must be

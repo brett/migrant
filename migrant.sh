@@ -57,19 +57,19 @@ Commands:
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
 EOF
-  exit "${1:-1}"
+  exit "${1:-64}"
 }
 
 require_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Error: No Migrantfile found in $VM_DIR" >&2
-    exit 1
+    exit 78
   fi
   # shellcheck source=/dev/null
   source "$CONFIG_FILE"
   if [[ -z "${VM_NAME:-}" ]]; then
     echo "Error: 'VM_NAME' is not set in Migrantfile" >&2
-    exit 1
+    exit 78
   fi
   DISK_PATH="$IMAGES_DIR/${VM_NAME}.qcow2"
   SEED_ISO="$IMAGES_DIR/${VM_NAME}-seed.iso"
@@ -128,7 +128,7 @@ wait_for_ip() {
     fi
     if (( SECONDS >= deadline )); then
       echo "Error: timed out waiting for '$VM_NAME' to obtain an IP address." >&2
-      exit 1
+      exit 75
     fi
     sleep 2
   done
@@ -146,7 +146,7 @@ wait_for_shutdown() {
     if (( SECONDS >= deadline )); then
       echo "Error: timed out waiting for '$VM_NAME' to shut down." >&2
       echo "  The VM may be unresponsive. Run 'virsh destroy $VM_NAME' to force-stop it." >&2
-      exit 1
+      exit 75
     fi
     sleep 2
   done
@@ -167,7 +167,7 @@ wait_for_ssh() {
     fi
     if (( SECONDS >= deadline )); then
       echo "Error: timed out waiting for SSH on '$VM_NAME'." >&2
-      exit 1
+      exit 75
     fi
     sleep 2
   done
@@ -206,7 +206,7 @@ ensure_shared_folder_images() {
       if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
-        exit 1
+        exit 74
       fi
       debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
     fi
@@ -216,13 +216,13 @@ ensure_shared_folder_images() {
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
     echo "Error: No cloud-init.yml found in $VM_DIR" >&2
-    exit 1
+    exit 78
   fi
 
   for var in VM_NAME RAM_MB VCPUS DISK_GB IMAGE_URL OS_VARIANT; do
     if [[ -z "${!var:-}" ]]; then
       echo "Error: '$var' is not set in Migrantfile" >&2
-      exit 1
+      exit 78
     fi
   done
 
@@ -245,7 +245,7 @@ cmd_up() {
         && "$current_base" != "$(basename "$SNAPSHOT_PATH")" ]]; then
       echo "Error: VM '$VM_NAME' was built from '$current_base' but Migrantfile" >&2
       echo "  specifies '$base_image'. Run 'migrant.sh destroy' first." >&2
-      exit 1
+      exit 78
     fi
 
     local state
@@ -299,12 +299,12 @@ cmd_up() {
       if ! curl --fail -L -o "$base_image_path" "$IMAGE_URL"; then
         echo "Error: Failed to download image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
-        exit 1
+        exit 74
       fi
       if ! qemu-img info "$base_image_path" &>/dev/null; then
         echo "Error: Downloaded file is not a valid disk image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
-        exit 1
+        exit 65
       fi
     fi
   fi
@@ -406,7 +406,7 @@ EOF
       echo "" >&2
       echo "Error: cloud-init failed on '$VM_NAME'." >&2
       echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
-      exit 1
+      exit 70
     fi
     echo "cloud-init done." >&2
 
@@ -929,12 +929,12 @@ check_managed_key_match() {
       echo "  Restore ~/.ssh/migrant, or update cloud-init.yml with a new key" >&2
       echo "  (via 'migrant.sh pubkey') and run 'migrant.sh destroy && migrant.sh up'." >&2
     fi
-    exit 1
+    exit 66
   fi
 
   if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
     echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
-    exit 1
+    exit 66
   fi
 
   local host_material
@@ -948,7 +948,7 @@ check_managed_key_match() {
     else
       echo "  then run 'migrant.sh destroy && migrant.sh up' to rebuild." >&2
     fi
-    exit 1
+    exit 78
   fi
 }
 
@@ -957,7 +957,7 @@ get_ssh_user() {
   user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
   if [[ -z "$user" ]]; then
     echo "Error: could not determine username from cloud-init.yml." >&2
-    exit 1
+    exit 78
   fi
   echo "$user"
 }
@@ -982,11 +982,11 @@ build_ssh_opts() {
       echo "Error: cloud-init.yml references a managed SSH key but ~/.ssh/migrant not found." >&2
       echo "  Restore the key file, or update cloud-init.yml and rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
-      exit 1
+      exit 66
     fi
     if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
       echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
-      exit 1
+      exit 66
     fi
     local host_material
     host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
@@ -994,14 +994,14 @@ build_ssh_opts() {
       echo "Error: the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
       echo "  Update cloud-init.yml with 'migrant.sh pubkey' and rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
-      exit 1
+      exit 78
     fi
     _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
   else
     if ! vm_has_ssh; then
       echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
       echo "  Add your public key and rebuild with 'migrant.sh destroy && migrant.sh up'." >&2
-      exit 1
+      exit 78
     fi
   fi
 }
@@ -1077,7 +1077,7 @@ cmd_provision() {
 
   if ! command -v ansible-playbook &>/dev/null; then
     echo "Error: ansible-playbook not found. Install Ansible to use provisioning." >&2
-    exit 1
+    exit 127
   fi
 
   local playbook="$VM_DIR/playbook.yml"
@@ -1102,7 +1102,7 @@ cmd_provision() {
     echo "" >&2
     echo "Error: Ansible provisioning failed. The VM is still running." >&2
     echo "  Fix playbook.yml and run 'migrant.sh provision' to retry." >&2
-    exit 1
+    exit 70
   fi
 }
 
@@ -1158,7 +1158,7 @@ cmd_mount() {
       if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
-        exit 1
+        exit 74
       fi
       debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
     fi
