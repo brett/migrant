@@ -200,13 +200,15 @@ ensure_shared_folder_images() {
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
       # root_owner: image is created as root so the guest can write to it.
-      # ^has_journal,^resize_inode: no journal (no benefit for loopback) and no
-      # resize_inode (prevents mkfs from creating a lost+found directory).
+      # ^has_journal: no benefit for a loopback image.
+      # ^resize_inode: image is destroyed and recreated rather than resized;
+      # disabling it avoids reserving inode table space for online resize.
       if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
       fi
+      debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
     fi
   done
 }
@@ -1150,13 +1152,15 @@ cmd_mount() {
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       truncate -s "${size_gb}G" "$img_path"
       # root_owner: image is created as root so the guest can write to it.
-      # ^has_journal,^resize_inode: no journal (no benefit for loopback) and no
-      # resize_inode (prevents mkfs from creating a lost+found directory).
+      # ^has_journal: no benefit for a loopback image.
+      # ^resize_inode: image is destroyed and recreated rather than resized;
+      # disabling it avoids reserving inode table space for online resize.
       if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
         echo "Error: mkfs.ext4 failed for $img_path." >&2
         exit 1
       fi
+      debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
     fi
 
     mkdir -p "$host_path"
