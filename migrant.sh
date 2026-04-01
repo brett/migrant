@@ -610,11 +610,11 @@ apply_rules() {
   iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
   iptables -I INPUT -i "$iface" -j "$CHAIN"
 
-  # Block VM-to-LAN (RFC1918 ranges except the libvirt subnet itself)
+  # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
+  # so VMs cannot communicate with each other over the shared bridge)
   iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
   iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
   iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 192.168.200.0/24 -j ACCEPT
 }
 
 remove_rules() {
@@ -629,7 +629,6 @@ remove_rules() {
 
   iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
   iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 192.168.200.0/24 -j ACCEPT 2>/dev/null || true
   iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
 
   rm -f "/run/migrant/${vm}.iface"
