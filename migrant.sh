@@ -1314,6 +1314,20 @@ cmd_status() {
   else
     echo "Snapshot: none"
   fi
+
+  if shared_folder_isolation_enabled && [[ -n "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
+    for shared_folder in "${SHARED_FOLDERS[@]}"; do
+      local host_path
+      host_path=$(shared_folder_host_path "$shared_folder")
+      local img_path="${host_path%/}.img"
+      [[ -f "$img_path" ]] || continue
+      if mountpoint -q "$host_path" 2>/dev/null; then
+        echo "Loop image: $img_path (mounted at $host_path)"
+      else
+        echo "Loop image: $img_path (not mounted)"
+      fi
+    done
+  fi
 }
 
 # Print the human-readable disk usage of a single file.
