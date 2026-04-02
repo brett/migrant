@@ -170,7 +170,7 @@ wait_for_shutdown() {
 
   # If shared folder isolation is enabled, wait for the QEMU hook to unmount
   # the loop images (it does so on the "release" event, just after VM stop).
-  if [[ "${SHARED_FOLDER_ISOLATION:-false}" == "true" ]]; then
+  if shared_folder_isolation_enabled; then
     local unmount_deadline=$(( SECONDS + 10 ))
     for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
       local host_path
