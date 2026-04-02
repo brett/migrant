@@ -1292,7 +1292,13 @@ cmd_status() {
 
     case "$state" in
       running)
-        echo "VM '$VM_NAME' is running."
+        local ip
+        ip=$(get_vm_ip)
+        if [[ -n "$ip" ]]; then
+          echo "VM '$VM_NAME' is running at $ip."
+        else
+          echo "VM '$VM_NAME' is running (no IP yet)."
+        fi
         ;;
       shut\ off)
         echo "VM '$VM_NAME' has been created but is not running. Run 'migrant.sh up' to start it."
