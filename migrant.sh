@@ -147,8 +147,8 @@ shared_folder_isolation_enabled() {
 }
 
 shared_folder_host_path() {
-  local p="${1%%:*}"
-  [[ "$p" != /* ]] && p="$VM_DIR/$p"
+  local p="${1%%:*}"          # strip :guest_tag suffix, leaving only the host path
+  [[ "$p" != /* ]] && p="$VM_DIR/$p"  # resolve relative paths against the VM directory
   echo "$p"
 }
 
