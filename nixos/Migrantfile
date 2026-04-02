@@ -28,6 +28,9 @@ NETWORKS=(
   "network=migrant"
 )
 
+# Share a plain host directory instead of a loop image.
+SHARED_FOLDER_ISOLATION=false
+
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true
