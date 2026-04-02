@@ -142,6 +142,16 @@ wait_for_ip() {
   echo "VM '$VM_NAME' is up at $ip." >&2
 }
 
+shared_folder_isolation_enabled() {
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" != "false" ]]
+}
+
+shared_folder_host_path() {
+  local p="${1%%:*}"
+  [[ "$p" != /* ]] && p="$VM_DIR/$p"
+  echo "$p"
+}
+
 wait_for_shutdown() {
   local timeout=60
   echo "Waiting up to ${timeout}s for '$VM_NAME' to shut down..." >&2
@@ -163,8 +173,8 @@ wait_for_shutdown() {
   if [[ "${SHARED_FOLDER_ISOLATION:-false}" == "true" ]]; then
     local unmount_deadline=$(( SECONDS + 10 ))
     for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-      local host_path="${shared_folder%%:*}"
-      [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+      local host_path
+      host_path=$(shared_folder_host_path "$shared_folder")
       while mountpoint -q "$host_path" 2>/dev/null; do
         if (( SECONDS >= unmount_deadline )); then
           echo "Error: timed out waiting for '$host_path' to unmount." >&2
@@ -198,11 +208,11 @@ wait_for_ssh() {
 }
 
 verify_shared_folder_mounts() {
-  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
+  shared_folder_isolation_enabled || return
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
-    local host_path="${shared_folder%%:*}"
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path
+    host_path=$(shared_folder_host_path "$shared_folder")
     if ! mountpoint -q "$host_path" 2>/dev/null; then
       echo "Error: VM started but '$host_path' is not mounted." >&2
       echo "  The QEMU prepare hook may have failed." >&2
@@ -213,7 +223,7 @@ verify_shared_folder_mounts() {
 }
 
 ensure_shared_folder_images() {
-  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] && return
+  shared_folder_isolation_enabled || return
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
   if [[ ! -f "$loop_hook" ]]; then
     echo "Error: shared folder isolation is enabled but the loop image hook is not installed." >&2
@@ -222,8 +232,8 @@ ensure_shared_folder_images() {
   fi
   local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-    local host_path="${shared_folder%%:*}"
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path
+    host_path=$(shared_folder_host_path "$shared_folder")
     local img_path="${host_path%/}.img"
     if [[ -f "$img_path" ]]; then
       local actual_size
@@ -380,10 +390,8 @@ EOF
   local has_shared_folders=false
 
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-    local host_path="${shared_folder%%:*}"
-    local guest_tag="${shared_folder##*:}"
-    # Relative paths are resolved relative to the VM directory (where Migrantfile lives).
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path guest_tag="${shared_folder##*:}"
+    host_path=$(shared_folder_host_path "$shared_folder")
     mkdir -p "$host_path"
     extra_args+=(--filesystem "source=$host_path,target=$guest_tag,driver.type=virtiofs")
     has_shared_folders=true
@@ -925,8 +933,8 @@ cmd_destroy() {
 
   # Print paths of any loop images that were preserved
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-    local host_path="${shared_folder%%:*}"
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path
+    host_path=$(shared_folder_host_path "$shared_folder")
     local img_path="${host_path%/}.img"
     if [[ -f "$img_path" ]]; then
       echo "Shared folder image preserved at: $img_path"
@@ -1200,12 +1208,13 @@ cmd_mount() {
     return
   fi
 
-  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+  if ! shared_folder_isolation_enabled; then
     echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to mount."
     return
   fi
 
-  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
+  ensure_shared_folder_images
+
   local vm_running=false
   if virsh dominfo "$VM_NAME" &>/dev/null \
       && [[ "$(virsh domstate "$VM_NAME")" == "running" ]]; then
@@ -1213,8 +1222,8 @@ cmd_mount() {
   fi
 
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
-    local host_path="${shared_folder%%:*}"
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path
+    host_path=$(shared_folder_host_path "$shared_folder")
     local img_path="${host_path%/}.img"
 
     if mountpoint -q "$host_path" 2>/dev/null; then
@@ -1235,22 +1244,6 @@ cmd_mount() {
       exit 1
     fi
 
-    # Create the image if it does not exist.
-    if [[ ! -f "$img_path" ]]; then
-      echo "Creating ${size_gb}G shared folder image at $img_path..."
-      truncate -s "${size_gb}G" "$img_path"
-      # root_owner: image is created as root so the guest can write to it.
-      # ^has_journal: no benefit for a loopback image.
-      # ^resize_inode: image is destroyed and recreated rather than resized;
-      # disabling it avoids reserving inode table space for online resize.
-      if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
-        rm -f "$img_path"
-        echo "Error: mkfs.ext4 failed for $img_path." >&2
-        exit 74
-      fi
-      debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
-    fi
-
     mkdir -p "$host_path"
     echo "Mounting $img_path at $host_path (requires sudo)..."
     sudo mount -o loop,nosymfollow "$img_path" "$host_path"
@@ -1264,7 +1257,7 @@ cmd_unmount() {
     return
   fi
 
-  if [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]]; then
+  if ! shared_folder_isolation_enabled; then
     echo "SHARED_FOLDER_ISOLATION=false — shared folders are plain directories; nothing to unmount."
     return
   fi
@@ -1278,8 +1271,8 @@ cmd_unmount() {
   fi
 
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
-    local host_path="${shared_folder%%:*}"
-    [[ "$host_path" != /* ]] && host_path="$VM_DIR/$host_path"
+    local host_path
+    host_path=$(shared_folder_host_path "$shared_folder")
 
     if mountpoint -q "$host_path" 2>/dev/null; then
       echo "Unmounting $host_path (requires sudo)..."
