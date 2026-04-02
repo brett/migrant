@@ -25,7 +25,7 @@ SHARED_FOLDERS=(
 
 # Network — one entry per NIC, using virt-install --network syntax
 NETWORKS=(
-  "network=default"
+  "network=migrant"
 )
 
 # Block the VM from initiating connections to the host and from reaching other
