@@ -473,7 +473,7 @@ scripting or for connecting with tools other than SSH.
 `migrant.sh storage` can be run from any directory, with or without a
 `Migrantfile`. It lists everything in `IMAGES_DIR`, grouped by category:
 
-```
+```console
 $ migrant.sh storage
 Directory: /var/lib/libvirt/images (16.1G)
 Base Images:
