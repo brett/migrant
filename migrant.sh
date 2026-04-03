@@ -216,7 +216,7 @@ verify_shared_folder_mounts() {
     if ! mountpoint -q "$host_path" 2>/dev/null; then
       echo "Error: VM started but '$host_path' is not mounted." >&2
       echo "  The QEMU prepare hook may have failed." >&2
-      echo "  Check: sudo journalctl -u libvirtd -g migrant" >&2
+      echo "  Check: sudo journalctl -u libvirtd" >&2
       exit 1
     fi
   done
