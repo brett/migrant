@@ -33,3 +33,21 @@
         creates: /usr/bin/yay
       become: true
       become_user: migrant
+
+    - name: Mask filesystem maintenance timers (ephemeral qcow2 VM gets no benefit)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - man-db.timer
+        - e2scrub_all.timer
+        - fstrim.timer
+
+    # cloud-init's services run checks on every boot even when there is nothing
+    # to do. This sentinel file tells cloud-init to skip all module execution,
+    # saving several seconds on every subsequent start.
+    - name: Disable cloud-init on subsequent boots
+      ansible.builtin.file:
+        path: /etc/cloud/cloud-init.disabled
+        state: touch
+        mode: "0644"

@@ -91,3 +91,69 @@
         mode: "0644"
       become: true
       become_user: agent
+
+    - name: Mask telemetry services (phone home to external servers)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - whoopsie.service
+        - apport.service
+        - ua-timer.timer
+        - motd-news.timer
+
+    - name: Mask hardware daemons with no role in a VM
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - ModemManager.service
+        - bluetooth.service
+        - avahi-daemon.service
+        - multipathd.service
+        - lm-sensors.service
+        - udisks2.service
+
+    - name: Mask package management background activity (prevents apt lock contention, keeps VM state deterministic)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+        - unattended-upgrades.service
+        - packagekit.service
+        - fwupd.service
+        - snapd.service
+        - snapd.socket
+
+    - name: Mask filesystem maintenance timers (ephemeral qcow2 VM gets no benefit)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - man-db.timer
+        - e2scrub_all.timer
+        - e2scrub_reap.service
+        - fstrim.timer
+
+    - name: Mask unused system services (add boot latency, serve no purpose in a coding agent VM)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - systemd-networkd-wait-online.service
+        - networkd-dispatcher.service
+        - grub2-common.service
+        - grub-initrd-fallback.service
+        - sysstat.service
+        - systemd-machined.service
+
+    # cloud-init's four services run checks on every boot even when there is
+    # nothing to do. This sentinel file tells cloud-init to skip all module
+    # execution, saving several seconds on every subsequent start.
+    - name: Disable cloud-init on subsequent boots
+      ansible.builtin.file:
+        path: /etc/cloud/cloud-init.disabled
+        state: touch
+        mode: "0644"
