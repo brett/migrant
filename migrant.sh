@@ -894,6 +894,8 @@ _migrant() {
 
   if (( CURRENT == 2 )); then
     _describe 'command' subcommands
+    # 'umount' is a common typo; complete it as 'unmount'
+    [[ $PREFIX == um* ]] && compadd -U -- unmount
   elif [[ $words[2] == ssh ]] && (( CURRENT == 3 )); then
     compadd -- '--'
   fi
