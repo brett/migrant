@@ -1,5 +1,5 @@
 # VM identity
-VM_NAME="ubnt-claude"
+VM_NAME="ubuntu-claude"
 # OS variant hint passed to virt-install for guest tuning (machine type, firmware,
 # virtio drivers, etc.). Should match the guest OS. Run 'osinfo-query os | grep ubuntu'
 # to find the right value when upgrading.

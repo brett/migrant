@@ -210,7 +210,7 @@ section for the drop-in configuration.
 
 ## Example: Claude Code agent VMs
 
-The `arch/`, `ubnt/`, and `debian/` subdirectories contain ready-to-use
+The `arch/`, `ubuntu/`, and `debian/` subdirectories contain ready-to-use
 examples for running [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 in an isolated VM on Arch Linux, Ubuntu, and Debian Trixie respectively.
 They use both provisioning methods:
@@ -227,7 +227,7 @@ First, generate the managed SSH key and add it to `cloud-init.yml`
 (required for Ansible provisioning):
 
 ```bash
-cd ubnt
+cd ubuntu
 migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 ```
 
@@ -296,8 +296,8 @@ Set `MIGRANT_DIR` to the path of a project directory to run any command
 without `cd`-ing into it first:
 
 ```bash
-MIGRANT_DIR=~/migrant/ubnt migrant.sh up
-MIGRANT_DIR=~/migrant/ubnt migrant.sh halt
+MIGRANT_DIR=~/migrant/ubuntu migrant.sh up
+MIGRANT_DIR=~/migrant/ubuntu migrant.sh halt
 ```
 
 The typical use is to define a shell alias:
@@ -305,7 +305,7 @@ The typical use is to define a shell alias:
 ```bash
 alias mig-a="MIGRANT_DIR=$HOME/migrant/arch migrant.sh"
 alias mig-d="MIGRANT_DIR=$HOME/migrant/debian migrant.sh"
-alias mig-u="MIGRANT_DIR=$HOME/migrant/ubnt migrant.sh"
+alias mig-u="MIGRANT_DIR=$HOME/migrant/ubuntu migrant.sh"
 ```
 
 After which you can manage the VM from anywhere:
@@ -489,10 +489,10 @@ VMs:
         Disk:     debian-claude.qcow2 (987M)
         Seed ISO: debian-claude-seed.iso (372K)
         Snapshot: debian-claude-snapshot.qcow2 (2.9G)
-    ubnt-claude (4.1G):
-        Disk:     ubnt-claude.qcow2 (1.1G)
-        Seed ISO: ubnt-claude-seed.iso (372K)
-        Snapshot: ubnt-claude-snapshot.qcow2 (3.1G)
+    ubuntu-claude (4.1G):
+        Disk:     ubuntu-claude.qcow2 (1.1G)
+        Seed ISO: ubuntu-claude-seed.iso (372K)
+        Snapshot: ubuntu-claude-snapshot.qcow2 (3.1G)
 Other:
     someone-elses-vm.qcow2 (2.0G)
 ```
