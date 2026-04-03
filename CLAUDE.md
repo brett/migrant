@@ -37,8 +37,8 @@ errors with no sharper category (e.g. VM not running, VM not created).
 
 - Command descriptions in `usage()` and in the README command list must be
   **word-for-word identical**
-- When adding a subcommand: update `usage()`, the `case` statement, and the
-  README command list together
+- When adding a subcommand: update `usage()`, the `case` statement, the
+  README command list, and the `_migrant` ZSH completion function in `cmd_setup`
 
 ## Provisioning architecture
 

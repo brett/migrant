@@ -24,6 +24,7 @@ fi
 CONFIG_FILE="$VM_DIR/Migrantfile"
 CLOUD_INIT_FILE="$VM_DIR/cloud-init.yml"
 IMAGES_DIR="/var/lib/libvirt/images"
+ZSH_SITE_FUNCTIONS="/usr/share/zsh/site-functions"
 
 usage() {
   cat >&2 <<'EOF'
@@ -867,6 +868,61 @@ NET_EOF
     sudo chown root:libvirt "$IMAGES_DIR"
     sudo chmod g+rwx "$IMAGES_DIR"
     echo "  Done."
+  fi
+
+  # --- ZSH completions ---
+  echo ""
+  if [[ -d "$ZSH_SITE_FUNCTIONS" ]]; then
+    local expected_zsh_completion
+    expected_zsh_completion=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook' '$expected_zsh_completion'" EXIT
+    cat > "$expected_zsh_completion" << 'MIGRANT_ZSH_EOF'
+#compdef migrant.sh
+
+_migrant() {
+  local -a subcommands
+  subcommands=(
+    "setup:One-time host setup: configures libvirt networking and installs firewall hooks"
+    "up:Create the VM if it does not exist, or start it if stopped"
+    "halt:Gracefully shut down the VM"
+    "destroy:Stop and permanently delete the VM, its disk, and any snapshots"
+    "provision:Run the Ansible playbook against the running VM"
+    "snapshot:Shut down the VM and save a snapshot of its disk"
+    "reset:Destroy the VM and rebuild it from the last snapshot"
+    "status:Show the VM's current state and snapshot availability"
+    "mount:Mount the shared folder loop image for host-side access"
+    "unmount:Unmount the shared folder loop image"
+    "ssh:SSH into the VM; optionally run a remote command"
+    "console:Open a serial console session"
+    "ip:Print the VM's IP address"
+    "pubkey:Generate the managed SSH key if needed and print its public key"
+    "storage:List IMAGES_DIR contents grouped by base images and VMs"
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' subcommands
+  elif [[ $words[2] == ssh ]] && (( CURRENT == 3 )); then
+    compadd -- '--'
+  fi
+}
+
+_migrant "$@"
+MIGRANT_ZSH_EOF
+
+    local zsh_completion_dest="$ZSH_SITE_FUNCTIONS/_migrant"
+    if [[ -f "$zsh_completion_dest" ]] && cmp -s "$expected_zsh_completion" "$zsh_completion_dest"; then
+      echo "ZSH completions already up to date."
+    else
+      if [[ ! -f "$zsh_completion_dest" ]]; then
+        echo "Installing ZSH completions ($zsh_completion_dest)."
+      else
+        echo "ZSH completions are outdated, reinstalling ($zsh_completion_dest)."
+      fi
+      echo "  Elevated permissions are required to write to $ZSH_SITE_FUNCTIONS/."
+      sudo install -m 644 "$expected_zsh_completion" "$zsh_completion_dest"
+      echo "  Installed. Run 'compinit' or start a new shell to activate."
+    fi
   fi
 
   echo ""
