@@ -1,20 +1,28 @@
 ---
-- name: Provision arch VM
+- name: Provision Arch VM as Claude Code agent
   hosts: all
   become: true
 
   tasks:
-    - name: Install base-devel and git
-      # base-devel is the Arch equivalent of Debian's build-essential: it
-      # provides gcc, make, binutils, and the other tools required to build
-      # packages from source (including AUR packages via makepkg).
+    - name: Install packages
       community.general.pacman:
         name:
           - base-devel
           - git
+          - unzip
+          - less
+          - shellcheck
         state: present
         update_cache: true
         extra_args: --needed
+
+    - name: Configure shell environment system-wide
+      ansible.builtin.copy:
+        content: |
+          export PATH="$HOME/.local/bin:$PATH"
+          [[ -f "$HOME/.bash_aliases" ]] && source "$HOME/.bash_aliases"
+        dest: /etc/profile.d/migrant.sh
+        mode: "0644"
 
     - name: Clone yay-bin from AUR
       ansible.builtin.git:
@@ -31,6 +39,77 @@
         cmd: makepkg -si --noconfirm
         chdir: /home/migrant/yay-build
         creates: /usr/bin/yay
+      become: true
+      become_user: migrant
+
+    - name: Download claude-code installer
+      ansible.builtin.get_url:
+        url: https://claude.ai/install.sh
+        dest: /tmp/claude-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install claude-code
+      ansible.builtin.command:
+        cmd: /tmp/claude-install.sh
+        creates: /home/migrant/.local/bin/claude
+      become: true
+      become_user: migrant
+      environment:
+        HOME: /home/migrant
+
+    - name: Ensure ~/.claude directory exists
+      ansible.builtin.file:
+        path: /home/migrant/.claude
+        state: directory
+        mode: "0700"
+      become: true
+      become_user: migrant
+
+    # This is an example of how to push a Claude Code settings file from the
+    # host to the VM at provision time. If the source file does not exist on
+    # the host, the task will error but Ansible will continue regardless.
+    - name: Copy claude settings to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/settings.json
+        dest: /home/migrant/.claude/settings.json
+        mode: "0600"
+      become: true
+      become_user: migrant
+      ignore_errors: true # noqa: ignore-errors
+
+    - name: Copy global CLAUDE.md to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/CLAUDE.md
+        dest: /home/migrant/.claude/CLAUDE.md
+        mode: "0600"
+      become: true
+      become_user: migrant
+      ignore_errors: true # noqa: ignore-errors
+
+    - name: Download uv installer
+      ansible.builtin.get_url:
+        url: https://astral.sh/uv/install.sh
+        dest: /tmp/uv-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install uv
+      ansible.builtin.command:
+        cmd: /tmp/uv-install.sh
+        creates: /usr/local/bin/uv
+      environment:
+        UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Copy bash aliases to VM
+      ansible.builtin.copy:
+        content: |
+          alias c="cd ~/workspace && claude --dangerously-skip-permissions"
+          alias cc="claude --dangerously-skip-permissions"
+          alias ccc="claude --dangerously-skip-permissions --continue"
+          alias ccr="claude --dangerously-skip-permissions --resume"
+        dest: /home/migrant/.bash_aliases
+        mode: "0644"
       become: true
       become_user: migrant
 

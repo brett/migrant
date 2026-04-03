@@ -1,5 +1,5 @@
 ---
-- name: Provision claude agent VM
+- name: Provision Ubuntu VM as Claude Code agent
   hosts: all
   become: true
 
@@ -31,19 +31,19 @@
     - name: Install claude-code
       ansible.builtin.command:
         cmd: /tmp/claude-install.sh
-        creates: /home/agent/.local/bin/claude
+        creates: /home/migrant/.local/bin/claude
       become: true
-      become_user: agent
+      become_user: migrant
       environment:
-        HOME: /home/agent
+        HOME: /home/migrant
 
     - name: Ensure ~/.claude directory exists
       ansible.builtin.file:
-        path: /home/agent/.claude
+        path: /home/migrant/.claude
         state: directory
         mode: "0700"
       become: true
-      become_user: agent
+      become_user: migrant
 
     # This is an example of how to push a Claude Code settings file from the
     # host to the VM at provision time. If the source file does not exist on
@@ -51,19 +51,19 @@
     - name: Copy claude settings to VM
       ansible.builtin.copy:
         src: ~/library/conf/claude/settings.json
-        dest: /home/agent/.claude/settings.json
+        dest: /home/migrant/.claude/settings.json
         mode: "0600"
       become: true
-      become_user: agent
+      become_user: migrant
       ignore_errors: true # noqa: ignore-errors
 
     - name: Copy global CLAUDE.md to VM
       ansible.builtin.copy:
         src: ~/library/conf/claude/CLAUDE.md
-        dest: /home/agent/.claude/CLAUDE.md
+        dest: /home/migrant/.claude/CLAUDE.md
         mode: "0600"
       become: true
-      become_user: agent
+      become_user: migrant
       ignore_errors: true # noqa: ignore-errors
 
     - name: Download uv installer
@@ -87,10 +87,10 @@
           alias cc="claude --dangerously-skip-permissions"
           alias ccc="claude --dangerously-skip-permissions --continue"
           alias ccr="claude --dangerously-skip-permissions --resume"
-        dest: /home/agent/.bash_aliases
+        dest: /home/migrant/.bash_aliases
         mode: "0644"
       become: true
-      become_user: agent
+      become_user: migrant
 
     - name: Mask telemetry services (phone home to external servers)
       ansible.builtin.systemd:
@@ -149,9 +149,9 @@
         - sysstat.service
         - systemd-machined.service
 
-    # cloud-init's four services run checks on every boot even when there is
-    # nothing to do. This sentinel file tells cloud-init to skip all module
-    # execution, saving several seconds on every subsequent start.
+    # cloud-init's services run checks on every boot even when there is nothing
+    # to do. This sentinel file tells cloud-init to skip all module execution,
+    # saving several seconds on every subsequent start.
     - name: Disable cloud-init on subsequent boots
       ansible.builtin.file:
         path: /etc/cloud/cloud-init.disabled

@@ -1,7 +1,8 @@
 # VM identity
-VM_NAME="arch"
-# OS variant hint passed to virt-install for guest tuning. Run
-# 'osinfo-query os | grep arch' to find the right value if this changes.
+VM_NAME="arch-claude"
+# OS variant hint passed to virt-install for guest tuning (machine type, firmware,
+# virtio drivers, etc.). Should match the guest OS. Run 'osinfo-query os | grep arch'
+# to find the right value when upgrading.
 OS_VARIANT="archlinux"
 
 # Resources
@@ -9,7 +10,7 @@ RAM_MB=4096
 VCPUS=2
 DISK_GB=20
 
-# Base image — official Arch Linux cloud image
+# Base image
 IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 
 # Shared folders — format is "host_absolute_or_relative_path:guest_tag"
@@ -24,10 +25,25 @@ NETWORKS=(
   "network=migrant"
 )
 
-# Share a plain host directory instead of a loop image.
-# This VM is used for building AUR packages, not wrangling malicious AI agents.
-SHARED_FOLDER_ISOLATION=false
+# Shared folder loop image size in gigabytes. A sparse ext4 image of this size
+# is created the first time 'migrant.sh up' or 'migrant.sh mount' is run. The
+# image starts at ~67 MB on disk and grows with contents up to this cap.
+# Add workspace.img (or *.img) to .gitignore to avoid committing it.
+SHARED_FOLDER_SIZE_GB=10
+
+# Set to false to share a plain host directory instead of a loop image.
+# The loop image is on by default: it caps how much the VM can write to the
+# shared folder and prevents host processes from following symlinks the VM
+# planted inside the share to reach files elsewhere on the host. Turn it
+# off only if you trust the VM's workload.
+# (Compare NETWORK_ISOLATION, which defaults to false and must be opted in to.)
+# Changing this after VM creation requires 'migrant.sh destroy && migrant.sh up'.
+#SHARED_FOLDER_ISOLATION=false
 
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true
+
+# Optional: automatically connect after 'migrant.sh up' finishes.
+# Unset by default. Set to "ssh" or "console" to enable.
+AUTOCONNECT=ssh

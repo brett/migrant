@@ -1,5 +1,5 @@
 # VM identity
-VM_NAME="claude"
+VM_NAME="ubnt-claude"
 # OS variant hint passed to virt-install for guest tuning (machine type, firmware,
 # virtio drivers, etc.). Should match the guest OS. Run 'osinfo-query os | grep ubuntu'
 # to find the right value when upgrading.
@@ -15,7 +15,7 @@ IMAGE_URL="https://cloud-images.ubuntu.com/releases/questing/release/ubuntu-25.1
 
 # Shared folders — format is "host_absolute_or_relative_path:guest_tag"
 # The guest_tag is what you mount inside the VM, e.g.:
-#   sudo mount -t virtiofs workspace /home/agent/workspace
+#   sudo mount -t virtiofs workspace /home/migrant/workspace
 SHARED_FOLDERS=(
   "workspace:workspace"
 )

@@ -208,13 +208,13 @@ section for the drop-in configuration.
 
 ---
 
-## Example: Claude Code agent VM
+## Example: Claude Code agent VMs
 
-The `claude/` subdirectory contains a ready-to-use example for running
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) in an
-isolated VM. It uses both provisioning methods:
+The `ubnt/` and `arch/` subdirectories contain ready-to-use examples for
+running [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in an
+isolated VM on Ubuntu and Arch Linux. They use both provisioning methods:
 
-- **`cloud-init.yml`** handles system bootstrap: creating the `agent` user,
+- **`cloud-init.yml`** handles system bootstrap: creating the `migrant` user,
   configuring SSH, and mounting the shared folder
 - **`playbook.yml`** handles software setup: installing packages, claude-code,
   uv, and bash aliases
@@ -226,7 +226,7 @@ First, generate the managed SSH key and add it to `cloud-init.yml`
 (required for Ansible provisioning):
 
 ```bash
-cd claude
+cd ubnt
 migrant.sh pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 ```
 
@@ -295,22 +295,23 @@ Set `MIGRANT_DIR` to the path of a project directory to run any command
 without `cd`-ing into it first:
 
 ```bash
-MIGRANT_DIR=~/migrant/claude migrant.sh up
-MIGRANT_DIR=~/migrant/claude migrant.sh halt
+MIGRANT_DIR=~/migrant/ubnt migrant.sh up
+MIGRANT_DIR=~/migrant/ubnt migrant.sh halt
 ```
 
 The typical use is to define a shell alias:
 
 ```bash
-alias cm="MIGRANT_DIR=$HOME/migrant/claude migrant.sh"
+alias mig-a="MIGRANT_DIR=$HOME/migrant/arch migrant.sh"
+alias mig-u="MIGRANT_DIR=$HOME/migrant/ubnt migrant.sh"
 ```
 
 After which you can manage the VM from anywhere:
 
 ```bash
-cm up
-cm halt
-cm ssh
+mig-u up
+mig-u halt
+mig-u ssh
 ```
 
 Note: use `$HOME` rather than `~` when defining the alias, since `~` inside
@@ -380,7 +381,7 @@ plaintext or hashed password to enable console login:
 
 ```yaml
 users:
-  - name: agent
+  - name: migrant
     lock_passwd: false
     plain_text_passwd: "yourpassword"
 ```
@@ -390,7 +391,7 @@ For production use, prefer a pre-hashed password (generated with
 
 ```yaml
 users:
-  - name: agent
+  - name: migrant
     lock_passwd: false
     passwd: "$6$..."   # openssl passwd -6 yourpassword
 ```
@@ -421,7 +422,7 @@ Paste the output into `cloud-init.yml` under `ssh_authorized_keys`:
 
 ```yaml
 users:
-  - name: agent
+  - name: migrant
     ssh_authorized_keys:
       - ssh-ed25519 AAAA... migrant
 ```
@@ -448,7 +449,7 @@ in your agent or default identity files:
 
 ```yaml
 users:
-  - name: agent
+  - name: migrant
     ssh_authorized_keys:
       - ssh-ed25519 AAAA... you@host
 ```
@@ -472,17 +473,19 @@ scripting or for connecting with tools other than SSH.
 
 ```
 $ migrant.sh storage
-Directory: /var/lib/libvirt/images (4.7G)
+Directory: /var/lib/libvirt/images (9.7G)
 Base Images:
+    Arch-Linux-x86_64-cloudimg.qcow2 (519M)
     ubuntu-25.10-server-cloudimg-amd64.img (785M)
 VMs:
-    claude (4.1G):
-        Disk:     claude.qcow2 (1.1G)
-        Seed ISO: claude-seed.iso (372K)
-        Snapshot: claude-snapshot.qcow2 (3.0G)
-    old-vm (900M) (destroyed):
-        Disk:     old-vm.qcow2 (528M)
-        Seed ISO: old-vm-seed.iso (372K)
+    arch-claude (2.4G):
+        Disk:     arch-claude.qcow2 (911M)
+        Seed ISO: arch-claude-seed.iso (372K)
+        Snapshot: arch-claude-snapshot.qcow2 (1.5G)
+    ubnt-claude (4.1G):
+        Disk:     ubnt-claude.qcow2 (1.1G)
+        Seed ISO: ubnt-claude-seed.iso (372K)
+        Snapshot: ubnt-claude-snapshot.qcow2 (3.1G)
 Other:
     someone-elses-vm.qcow2 (2.0G)
 ```
@@ -535,7 +538,7 @@ It will be re-downloaded next time a VM using that image is created.
 
 The isolation guarantee in this setup comes from the KVM hypervisor
 boundary, not from Linux user permissions inside the guest. The guest
-`agent` user having passwordless sudo is acceptable because:
+`migrant` user having passwordless sudo is acceptable because:
 
 - Privilege escalation inside the guest cannot cross the KVM boundary
 - The VM is ephemeral and designed to be destroyed and rebuilt
