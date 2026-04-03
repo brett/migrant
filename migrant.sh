@@ -684,7 +684,18 @@ OPERATION="$2"
 # Check the domain description from the persistent XML file rather than via
 # virsh: hooks are invoked synchronously while libvirtd holds the per-domain
 # lock, so calling virsh against the same domain from within a hook deadlocks.
+#
+# During initial creation (virt-install), the persistent XML may not yet exist
+# when the prepare hook fires. libvirt passes the domain XML via stdin in that
+# case — write it to a temp file so the rest of the hook can treat it uniformly.
 local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
+_tmp_xml=""
+if [[ ! -f "$local_xml" ]]; then
+  _tmp_xml=$(mktemp)
+  cat > "$_tmp_xml"
+  local_xml="$_tmp_xml"
+  trap 'rm -f "$_tmp_xml"' EXIT
+fi
 grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
 grep -q "shared-folder-isolation=false" "$local_xml" 2>/dev/null && exit 0
 
