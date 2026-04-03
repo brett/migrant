@@ -486,15 +486,16 @@ cmd_setup() {
   local qemu_hook="/etc/libvirt/hooks/qemu.d/migrant"
   local network_hook="/etc/libvirt/hooks/network.d/migrant"
 
-  # Temp files: expected hook content (for comparison) and network XML (if needed).
-  # All three are created upfront so a single trap covers them.
-  local expected_qemu_hook expected_network_hook net_xml
+  # All temp files are created upfront so a single trap covers them.
+  # SC2064: expand now — these vars are local and will be out of scope on EXIT
+  local expected_qemu_hook expected_network_hook net_xml expected_loop_hook expected_zsh_completion
   expected_qemu_hook=$(mktemp)
   expected_network_hook=$(mktemp)
   net_xml=$(mktemp --suffix=.xml)
-  # SC2064: expand now — these vars are local and will be out of scope on EXIT
+  expected_loop_hook=$(mktemp)
+  expected_zsh_completion=$(mktemp)
   # shellcheck disable=SC2064
-  trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml'" EXIT
+  trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook' '$expected_zsh_completion'" EXIT
 
   # --- KVM check ---
   check_kvm
@@ -670,11 +671,6 @@ MIGRANT_QEMU_EOF
   # --- qemu hook (loop image mount/unmount) ---
   echo ""
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
-  local expected_loop_hook
-  expected_loop_hook=$(mktemp)
-  # Update the trap to also clean up this tempfile
-  # shellcheck disable=SC2064
-  trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook'" EXIT
 
   cat > "$expected_loop_hook" << 'MIGRANT_LOOP_EOF'
 #!/bin/bash
@@ -873,10 +869,6 @@ NET_EOF
   # --- ZSH completions ---
   echo ""
   if [[ -d "$ZSH_SITE_FUNCTIONS" ]]; then
-    local expected_zsh_completion
-    expected_zsh_completion=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook' '$expected_zsh_completion'" EXIT
     cat > "$expected_zsh_completion" << 'MIGRANT_ZSH_EOF'
 #compdef migrant.sh
 
