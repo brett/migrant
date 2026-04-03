@@ -572,13 +572,14 @@ OPERATION="$2"
 # the chain name stays within that limit regardless of VM name length.
 CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 
-# Check the domain description from the persistent XML file rather than via
-# virsh: hooks are invoked synchronously while libvirtd holds the per-domain
-# lock, so calling virsh against the same domain from within a hook deadlocks
-# — the hook waits for libvirtd, which waits for the hook.
-local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
-grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
-grep -q "network-isolation=true" "$local_xml" 2>/dev/null || exit 0
+# Read the domain XML from stdin. libvirt pipes it to the hook for every
+# operation, so this is always available — unlike the persistent XML file,
+# which may not exist yet when the hook fires during initial virt-install.
+# (Never call virsh here: hooks run while libvirtd holds the per-domain lock,
+# so calling virsh against the same domain deadlocks.)
+xml=$(cat)
+echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
+echo "$xml" | grep -q "network-isolation=true" || exit 0
 
 apply_rules() {
   local vm="$1"
@@ -681,23 +682,16 @@ MIGRANT_QEMU_EOF
 VM_NAME="$1"
 OPERATION="$2"
 
-# Check the domain description from the persistent XML file rather than via
-# virsh: hooks are invoked synchronously while libvirtd holds the per-domain
-# lock, so calling virsh against the same domain from within a hook deadlocks.
-#
-# During initial creation (virt-install), the persistent XML may not yet exist
-# when the prepare hook fires. libvirt passes the domain XML via stdin in that
-# case — write it to a temp file so the rest of the hook can treat it uniformly.
-local_xml="/etc/libvirt/qemu/${VM_NAME}.xml"
-_tmp_xml=""
-if [[ ! -f "$local_xml" ]]; then
-  _tmp_xml=$(mktemp)
-  cat > "$_tmp_xml"
-  local_xml="$_tmp_xml"
-  trap 'rm -f "$_tmp_xml"' EXIT
-fi
-grep -q "managed-by=migrant.sh" "$local_xml" 2>/dev/null || exit 0
-grep -q "shared-folder-isolation=false" "$local_xml" 2>/dev/null && exit 0
+# Read the domain XML from stdin. libvirt pipes it to the hook for every
+# operation, so this is always available — unlike the persistent XML file,
+# which may not exist yet when the hook fires during initial virt-install.
+# (Never call virsh here: hooks run while libvirtd holds the per-domain lock,
+# so calling virsh against the same domain deadlocks.)
+local_xml=$(mktemp)
+trap 'rm -f "$local_xml"' EXIT
+cat > "$local_xml"
+grep -q "managed-by=migrant.sh" "$local_xml" || exit 0
+grep -q "shared-folder-isolation=false" "$local_xml" && exit 0
 
 # Extract the source directory for each virtiofs filesystem from the domain XML.
 # python3 is used for robust XML parsing; it is available on all target systems.
