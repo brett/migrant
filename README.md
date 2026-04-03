@@ -210,9 +210,10 @@ section for the drop-in configuration.
 
 ## Example: Claude Code agent VMs
 
-The `ubnt/` and `arch/` subdirectories contain ready-to-use examples for
-running [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in an
-isolated VM on Ubuntu and Arch Linux. They use both provisioning methods:
+The `arch/`, `ubnt/`, and `debian/` subdirectories contain ready-to-use
+examples for running [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+in an isolated VM on Arch Linux, Ubuntu, and Debian Trixie respectively.
+They use both provisioning methods:
 
 - **`cloud-init.yml`** handles system bootstrap: creating the `migrant` user,
   configuring SSH, and mounting the shared folder
@@ -303,6 +304,7 @@ The typical use is to define a shell alias:
 
 ```bash
 alias mig-a="MIGRANT_DIR=$HOME/migrant/arch migrant.sh"
+alias mig-d="MIGRANT_DIR=$HOME/migrant/debian migrant.sh"
 alias mig-u="MIGRANT_DIR=$HOME/migrant/ubnt migrant.sh"
 ```
 
@@ -473,15 +475,20 @@ scripting or for connecting with tools other than SSH.
 
 ```
 $ migrant.sh storage
-Directory: /var/lib/libvirt/images (9.7G)
+Directory: /var/lib/libvirt/images (16.1G)
 Base Images:
     Arch-Linux-x86_64-cloudimg.qcow2 (519M)
+    debian-13-generic-amd64.qcow2 (648M)
     ubuntu-25.10-server-cloudimg-amd64.img (785M)
 VMs:
     arch-claude (2.4G):
         Disk:     arch-claude.qcow2 (911M)
         Seed ISO: arch-claude-seed.iso (372K)
         Snapshot: arch-claude-snapshot.qcow2 (1.5G)
+    debian-claude (3.8G):
+        Disk:     debian-claude.qcow2 (987M)
+        Seed ISO: debian-claude-seed.iso (372K)
+        Snapshot: debian-claude-snapshot.qcow2 (2.9G)
     ubnt-claude (4.1G):
         Disk:     ubnt-claude.qcow2 (1.1G)
         Seed ISO: ubnt-claude-seed.iso (372K)

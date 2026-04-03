@@ -20,7 +20,7 @@ careful consideration. Key containment properties to preserve:
 ## Code style
 
 - Run `shellcheck migrant.sh` after every change — must be clean
-- Run `ansible-lint claude/playbook.yml` after changes to the playbook
+- Run `uvx ansible-lint arch/playbook.yml ubnt/playbook.yml debian/playbook.yml` after changes to any playbook
 - The script uses `set -euo pipefail`; follow these patterns:
   - Empty array expansion: `"${ARRAY[@]+"${ARRAY[@]}"}"`
   - Arithmetic that may evaluate to 0: `(( expr )) || true`
@@ -78,6 +78,14 @@ must follow the same pattern.
   - `{name}.qcow2` — VM disk
   - `{name}-seed.iso` — cloud-init seed ISO
   - `{name}-snapshot.qcow2` — snapshot
+
+## Example VM sync
+
+The `arch/`, `ubnt/`, and `debian/` directories are sibling examples and should
+be kept in parity. When updating one — adding a package, changing a bash alias,
+adjusting a masking rationale — apply the equivalent change to all three.
+Distro-specific differences (package manager, systemd unit names) are expected;
+structural or behavioural divergence is not.
 
 ## Target platform
 

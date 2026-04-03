@@ -1,0 +1,36 @@
+#cloud-config
+users:
+  - name: migrant
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: "migrant"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
+
+# Package installation and software setup are handled by Ansible (playbook.yml).
+# To provision without Ansible, remove playbook.yml and uncomment the blocks below.
+# package_update: true
+# packages:
+#   - git
+#   - unzip
+
+runcmd:
+  # Bootstrap: create shared folder mount point.
+  # Runs as root before SSH is available and cannot be done by Ansible.
+  - mkdir -p /home/migrant/workspace
+  - echo "workspace /home/migrant/workspace virtiofs defaults 0 0" >> /etc/fstab
+  - mount /home/migrant/workspace
+
+# Without Ansible, also add these runcmd entries:
+#   # write_files runs before users-groups, so any file it writes to /home/migrant
+#   # ends up owned by root. Fix ownership before running anything as migrant.
+#   - chown -R migrant:migrant /home/migrant
+#   - echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/local-bin.sh
+#   - sudo -u migrant bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+#   - sudo -u migrant bash -c 'echo "alias c=\"cd ~/workspace && claude --dangerously-skip-permissions\"" >> ~/.bash_aliases'
+#   - sudo -u migrant bash -c 'echo "alias cc=\"claude --dangerously-skip-permissions\"" > ~/.bash_aliases'
+#   - sudo -u migrant bash -c 'echo "alias ccc=\"claude --dangerously-skip-permissions --continue\"" > ~/.bash_aliases'
+#   - sudo -u migrant bash -c 'echo "alias ccr=\"claude --dangerously-skip-permissions --resume\"" > ~/.bash_aliases'
+#   - curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh

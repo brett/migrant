@@ -1,0 +1,137 @@
+---
+- name: Provision Debian VM as Claude Code agent
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - unzip
+          - shellcheck
+        state: present
+        update_cache: true
+
+    - name: Add ~/.local/bin to PATH system-wide
+      ansible.builtin.lineinfile:
+        path: /etc/profile.d/local-bin.sh
+        line: 'export PATH="$HOME/.local/bin:$PATH"'
+        regexp: '^export PATH=.*\.local/bin'
+        create: true
+        mode: "0644"
+
+    - name: Download claude-code installer
+      ansible.builtin.get_url:
+        url: https://claude.ai/install.sh
+        dest: /tmp/claude-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install claude-code
+      ansible.builtin.command:
+        cmd: /tmp/claude-install.sh
+        creates: /home/migrant/.local/bin/claude
+      become: true
+      become_user: migrant
+      environment:
+        HOME: /home/migrant
+
+    - name: Ensure ~/.claude directory exists
+      ansible.builtin.file:
+        path: /home/migrant/.claude
+        state: directory
+        mode: "0700"
+      become: true
+      become_user: migrant
+
+    # This is an example of how to push a Claude Code settings file from the
+    # host to the VM at provision time. If the source file does not exist on
+    # the host, the task will error but Ansible will continue regardless.
+    - name: Copy claude settings to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/settings.json
+        dest: /home/migrant/.claude/settings.json
+        mode: "0600"
+      become: true
+      become_user: migrant
+      ignore_errors: true # noqa: ignore-errors
+
+    - name: Copy global CLAUDE.md to VM
+      ansible.builtin.copy:
+        src: ~/library/conf/claude/CLAUDE.md
+        dest: /home/migrant/.claude/CLAUDE.md
+        mode: "0600"
+      become: true
+      become_user: migrant
+      ignore_errors: true # noqa: ignore-errors
+
+    - name: Download uv installer
+      ansible.builtin.get_url:
+        url: https://astral.sh/uv/install.sh
+        dest: /tmp/uv-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install uv
+      ansible.builtin.command:
+        cmd: /tmp/uv-install.sh
+        creates: /usr/local/bin/uv
+      environment:
+        UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Copy bash aliases to VM
+      ansible.builtin.copy:
+        content: |
+          alias c="cd ~/workspace && claude --dangerously-skip-permissions"
+          alias cc="claude --dangerously-skip-permissions"
+          alias ccc="claude --dangerously-skip-permissions --continue"
+          alias ccr="claude --dangerously-skip-permissions --resume"
+        dest: /home/migrant/.bash_aliases
+        mode: "0644"
+      become: true
+      become_user: migrant
+
+
+    - name: Mask hardware daemons with no role in a VM
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - multipathd.service
+
+    - name: Mask package management background activity (prevents apt lock contention, keeps VM state deterministic)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+        - unattended-upgrades.service
+
+    - name: Mask filesystem maintenance timers (ephemeral qcow2 VM gets no benefit)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - man-db.timer
+        - e2scrub_all.timer
+        - e2scrub_reap.service
+        - fstrim.timer
+
+    - name: Mask unused system services (add boot latency, serve no purpose in a coding agent VM)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop:
+        - systemd-networkd-wait-online.service
+        - systemd-machined.service
+
+    # cloud-init's services run checks on every boot even when there is nothing
+    # to do. This sentinel file tells cloud-init to skip all module execution,
+    # saving several seconds on every subsequent start.
+    - name: Disable cloud-init on subsequent boots
+      ansible.builtin.file:
+        path: /etc/cloud/cloud-init.disabled
+        state: touch
+        mode: "0644"
