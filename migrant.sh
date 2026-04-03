@@ -138,7 +138,7 @@ wait_for_ip() {
       echo "Error: timed out waiting for '$VM_NAME' to obtain an IP address." >&2
       exit 75
     fi
-    sleep 2
+    sleep 1
   done
   echo "VM '$VM_NAME' is up at $ip." >&2
 }
@@ -196,7 +196,7 @@ wait_for_ssh() {
   echo "Waiting up to ${timeout}s for SSH on '$VM_NAME'..." >&2
   local deadline=$(( SECONDS + timeout ))
   while true; do
-    if ssh "${ssh_opts[@]}" -o ConnectTimeout=3 -o BatchMode=yes \
+    if ssh "${ssh_opts[@]}" -o ConnectTimeout=2 -o BatchMode=yes \
         "${user}@${ip}" exit 2>/dev/null; then
       break
     fi
@@ -204,7 +204,7 @@ wait_for_ssh() {
       echo "Error: timed out waiting for SSH on '$VM_NAME'." >&2
       exit 75
     fi
-    sleep 2
+    sleep 1
   done
 }
 
