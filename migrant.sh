@@ -209,7 +209,7 @@ wait_for_ssh() {
 }
 
 verify_shared_folder_mounts() {
-  shared_folder_isolation_enabled || return
+  shared_folder_isolation_enabled || return 0
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
     local host_path
@@ -224,7 +224,7 @@ verify_shared_folder_mounts() {
 }
 
 ensure_shared_folder_images() {
-  shared_folder_isolation_enabled || return
+  shared_folder_isolation_enabled || return 0
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
   if [[ ! -f "$loop_hook" ]]; then
     echo "Error: shared folder isolation is enabled but the loop image hook is not installed." >&2
