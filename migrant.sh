@@ -347,10 +347,12 @@ cmd_up() {
     base_image_path="$SNAPSHOT_PATH"
   else
     base_image_path="$IMAGES_DIR/$base_image"
-    if [[ ! -f "$base_image_path" ]]; then
-      echo "Downloading base image..."
+    # Always re-copy file:// images (local builds like NixOS) since the
+    # source may have been rebuilt. Remote images are cached.
+    if [[ ! -f "$base_image_path" ]] || [[ "$IMAGE_URL" == file://* ]]; then
+      echo "Copying base image..."
       if ! curl --fail -L -o "$base_image_path" "$IMAGE_URL"; then
-        echo "Error: Failed to download image. Check IMAGE_URL in Migrantfile." >&2
+        echo "Error: Failed to fetch base image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
         exit 74
       fi
