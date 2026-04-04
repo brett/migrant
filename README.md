@@ -339,7 +339,10 @@ applies both when starting a stopped VM and when creating one with
 
 If `playbook.yml` is present, `up` goes further still: it waits for
 cloud-init to finish and then runs Ansible, returning only when the VM
-is fully provisioned.
+is fully provisioned. Setting `CLOUD_INIT_WAIT=false` in the
+Migrantfile skips the cloud-init wait. This is useful for images where
+provisioning is baked in rather than handled by cloud-init at boot.
+Ansible still runs if `playbook.yml` is present.
 
 Without `playbook.yml`, the IP and SSH waits are the only signals that
 the VM is ready. On a first boot, packages may still be installing in

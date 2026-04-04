@@ -460,22 +460,26 @@ EOF
 
     wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
 
-    echo "Waiting for cloud-init to finish..." >&2
-    if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
-      echo "" >&2
-      echo "Error: cloud-init failed on '$VM_NAME'." >&2
-      echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
-      exit 70
+    if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+      echo "Waiting for cloud-init to finish..." >&2
+      if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
+        echo "" >&2
+        echo "Error: cloud-init failed on '$VM_NAME'." >&2
+        echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
+        exit 70
+      fi
+      echo "cloud-init done." >&2
     fi
-    echo "cloud-init done." >&2
 
     cmd_provision
     echo "VM '$VM_NAME' is ready." >&2
   elif [[ "$from_snapshot" == false ]]; then
-    echo "" >&2
-    echo "Note: cloud-init is still provisioning in the background." >&2
-    echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
-    echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
+    if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+      echo "" >&2
+      echo "Note: cloud-init is still provisioning in the background." >&2
+      echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
+      echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
+    fi
   fi
 
   do_autoconnect
