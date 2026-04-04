@@ -415,6 +415,10 @@ EOF
     (( nic_index++ )) || true
   done
 
+  if [[ "${BOOT_FIRMWARE:-}" == "uefi" ]]; then
+    extra_args+=(--boot firmware=efi)
+  fi
+
   local vm_description="managed-by=migrant.sh"
   [[ "${NETWORK_ISOLATION:-}" == "true" ]] \
     && vm_description+=",network-isolation=true"

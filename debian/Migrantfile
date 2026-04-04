@@ -40,6 +40,15 @@ SHARED_FOLDER_SIZE_GB=10
 # Changing this after VM creation requires 'migrant.sh destroy && migrant.sh up'.
 #SHARED_FOLDER_ISOLATION=false
 
+# Use UEFI firmware (OVMF) instead of the default BIOS (SeaBIOS).
+# Required for the Debian generic cloud image: its BIOS GRUB configures a VBE
+# framebuffer and passes it to the kernel. With '--graphics none' the VGA
+# device is absent, causing the kernel to hang on framebuffer init before
+# any serial output appears. UEFI uses EFI GOP instead of VBE and falls back
+# gracefully to serial-only when no display device is present.
+# Requires the edk2-ovmf package on the host.
+BOOT_FIRMWARE=uefi
+
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true

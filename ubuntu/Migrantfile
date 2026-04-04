@@ -40,6 +40,11 @@ SHARED_FOLDER_SIZE_GB=10
 # Changing this after VM creation requires 'migrant.sh destroy && migrant.sh up'.
 #SHARED_FOLDER_ISOLATION=false
 
+# Set to "uefi" to use UEFI firmware instead of the default BIOS. Not needed
+# for Ubuntu — its BIOS GRUB handles a missing VGA device correctly.
+# See debian/Migrantfile for the full rationale.
+#BOOT_FIRMWARE=uefi
+
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Requires 'migrant.sh setup' to have been run.
 NETWORK_ISOLATION=true

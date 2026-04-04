@@ -613,6 +613,27 @@ host; it is standard on all Linux distributions.
 
 ---
 
+## Firmware (BIOS vs UEFI)
+
+By default, VMs use BIOS firmware (SeaBIOS). Setting `BOOT_FIRMWARE=uefi`
+in a Migrantfile switches to UEFI (OVMF):
+
+```bash
+BOOT_FIRMWARE=uefi
+```
+
+**When to use this:** the Debian generic cloud image requires UEFI. Its BIOS
+GRUB uses a VBE framebuffer; `--graphics none` removes the VGA device entirely,
+so the kernel hangs on framebuffer initialisation before any serial output
+appears. UEFI avoids this by using EFI GOP instead of VBE and falling back
+gracefully to serial-only when no display is present.
+
+Ubuntu's BIOS GRUB handles a missing VGA device correctly and does not need
+this setting. Arch does not need it either — its `archlinux` osinfo-db entry
+already enables UEFI automatically.
+
+---
+
 ## Migrating an existing VM to the loop image
 
 If you have an existing VM created before the loop image was introduced
