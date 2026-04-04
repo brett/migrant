@@ -965,7 +965,7 @@ cmd_halt() {
     if (( ${#running_vms[@]} > 0 )); then
       # Other VMs are running; check if any use this network.
       for _vm in "${running_vms[@]}"; do
-        if virsh domiflist "$_vm" 2>/dev/null | awk 'NR>2 {print $4}' \
+        if virsh domiflist "$_vm" 2>/dev/null | awk 'NR>2 {print $3}' \
             | grep -qw "^${_net}$"; then
           in_use=true
           break
