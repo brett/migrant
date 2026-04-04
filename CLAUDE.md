@@ -87,6 +87,13 @@ adjusting a masking rationale — apply the equivalent change to all three.
 Distro-specific differences (package manager, systemd unit names) are expected;
 structural or behavioural divergence is not.
 
+Known parity exceptions:
+
+- **swap** (`debian/playbook.yml` only): Debian's cloud image OOM-kills the
+  Claude Code installer without a swapfile; Ubuntu and Arch provision cleanly
+  without one. Do not add swap to the Ubuntu or Arch playbooks unless they
+  exhibit the same failure.
+
 ## Target platform
 
 Primary target is Arch Linux with the `linux-hardened` kernel. Other Linux
