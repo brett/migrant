@@ -932,7 +932,7 @@ teardown_vm() {
   # Pass "keep_snapshot" as $1 to preserve the snapshot image (used by reset).
   local keep_snapshot="${1:-}"
   virsh destroy "$VM_NAME" 2>/dev/null || true
-  virsh undefine "$VM_NAME" --remove-all-storage 2>/dev/null || true
+  virsh undefine "$VM_NAME" --remove-all-storage --nvram 2>/dev/null || true
   if [[ "$keep_snapshot" == "keep_snapshot" ]]; then
     rm -f "$DISK_PATH" "$SEED_ISO"
   else
