@@ -3,6 +3,10 @@
   hosts: all
   become: true
 
+  vars:
+    claude_json_settings:
+      editorMode: vim
+
   tasks:
     - name: Install packages
       community.general.pacman:
@@ -86,6 +90,27 @@
       become: true
       become_user: migrant
       ignore_errors: true # noqa: ignore-errors
+
+    - name: Configure ~/.claude.json settings
+      ansible.builtin.shell: |
+        python3 - <<'EOF'
+        import json, os
+        path = os.path.expanduser('~/.claude.json')
+        data = json.load(open(path)) if os.path.exists(path) else {}
+        updates = json.loads(os.environ['CLAUDE_JSON_SETTINGS'])
+        if all(data.get(k) == v for k, v in updates.items()):
+            print('unchanged')
+        else:
+            data.update(updates)
+            json.dump(data, open(path, 'w'), indent=2)
+            print('changed')
+        EOF
+      environment:
+        CLAUDE_JSON_SETTINGS: "{{ claude_json_settings | to_json }}"
+      register: claude_json_result
+      changed_when: "claude_json_result.stdout == 'changed'"
+      become: true
+      become_user: migrant
 
     - name: Download uv installer
       ansible.builtin.get_url:
