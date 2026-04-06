@@ -14,9 +14,10 @@ WireGuard config) in the VM directory alongside the `Migrantfile`. No new
 The change takes effect on the next `halt` + `up` cycle. Destroy and recreate
 are not required.
 
-If `wireguard-tools` (`wg`) is not installed on the host, migrant.sh behaves as
-if no `wireguard.conf` is present — the VM starts normally, a warning is printed
-by `migrant.sh up`, and no VPN is configured.
+If `wireguard.conf` is present but `wireguard-tools` (`wg`) is not installed on
+the host, `migrant.sh up` prints an error and refuses to start the VM. A warning
+is easily missed; the user must not be left believing traffic is tunneled when
+it is not.
 
 ---
 
@@ -240,8 +241,11 @@ is a standard Mullvad recommendation for NAT traversal.
 
 ## Changes to `cmd_up`
 
+### Config sync
+
 Before starting the VM (in both the "existing stopped VM" and "new VM" paths),
-sync the managed config:
+sync the managed config. If `wireguard.conf` is present but `wg` is not
+installed, exit immediately with an error rather than continuing without VPN:
 
 ```bash
 # Sync WireGuard config to managed location
@@ -250,15 +254,14 @@ local wg_managed="/etc/migrant/${VM_NAME}/wireguard.conf"
 
 if [[ -f "$wg_src" ]]; then
   if ! command -v wg &>/dev/null; then
-    echo "Warning: wireguard.conf found but 'wg' (wireguard-tools) is not installed." >&2
-    echo "  WireGuard tunnel will not be configured for '$VM_NAME'." >&2
-    echo "  Install wireguard-tools and re-run 'migrant.sh up' to enable it." >&2
-  else
-    sudo mkdir -p "/etc/migrant/${VM_NAME}"
-    sudo chmod 700 "/etc/migrant/${VM_NAME}"
-    sudo cp "$wg_src" "$wg_managed"
-    sudo chmod 600 "$wg_managed"
+    echo "Error: wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
+    echo "  Install wireguard-tools or remove wireguard.conf to start without a VPN." >&2
+    exit 69  # EX_UNAVAILABLE
   fi
+  sudo mkdir -p "/etc/migrant/${VM_NAME}"
+  sudo chmod 700 "/etc/migrant/${VM_NAME}"
+  sudo cp "$wg_src" "$wg_managed"
+  sudo chmod 600 "$wg_managed"
 else
   # Source absent: remove stale managed copy so the hook does not use it
   sudo rm -f "$wg_managed" 2>/dev/null || true
@@ -269,22 +272,110 @@ This block runs unconditionally on every `up`, including when the VM is already
 running. If the VM is running, nothing changes at runtime; the fresh copy takes
 effect on the next start.
 
+### Post-start tunnel verification
+
+After the VM is started, `cmd_up` verifies that both phases of WireGuard setup
+completed successfully. This is called immediately after `virsh start` (or
+`virt-install`) in every code path, including the `AUTOCONNECT=console` early
+return, before the user is handed control.
+
+The `prepare` hook (synchronous, see below) will have already caused `virsh
+start` to fail if the WireGuard interface could not be created. The
+post-start check covers the `started` hook's iptables work, which is async.
+
+```bash
+verify_wireguard_tunnel() {
+  # No-op if WireGuard is not configured for this VM
+  [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]] || return 0
+
+  local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
+  local wg_table
+  wg_table=$(( 10000 + ( 16#$(printf '%s' "$wg_iface" | md5sum | head -c4) % 10000 ) ))
+  local wg_table_hex
+  wg_table_hex=$(printf '%x' "$wg_table")
+
+  # Interface check: should have been created synchronously in the prepare hook.
+  # If this fails, it means prepare somehow ran but the interface isn't visible,
+  # which indicates a kernel-level problem.
+  if ! ip link show "$wg_iface" &>/dev/null; then
+    echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
+    echo "  Traffic is NOT tunneled. Halting VM." >&2
+    virsh destroy "$VM_NAME" 2>/dev/null || true
+    exit 70  # EX_SOFTWARE
+  fi
+
+  # fwmark rule check: the started hook is async; poll briefly for it.
+  # In practice the hook completes within milliseconds of virsh start returning,
+  # but we allow up to 10 seconds to be safe.
+  local deadline=$(( $(date +%s) + 10 ))
+  while (( $(date +%s) < deadline )); do
+    ip rule show | grep -q "fwmark 0x${wg_table_hex}" && break
+    sleep 0.2
+  done
+
+  if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+    echo "Error: WireGuard routing rules for $wg_iface were not applied." >&2
+    echo "  Traffic is NOT tunneled. Halting VM." >&2
+    virsh destroy "$VM_NAME" 2>/dev/null || true
+    exit 70  # EX_SOFTWARE
+  fi
+
+  echo "WireGuard tunnel active: $wg_iface (table $wg_table)." >&2
+}
+```
+
+`virsh destroy` (forced immediate shutdown) is used rather than `virsh
+shutdown` (graceful) because the agent inside the VM must not be given time to
+act on its window of unprotected connectivity.
+
 ---
 
 ## Changes to the qemu hook
 
-The qemu hook (installed by `cmd_setup` to `/etc/libvirt/hooks/qemu.d/migrant`)
-gains two new functions: `wg_setup` and `wg_teardown`. They are called from
-within the existing `apply_rules` and `remove_rules` functions.
+### Why the hook is split across `prepare` and `started`
 
-### `wg_setup` (called from `apply_rules` on VM start)
+Libvirt fires two relevant operations on the qemu hook:
+
+- **`prepare`** fires synchronously before the QEMU process starts. If the hook
+  exits non-zero, libvirt aborts the VM start entirely, and `virsh start`
+  returns a non-zero exit code. This gives us guaranteed, synchronous failure
+  detection.
+
+- **`started`** fires asynchronously after the QEMU process is running. Libvirt
+  does not wait for it and does not propagate its exit code to `virsh start`.
+
+The tap interface (e.g. `vnet0`) does not exist in `prepare` — it is created by
+QEMU during startup, after `prepare` completes. This divides the WireGuard work
+naturally:
+
+| Phase     | Operation         | What can be done                        | Failure mode              |
+| --------- | ----------------- | --------------------------------------- | ------------------------- |
+| `prepare` | `wg_setup_iface`  | Create WG interface, assign addr, routing table | Aborts VM start  |
+| `started` | `wg_setup_rules`  | fwmark mangle rule, DNS FORWARD ACCEPTs | Async; caught by `cmd_up` |
+| `release` | `wg_teardown`     | Remove all of the above                 | —                         |
+
+The existing `apply_rules` (NETWORK_ISOLATION iptables) and `remove_rules`
+functions stay on `started`/`release` as before. `wg_setup_iface` is added as
+a new `prepare` branch in the hook's `case` statement.
+
+### `wg_setup_iface` (called on `prepare` — synchronous)
+
+A non-zero exit here aborts the VM start. Any failure to create the interface or
+configure the routing table is immediately visible to `cmd_up` as a failed
+`virsh start`.
 
 ```bash
-wg_setup() {
-  local vm="$1" iface="$2"
+wg_setup_iface() {
+  local vm="$1"
   local wg_conf="/etc/migrant/${vm}/wireguard.conf"
   [[ -f "$wg_conf" ]] || return 0
-  command -v wg &>/dev/null || return 0
+
+  # wg absence was already caught by cmd_up before virsh start was called,
+  # but check defensively in case the hook fires via another path.
+  command -v wg &>/dev/null || {
+    echo "migrant: wg_setup_iface: 'wg' not found; cannot set up tunnel for $vm" >&2
+    return 1
+  }
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   local WG_TABLE
@@ -295,10 +386,10 @@ wg_setup() {
   WG_ENDPOINT_IP=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
     "$wg_conf" | cut -d: -f1)
 
-  # Capture real gateway to the endpoint BEFORE altering routing
+  # Capture real gateway to the endpoint BEFORE touching routing.
   local via_info via_gw via_dev
   via_info=$(ip route get "$WG_ENDPOINT_IP" 2>/dev/null) || {
-    echo "migrant: wg_setup: cannot route to endpoint $WG_ENDPOINT_IP" >&2
+    echo "migrant: wg_setup_iface: no route to endpoint $WG_ENDPOINT_IP" >&2
     return 1
   }
   via_gw=$(awk 'NR==1{for(i=1;i<NF;i++) if($i=="via"){print $(i+1);exit}}' \
@@ -306,11 +397,11 @@ wg_setup() {
   via_dev=$(awk 'NR==1{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}' \
     <<< "$via_info")
 
-  # Create WireGuard interface
   ip link add "$WG_IFACE" type wireguard
 
   local wg_tmp
   wg_tmp=$(mktemp)
+  # Strip DNS: we parse it ourselves and must not let wg-quick touch host DNS.
   grep -v '^\s*DNS\s*=' "$wg_conf" > "$wg_tmp"
   wg setconf "$WG_IFACE" "$wg_tmp"
   rm -f "$wg_tmp"
@@ -322,7 +413,7 @@ wg_setup() {
   done
   ip link set "$WG_IFACE" up
 
-  # Build routing table
+  # Routing table: endpoint via real gateway (loop prevention) + default via WG.
   if [[ -n "$via_gw" ]]; then
     ip route add "${WG_ENDPOINT_IP}/32" via "$via_gw" dev "$via_dev" table "$WG_TABLE"
   else
@@ -330,12 +421,32 @@ wg_setup() {
   fi
   ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 
-  # Mark packets from this VM's tap and route them via the WireGuard table
+  echo "migrant: WireGuard interface up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
+}
+```
+
+### `wg_setup_rules` (called from `apply_rules` on `started` — async)
+
+This function requires the tap interface, which exists by the time `started`
+fires. It is called at the end of `apply_rules`, after NETWORK_ISOLATION has
+inserted its REJECT rules, so that the DNS ACCEPT rules (inserted with `-I` at
+the head) end up before the REJECTs.
+
+```bash
+wg_setup_rules() {
+  local vm="$1" iface="$2"
+  local wg_conf="/etc/migrant/${vm}/wireguard.conf"
+  [[ -f "$wg_conf" ]] || return 0
+
+  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
+  local WG_TABLE
+  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
+
+  # Mark all packets from this VM's tap; route them via the WireGuard table.
   iptables -t mangle -A PREROUTING -i "$iface" -j MARK --set-mark "$WG_TABLE"
   ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
-  # DNS FORWARD exceptions (must come after NETWORK_ISOLATION inserts its REJECTs
-  # so that -I places these ACCEPTs before the REJECTs in the chain)
+  # DNS FORWARD exceptions.
   local WG_DNS
   WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); print $2}' "$wg_conf")
   if [[ -n "$WG_DNS" ]]; then
@@ -348,11 +459,15 @@ wg_setup() {
     done
   fi
 
-  echo "migrant: WireGuard tunnel up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
+  echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
 }
 ```
 
-### `wg_teardown` (called from `remove_rules` on VM stop)
+### `wg_teardown` (called from `remove_rules` on `release`)
+
+Teardown is detected by checking whether the WireGuard interface exists, not
+whether the conf file is present (the conf may have been removed since the VM
+started, but the interface and rules still need cleaning up).
 
 ```bash
 wg_teardown() {
@@ -362,13 +477,11 @@ wg_teardown() {
   local WG_TABLE
   WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
 
-  # Remove mangle mark rule and policy routing rule
   iptables -t mangle -D PREROUTING -i "$iface" -j MARK \
     --set-mark "$WG_TABLE" 2>/dev/null || true
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
 
-  # Remove DNS FORWARD ACCEPT rules
   if [[ -f "/run/migrant/${vm}.wgdns" ]]; then
     IFS=',' read -ra dns_list <<< "$(cat "/run/migrant/${vm}.wgdns")"
     for dns_ip in "${dns_list[@]}"; do
@@ -379,43 +492,31 @@ wg_teardown() {
     rm -f "/run/migrant/${vm}.wgdns"
   fi
 
-  # Bring down and delete the WireGuard interface
   ip link set "$WG_IFACE" down 2>/dev/null || true
   ip link del "$WG_IFACE" 2>/dev/null || true
 
-  echo "migrant: WireGuard tunnel down: $WG_IFACE for $vm" >&2
+  echo "migrant: WireGuard torn down: $WG_IFACE for $vm" >&2
 }
 ```
 
-### Integration into `apply_rules` / `remove_rules`
-
-`wg_setup` is called at the end of `apply_rules`, after the NETWORK_ISOLATION
-REJECT rules have been inserted. This ordering is required: the DNS ACCEPT rules
-inserted by `wg_setup` use `-I FORWARD` (insert at head), so they land before
-the REJECT rules only if the REJECTs are already in the chain.
-
-`wg_teardown` is called from `remove_rules`. Detection uses the WireGuard
-interface name rather than the presence of the conf file (the conf may have been
-removed since the VM started):
+### Hook `case` statement
 
 ```bash
-remove_rules() {
-  local vm="$1"
-  local iface
-  iface=$(cat "/run/migrant/${vm}.iface" 2>/dev/null) || return 0
-  [[ -z "$iface" ]] && return 0
+case "$OPERATION" in
+  prepare) wg_setup_iface  "$VM_NAME" ;;
+  started) apply_rules     "$VM_NAME" ;;   # calls wg_setup_rules at the end
+  release) remove_rules    "$VM_NAME" ;;   # calls wg_teardown if iface exists
+esac
+```
 
-  # ... existing NETWORK_ISOLATION cleanup ...
+`remove_rules` checks for the WireGuard interface before calling `wg_teardown`:
 
-  # WireGuard teardown: check if the interface exists, not the conf file
-  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
-  if ip link show "$WG_IFACE" &>/dev/null \
-      || [[ -f "/run/migrant/${vm}.wgdns" ]]; then
-    wg_teardown "$vm" "$iface"
-  fi
-
-  rm -f "/run/migrant/${vm}.iface"
-}
+```bash
+local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
+if ip link show "$WG_IFACE" &>/dev/null \
+    || [[ -f "/run/migrant/${vm}.wgdns" ]]; then
+  wg_teardown "$vm" "$iface"
+fi
 ```
 
 ---
@@ -442,7 +543,7 @@ re-run `migrant.sh setup` after the update, as they would for any hook change.
 
 The `wireguard-tools` prerequisite is intentionally not checked here. `setup`
 configures host infrastructure; WireGuard is an optional per-VM feature. The
-warning in `cmd_up` is the appropriate place.
+error in `cmd_up` is the appropriate place.
 
 ---
 
@@ -460,12 +561,13 @@ WireGuard private keys from any of the three example VM directories.
 
 ## Summary of file changes
 
-| File                                  | Change                                          |
-| ------------------------------------- | ----------------------------------------------- |
-| `migrant.sh` — `cmd_up`              | Sync `wireguard.conf` to `/etc/migrant/<name>/` |
-| `migrant.sh` — `teardown_vm`         | `rm -rf /etc/migrant/<name>/`                   |
-| `migrant.sh` — qemu hook body        | Add `wg_setup` + `wg_teardown` functions        |
-| `migrant.sh` — qemu hook `apply_rules` | Call `wg_setup` after NETWORK_ISOLATION rules  |
-| `migrant.sh` — qemu hook `remove_rules` | Call `wg_teardown` if WG iface exists         |
-| `.gitignore`                          | Add `*/wireguard.conf`                          |
-| `README.md`                           | Add private key gitignore warning               |
+| File                                       | Change                                                              |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `migrant.sh` — `cmd_up`                   | Error+abort if `wg` missing; sync conf; call `verify_wireguard_tunnel` after start |
+| `migrant.sh` — `teardown_vm`              | `rm -rf /etc/migrant/<name>/`                                       |
+| `migrant.sh` — qemu hook `case` statement | Add `prepare` branch calling `wg_setup_iface`                       |
+| `migrant.sh` — qemu hook body             | Add `wg_setup_iface`, `wg_setup_rules`, `wg_teardown` functions     |
+| `migrant.sh` — qemu hook `apply_rules`    | Call `wg_setup_rules` after NETWORK_ISOLATION rules                 |
+| `migrant.sh` — qemu hook `remove_rules`   | Call `wg_teardown` if WG interface exists                           |
+| `.gitignore`                               | Add `*/wireguard.conf`                                              |
+| `README.md`                               | Add private key gitignore warning                                   |
