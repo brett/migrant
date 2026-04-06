@@ -20,9 +20,6 @@
           ({ config, pkgs, modulesPath, ... }: {
 
             # --- Disk image builder ---
-            # Use nixpkgs' make-disk-image to produce a qcow2.
-            # The image is built as part of system.build so we can
-            # reference it from the flake output.
             system.build.qcow2 = import "${modulesPath}/../lib/make-disk-image.nix" {
               inherit lib config pkgs;
               baseName = "nixos-base";    # avoid collision with migrant.sh's {VM_NAME}.qcow2
@@ -32,15 +29,10 @@
             };
 
             # --- Boot ---
-            # GRUB in MBR mode — standard for qcow2 cloud images without UEFI.
             boot.loader.grub.enable = true;
             boot.loader.grub.device = "/dev/vda";
-
-            # Grow the root partition to fill DISK_GB at first boot.
-            # Works with cloud-init's growpart module or systemd-growfs.
             boot.growPartition = true;
 
-            # Root filesystem — single ext4 partition
             fileSystems."/" = {
               device = "/dev/vda1";
               fsType = "ext4";
@@ -48,25 +40,42 @@
             };
 
             # --- Serial console ---
-            # migrant.sh console connects via serial (ttyS0)
             boot.kernelParams = [ "console=ttyS0,115200n8" ];
             systemd.services."serial-getty@ttyS0".enable = true;
 
             # --- virtiofs ---
-            # Kernel module for host-guest shared folders.
-            # The actual mount is done by cloud-init runcmd (explicit
-            # mount -t virtiofs) because the mount point lives under
-            # /home/migrant which doesn't exist until cloud-init creates
-            # the user.
+            # Module must be available; the actual mount is handled by
+            # cloud-init runcmd (the user and homedir don't exist until
+            # cloud-init creates them).
             boot.initrd.availableKernelModules = [ "virtiofs" ];
 
-            # --- cloud-init ---
-            # migrant.sh creates a NoCloud seed ISO with user-data and
-            # attaches it as a CD-ROM at boot.
+            # --- Cloud-init ---
+            # SSH keys and user creation are handled by cloud-init at boot
+            # (from the seed ISO that migrant.sh generates), keeping the base
+            # image generic and reusable across key changes.
             services.cloud-init.enable = true;
+            # Override default cloud_final_modules to remove
+            # keys-to-console: its helper (write-ssh-key-fingerprints)
+            # is missing from the NixOS cloud-init package, causing a
+            # recoverable error and exit code 2 instead of 0.
+            # NixOS openssh generates host keys itself; stop cloud-init
+            # from attempting it (fails on NixOS → exit code 2).
+            services.cloud-init.settings.ssh_genkeytypes = [];
+            services.cloud-init.settings.cloud_final_modules = [
+              "rightscale_userdata"
+              "scripts-vendor"
+              "scripts-per-once"
+              "scripts-per-boot"
+              "scripts-per-instance"
+              "scripts-user"
+              "ssh-authkey-fingerprints"
+              # "keys-to-console" — removed (missing helper binary on NixOS)
+              "phone-home"
+              "final-message"
+              "power-state-change"
+            ];
 
             # --- OpenSSH ---
-            # Required for `migrant.sh ssh`
             services.openssh = {
               enable = true;
               settings = {
@@ -75,33 +84,39 @@
               };
             };
 
+            # Allow passwordless sudo for wheel group members
+            security.sudo.wheelNeedsPassword = false;
+
+            # --- /bin/bash compatibility ---
+            # NixOS only provides /bin/sh by default. cloud-init (and
+            # many scripts) expect /bin/bash, so create the symlink.
+            system.activationScripts.binbash = lib.stringAfter [ "stdio" ] ''
+              ln -sfn ${pkgs.bash}/bin/bash /bin/bash
+            '';
+
             # --- Nix flakes ---
             nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-            # --- Development packages ---
-            # Equivalent to Arch's base-devel group
+            # --- Packages ---
             environment.systemPackages = with pkgs; [
+              cloud-init  # CLI must be on PATH for migrant.sh's cloud-init status --wait
               git
-              gcc
-              gnumake
-              binutils
-              pkg-config
+              unzip
             ];
 
-            # Allow passwordless sudo for wheel group members
-            # (cloud-init.yml grants NOPASSWD sudo to the user)
-            security.sudo.wheelNeedsPassword = false;
+            # --- Disable unnecessary services ---
+            systemd.timers.fstrim.enable = false;
+            nix.gc.automatic = false;
+            nix.optimise.automatic = false;
 
             networking.hostName = "nixos";
 
-            # Must match the nixpkgs channel
             system.stateVersion = "25.11";
           })
         ];
       };
 
     in {
-      # Build with: nix build
       packages.${system} = let
         image = nixosConfig.config.system.build.qcow2;
       in {
