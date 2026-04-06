@@ -600,6 +600,46 @@ error in `cmd_up` is the appropriate place.
 
 ---
 
+## Prerequisite checking: userspace tool vs kernel module
+
+`cmd_up` checks for the `wg` binary (`wireguard-tools`). It does **not**
+separately check for the WireGuard kernel module. These are independent:
+on Arch Linux, `wireguard-tools` is a separate package from the kernel, and
+one can be present without the other.
+
+A reliable userspace check for the kernel module is not feasible. The
+available approaches all have gaps:
+
+| Method                          | Problem                                      |
+| ------------------------------- | -------------------------------------------- |
+| `grep wireguard /proc/modules`  | Only shows loaded modules; misses built-ins  |
+| `modinfo wireguard`             | Finds `.ko` file; fails for built-in kernels |
+| `modprobe --dry-run wireguard`  | Same as above                                |
+| `/sys/module/wireguard/`        | Only present once the module is active       |
+
+The definitive check is `ip link add <iface> type wireguard`, which exercises
+the actual kernel interface — but this requires root and is exactly what
+`wg_setup_iface` does in the `prepare` hook. If the module is absent, `ip link
+add` fails, the hook returns non-zero, libvirt aborts the VM start, and `cmd_up`
+exits via `set -euo pipefail`.
+
+To make this failure legible rather than surfacing a raw `RTNETLINK` error,
+`wg_setup_iface` should wrap the `ip link add` call explicitly:
+
+```bash
+ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
+  echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
+  echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
+  return 1
+}
+```
+
+In summary: `cmd_up` catches the missing-userspace-tool case early with a clear
+message. The missing-kernel-module case is caught synchronously by the `prepare`
+hook with an equally clear message. No additional check is needed in `cmd_up`.
+
+---
+
 ## `.gitignore` and README
 
 **`.gitignore`:** Add `*/wireguard.conf` to prevent accidental commits of
