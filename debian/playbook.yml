@@ -25,33 +25,14 @@
         create: true
         mode: "0644"
 
-    - name: Create swap file
-      ansible.builtin.command:
-        cmd: fallocate -l 2G /swapfile
-        creates: /swapfile
-
-    - name: Set swap file permissions
-      ansible.builtin.file:
-        path: /swapfile
-        mode: "0600"
-
-    - name: Format swap file
-      ansible.builtin.command:
-        cmd: mkswap /swapfile
-      when: ansible_facts['swaptotal_mb'] == 0
-      changed_when: true
-
-    - name: Enable swap
-      ansible.builtin.command:
-        cmd: swapon /swapfile
-      when: ansible_facts['swaptotal_mb'] == 0
-      changed_when: true
-
-    - name: Persist swap in fstab
-      ansible.builtin.lineinfile:
-        path: /etc/fstab
-        line: '/swapfile none swap sw 0 0'
-        regexp: '^/swapfile'
+    # Debian 13 mounts /tmp as tmpfs, so large writes during installation (e.g.
+    # the Claude Code installer) consume RAM rather than disk and trigger OOM.
+    # Masking tmp.mount causes /tmp to fall back to the on-disk directory,
+    # eliminating the RAM pressure without adding swap overhead.
+    - name: Mask tmp.mount so /tmp is disk-backed rather than tmpfs
+      ansible.builtin.systemd:
+        name: tmp.mount
+        masked: true
 
     - name: Download claude-code installer
       ansible.builtin.get_url:

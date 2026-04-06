@@ -89,10 +89,8 @@ structural or behavioural divergence is not.
 
 Known parity exceptions:
 
-- **swap** (`debian/playbook.yml` only): Debian's cloud image OOM-kills the
-  Claude Code installer without a swapfile; Ubuntu and Arch provision cleanly
-  without one. Do not add swap to the Ubuntu or Arch playbooks unless they
-  exhibit the same failure.
+- **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for
+  `/tmp`; Ubuntu and Arch do not.
 
 ## Target platform
 
