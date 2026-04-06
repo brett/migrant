@@ -521,6 +521,59 @@ fi
 
 ---
 
+## Changes to `cmd_status`
+
+`cmd_status` should report tunnel state so the user can confirm at a glance
+whether traffic is actually being tunneled. The check is based on the managed
+conf (for configuration) and the live kernel state (for active status):
+
+```bash
+# Derive interface name and table ID the same way the hook does
+local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
+local wg_table wg_table_hex
+wg_table=$(( 10000 + ( 16#$(printf '%s' "$wg_iface" | md5sum | head -c4) % 10000 ) ))
+wg_table_hex=$(printf '%x' "$wg_table")
+
+if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
+  local wg_endpoint
+  wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
+    "/etc/migrant/${VM_NAME}/wireguard.conf" | cut -d: -f1)
+
+  if ip link show "$wg_iface" &>/dev/null \
+      && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+    echo "Tunnel:   active — $wg_iface → $wg_endpoint"
+  elif [[ "$state" == "running" ]]; then
+    echo "Tunnel:   ERROR — configured but traffic is NOT tunneled"
+  else
+    echo "Tunnel:   $wg_endpoint (configured, inactive while VM is stopped)"
+  fi
+else
+  echo "Tunnel:   none"
+fi
+```
+
+The three running-VM states map to distinct messages:
+
+| State                                  | Output                                             |
+| -------------------------------------- | -------------------------------------------------- |
+| Interface up + fwmark rule present     | `active — wg-XXXXXXX → 142.147.89.210`            |
+| Interface up but fwmark rule missing   | `ERROR — configured but traffic is NOT tunneled`  |
+| Managed conf exists but interface down | `ERROR — configured but traffic is NOT tunneled`  |
+| VM stopped, managed conf exists        | `142.147.89.210 (configured, inactive while VM is stopped)` |
+| No managed conf                        | `none`                                             |
+
+The "ERROR" line uses the same wording as the `verify_wireguard_tunnel` failure
+message so the user sees a consistent signal regardless of how they discover the
+problem.
+
+Note that `cmd_status` reads `/etc/migrant/<vm-name>/wireguard.conf` (the
+managed copy placed by `up`) rather than `$VM_DIR/wireguard.conf`. This means
+a `wireguard.conf` that has been added to the VM directory but not yet activated
+by a `halt` + `up` cycle is not shown — accurately reflecting that the VM is not
+yet tunneled.
+
+---
+
 ## Changes to `teardown_vm` / `cmd_destroy`
 
 Remove the managed config directory when a VM is destroyed:
@@ -563,7 +616,8 @@ WireGuard private keys from any of the three example VM directories.
 
 | File                                       | Change                                                              |
 | ------------------------------------------ | ------------------------------------------------------------------- |
-| `migrant.sh` — `cmd_up`                   | Error+abort if `wg` missing; sync conf; call `verify_wireguard_tunnel` after start |
+| `migrant.sh` — `cmd_up`                   | Error+abort if `wg` missing; sync conf; call `verify_wireguard_tunnel` after start  |
+| `migrant.sh` — `cmd_status`               | Report tunnel state (active/error/configured/none) with interface and endpoint IP   |
 | `migrant.sh` — `teardown_vm`              | `rm -rf /etc/migrant/<name>/`                                       |
 | `migrant.sh` — qemu hook `case` statement | Add `prepare` branch calling `wg_setup_iface`                       |
 | `migrant.sh` — qemu hook body             | Add `wg_setup_iface`, `wg_setup_rules`, `wg_teardown` functions     |
