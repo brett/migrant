@@ -1,9 +1,9 @@
 # NixOS example
 
-A minimal NixOS VM with development tools, managed by migrant.sh.
+A minimal NixOS VM managed by migrant.sh.
 
-Unlike the arch and claude examples, NixOS does not publish pre-built cloud
-images. The qcow2 is built locally from `flake.nix` instead.
+Unlike the arch, ubuntu, and debian examples, NixOS does not publish pre-built
+cloud images. The qcow2 is built locally from `flake.nix` instead.
 
 ## Prerequisites
 
@@ -27,10 +27,6 @@ Start the VM:
 
     migrant.sh up
 
-Connect:
-
-    migrant.sh ssh
-
 ## What's in the image
 
 Defined in `flake.nix` (NixOS 25.11):
@@ -39,8 +35,10 @@ Defined in `flake.nix` (NixOS 25.11):
 - OpenSSH
 - Serial console on ttyS0
 - virtiofs kernel support
-- git, gcc, gnumake, binutils, pkg-config
+- `/bin/bash` symlink (NixOS only provides `/bin/sh` by default)
+- git, unzip
 - Nix flakes enabled
+- Unnecessary services disabled (fstrim, nix-gc, nix-optimise)
 
 ## What cloud-init configures
 
@@ -49,18 +47,20 @@ Defined in `cloud-init.yml` (per-instance, applied at first boot):
 - User `migrant` with passwordless sudo
 - Managed SSH key
 - Shared folder mounted at `/home/migrant/workspace` via virtiofs
+- cloud-init disabled after first boot
 
-## Differences from the arch example
+## Differences from the other examples
 
 NixOS is declarative, which changes how provisioning works:
 
-- **No `playbook.yml`** — packages and system configuration are baked into the
-  image via `flake.nix`, not installed after boot by Ansible.
-- **Shell path** — NixOS does not have `/bin/bash`; the cloud-init user shell
-  is set to `/run/current-system/sw/bin/bash`.
+- **Image is built locally** — `nix build` instead of downloading a cloud image.
+- **No `playbook.yml`** — all system configuration is baked into the image via
+  `flake.nix`. There is nothing to install after boot.
 - **fstab is read-only** — NixOS generates `/etc/fstab` from its configuration,
   so the virtiofs mount uses an explicit `mount -t virtiofs` command in
   cloud-init `runcmd` rather than appending to fstab.
+- **Unnecessary services disabled in the flake** — no systemd masking needed
+  at provision time.
 
 ## Rebuilding the image
 
