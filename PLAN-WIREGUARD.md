@@ -381,6 +381,14 @@ wg_setup_iface() {
   local WG_TABLE
   WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
 
+  # Clean up any state left by a previous failed setup attempt. Without this, a
+  # partial failure (e.g. wg setconf fails on a malformed key) leaves the
+  # interface in the kernel. The next start attempt then fails at ip link add
+  # with "File exists" and the VM cannot start until the user manually runs
+  # ip link del. ip route flush is similarly defensive for the routing table.
+  ip link del "$WG_IFACE" 2>/dev/null || true
+  ip route flush table "$WG_TABLE" 2>/dev/null || true
+
   local WG_ADDRS WG_ENDPOINT_IP
   WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' "$wg_conf")
   WG_ENDPOINT_IP=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
@@ -397,7 +405,11 @@ wg_setup_iface() {
   via_dev=$(awk 'NR==1{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}' \
     <<< "$via_info")
 
-  ip link add "$WG_IFACE" type wireguard
+  ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
+    echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
+    echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
+    return 1
+  }
 
   local wg_tmp
   wg_tmp=$(mktemp)
@@ -718,19 +730,11 @@ add` fails, the hook returns non-zero, libvirt aborts the VM start, and `cmd_up`
 exits via `set -euo pipefail`.
 
 To make this failure legible rather than surfacing a raw `RTNETLINK` error,
-`wg_setup_iface` should wrap the `ip link add` call explicitly:
-
-```bash
-ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
-  echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
-  echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
-  return 1
-}
-```
-
-In summary: `cmd_up` catches the missing-userspace-tool case early with a clear
-message. The missing-kernel-module case is caught synchronously by the `prepare`
-hook with an equally clear message. No additional check is needed in `cmd_up`.
+the `ip link add` call in `wg_setup_iface` is wrapped with an explicit error
+message (see the function body above). In summary: `cmd_up` catches the
+missing-userspace-tool case early with a clear message. The missing-kernel-module
+case is caught synchronously by the `prepare` hook with an equally clear message.
+No additional check is needed in `cmd_up`.
 
 ---
 
