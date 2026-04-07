@@ -816,6 +816,18 @@ WireGuard logic to the hook body will cause `cmp` to fail, triggering the
 existing "hook is outdated, reinstalling" path. Users must re-run
 `migrant.sh setup` after the update, as they would for any hook change.
 
+The install/update message printed by `cmd_setup` currently describes only the
+network isolation behaviour. Update it to cover WireGuard as well:
+
+```
+Installing VM hook ($qemu_hook).
+  When a migrant.sh-managed VM starts, this hook:
+    - sets up a WireGuard tunnel (if wireguard.conf is present in the VM directory)
+    - blocks the VM from initiating new connections to the host (if NETWORK_ISOLATION=true)
+    - blocks the VM from reaching other hosts on the local network (if NETWORK_ISOLATION=true)
+  All rules and interfaces are removed automatically when the VM stops.
+```
+
 The `wireguard-tools` prerequisite is intentionally not checked here. `setup`
 configures host infrastructure; WireGuard is an optional per-VM feature. The
 error in `cmd_up` is the appropriate place.
