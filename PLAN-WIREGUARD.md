@@ -632,6 +632,11 @@ network isolation is active:
 apply_rules() {
   local vm="$1"
 
+  # No work needed if this VM uses neither network isolation nor WireGuard.
+  [[ "$HAS_NETWORK_ISOLATION" == true ]] \
+    || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    || return 0
+
   local iface=""
   local qemu_pid
   qemu_pid=$(pgrep -af 'qemu' 2>/dev/null | grep -F "guest=${vm}," | awk 'NR==1{print $1}')
