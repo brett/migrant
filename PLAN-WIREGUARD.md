@@ -691,7 +691,8 @@ remove_rules() {
     iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
   fi
 
-  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
   if ip link show "$WG_IFACE" &>/dev/null \
       || [[ -f "/etc/migrant/${vm}/wireguard-dns" ]]; then
     wg_teardown "$vm" "$iface"
