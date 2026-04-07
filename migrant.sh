@@ -995,23 +995,28 @@ apply_rules() {
     || return 0
 
   # Locate the tap interface for this VM without calling virsh.
-  # The kernel exposes the interface name in /proc/PID/fdinfo/N for each open
-  # tun/tap file descriptor (as the "iff:" field). Find the QEMU process by
-  # its -name flag, then scan its open fds for /dev/net/tun entries.
+  # Primary: libvirt pipes the runtime domain XML to the hook and by the
+  # 'started' phase it includes the assigned tap device as <target dev='vnetN'/>.
   local iface=""
-  local qemu_pid
-  qemu_pid=$(pgrep -af 'qemu' 2>/dev/null | grep -F "guest=${vm}," | awk 'NR==1{print $1}')
-  if [[ -n "$qemu_pid" ]]; then
-    for fd in /proc/"${qemu_pid}"/fd/*; do
-      [[ "$(readlink "$fd" 2>/dev/null)" == "/dev/net/tun" ]] || continue
-      local candidate
-      candidate=$(awk '/^iff:/{print $2}' \
-        "/proc/${qemu_pid}/fdinfo/$(basename "$fd")" 2>/dev/null)
-      if [[ -n "$candidate" ]]; then
-        iface="$candidate"
-        break
-      fi
-    done
+  iface=$(echo "$xml" | grep -o "target dev='[^']*'" | head -1 | cut -d"'" -f2)
+
+  # Fallback: scan the QEMU process's open /dev/net/tun fds via /proc/PID/fdinfo.
+  # The kernel exposes the interface name as the "iff:" field in fdinfo.
+  if [[ -z "$iface" ]]; then
+    local qemu_pid
+    qemu_pid=$(pgrep -af 'qemu' 2>/dev/null | grep -F "guest=${vm}," | awk 'NR==1{print $1}')
+    if [[ -n "$qemu_pid" ]]; then
+      for fd in /proc/"${qemu_pid}"/fd/*; do
+        [[ "$(readlink "$fd" 2>/dev/null)" == "/dev/net/tun" ]] || continue
+        local candidate
+        candidate=$(awk '/^iff:/{print $2}' \
+          "/proc/${qemu_pid}/fdinfo/$(basename "$fd")" 2>/dev/null)
+        if [[ -n "$candidate" ]]; then
+          iface="$candidate"
+          break
+        fi
+      done
+    fi
   fi
 
   if [[ -z "$iface" ]]; then
