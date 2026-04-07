@@ -261,6 +261,11 @@ sync_wireguard_config() {
   local wg_endpoint
   wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
     "$wg_src" | cut -d: -f1)
+  if [[ -z "$wg_endpoint" ]]; then
+    echo "Error: wireguard.conf has no Endpoint line." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
   if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
     echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
