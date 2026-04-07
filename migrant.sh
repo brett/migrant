@@ -1024,11 +1024,11 @@ apply_rules() {
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
     # Per-VM INPUT chain: block new connections from VM to host.
-    # DNS and DHCP are already accepted by libvirt's LIBVIRT_INP chain
-    # which runs before this one.
+    # Appended (not inserted) so libvirt's LIBVIRT_INP chain — which accepts
+    # DHCP and DNS destined for dnsmasq — runs first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    iptables -I INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
 
     # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
     # so VMs cannot communicate with each other over the shared bridge)
