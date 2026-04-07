@@ -316,14 +316,16 @@ sync_wireguard_config() {
 
 ### Post-start tunnel verification
 
-After the VM is started, `cmd_up` verifies that both phases of WireGuard setup
-completed successfully. This is called immediately after `virsh start` (or
-`virt-install`) in every code path, including the `AUTOCONNECT=console` early
-return, before the user is handed control.
+After the VM is started, `cmd_up` verifies that WireGuard setup completed
+successfully. This is called immediately after `virsh start` (or `virt-install`)
+in every code path, including the `AUTOCONNECT=console` early return, before the
+user is handed control.
 
-The `prepare` hook (synchronous, see below) will have already caused `virsh
-start` to fail if the WireGuard interface could not be created. The
-post-start check covers the `started` hook's iptables work, which is async.
+Both the interface and the `ip rule` are created synchronously in `prepare`, so
+no polling is required — if `virsh start` succeeds, both are guaranteed to be
+present. The mangle PREROUTING rule (added asynchronously in `started`) is not
+checked here; its absence means packets are not marked and therefore not routed
+via the WireGuard table, which is equivalent to the interface check failing.
 
 ```bash
 verify_wireguard_tunnel() {
@@ -336,9 +338,8 @@ verify_wireguard_tunnel() {
   local wg_table_hex
   wg_table_hex=$(printf '%x' "$wg_table")
 
-  # Interface check: should have been created synchronously in the prepare hook.
-  # If this fails, it means prepare somehow ran but the interface isn't visible,
-  # which indicates a kernel-level problem.
+  # Both checks are synchronous: the interface and ip rule are created in the
+  # prepare hook, which must complete before virsh start returns.
   if ! ip link show "$wg_iface" &>/dev/null; then
     echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
@@ -346,17 +347,8 @@ verify_wireguard_tunnel() {
     exit 70  # EX_SOFTWARE
   fi
 
-  # fwmark rule check: the started hook is async; poll briefly for it.
-  # In practice the hook completes within milliseconds of virsh start returning,
-  # but we allow up to 10 seconds to be safe.
-  local deadline=$(( $(date +%s) + 10 ))
-  while (( $(date +%s) < deadline )); do
-    ip rule show | grep -q "fwmark 0x${wg_table_hex}" && break
-    sleep 0.2
-  done
-
   if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
-    echo "Error: WireGuard routing rules for $wg_iface were not applied." >&2
+    echo "Error: WireGuard routing rule for $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
     virsh destroy "$VM_NAME" 2>/dev/null || true
     exit 70  # EX_SOFTWARE
@@ -390,11 +382,11 @@ The tap interface (e.g. `vnet0`) does not exist in `prepare` — it is created b
 QEMU during startup, after `prepare` completes. This divides the WireGuard work
 naturally:
 
-| Phase     | Operation         | What can be done                        | Failure mode              |
-| --------- | ----------------- | --------------------------------------- | ------------------------- |
-| `prepare` | `wg_setup_iface`  | Create WG interface, assign addr, routing table | Aborts VM start  |
-| `started` | `wg_setup_rules`  | fwmark mangle rule, DNS FORWARD ACCEPTs | Async; caught by `cmd_up` |
-| `release` | `wg_teardown`     | Remove all of the above                 | —                         |
+| Phase     | Operation         | What can be done                                       | Failure mode              |
+| --------- | ----------------- | ------------------------------------------------------ | ------------------------- |
+| `prepare` | `wg_setup_iface`  | Create WG interface, assign addr, routing table, `ip rule` | Aborts VM start       |
+| `started` | `wg_setup_rules`  | mangle PREROUTING mark rule, DNS FORWARD ACCEPTs       | Async; caught by `cmd_up` |
+| `release` | `wg_teardown`     | Remove all of the above                                | —                         |
 
 The existing `apply_rules` (NETWORK_ISOLATION iptables) and `remove_rules`
 functions stay on `started`/`release` as before. `wg_setup_iface` is added as
@@ -427,9 +419,10 @@ wg_setup_iface() {
   # partial failure (e.g. wg setconf fails on a malformed key) leaves the
   # interface in the kernel. The next start attempt then fails at ip link add
   # with "File exists" and the VM cannot start until the user manually runs
-  # ip link del. ip route flush is similarly defensive for the routing table.
+  # ip link del. ip route flush and ip rule del are similarly defensive.
   ip link del "$WG_IFACE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
+  ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
 
   # All parsing and validation was done at sync time; the hook reads files.
   local WG_ADDRS WG_ENDPOINT_IP
@@ -487,6 +480,12 @@ wg_setup_iface() {
   fi
   ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 
+  # Policy rule: divert marked packets to the WireGuard table. This does not
+  # require the tap interface and is placed here (prepare) so that
+  # verify_wireguard_tunnel can confirm it synchronously after virsh start
+  # returns, with no polling required.
+  ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
+
   echo "migrant: WireGuard interface up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
 }
 ```
@@ -508,9 +507,10 @@ wg_setup_rules() {
   local WG_TABLE
   WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
 
-  # Mark all packets from this VM's tap; route them via the WireGuard table.
+  # Mark all packets from this VM's tap with the WireGuard table ID. The policy
+  # rule that routes marked packets via the WireGuard table was already added in
+  # the prepare hook (wg_setup_iface), where it doesn't require the tap interface.
   iptables -t mangle -A PREROUTING -i "$iface" -j MARK --set-mark "$WG_TABLE"
-  ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
   # Drop all IPv6 from this VM. The fwmark routing is IPv4-only; without this
   # rule IPv6 traffic would bypass the tunnel and exit via the host's default
