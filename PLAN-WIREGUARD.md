@@ -228,9 +228,12 @@ is a standard Mullvad recommendation for NAT traversal.
 
 ### Config sync
 
-All WireGuard setup that can be done as the invoking user (with sudo for writes
-to `/etc/migrant/`) is handled by `sync_wireguard_config`. The hooks receive
-pre-validated, pre-parsed files and do no parsing of their own.
+All WireGuard setup that can be done as the invoking user is handled by
+`sync_wireguard_config`. No `sudo` is needed: `cmd_setup` creates `/etc/migrant/`
+as `root:libvirt 2770`, and because the invoking user is in the `libvirt` group,
+they can create and manage their own subdirectory there without elevated
+privileges. The hooks receive pre-validated, pre-parsed files and do no parsing
+of their own.
 
 `cmd_up` calls `sync_wireguard_config` after the "VM is already running" early
 return. The managed directory must reflect the config the VM is actually running
@@ -245,7 +248,7 @@ sync_wireguard_config() {
 
   if [[ ! -f "$wg_src" ]]; then
     # Source absent: remove the managed directory so the hook finds nothing.
-    sudo rm -rf "$managed_dir"
+    rm -rf "$managed_dir"
     return 0
   fi
 
@@ -266,24 +269,25 @@ sync_wireguard_config() {
     exit 65  # EX_DATAERR
   fi
 
-  sudo mkdir -p "$managed_dir"
-  sudo chmod 700 "$managed_dir"
+  # The subdirectory is owner-only (700): other libvirt group members can create
+  # entries in /etc/migrant/ but cannot read each other's private keys.
+  # The qemu hook runs as root and is unaffected by these permissions.
+  mkdir -p "$managed_dir"
+  chmod 700 "$managed_dir"
 
   # wireguard.conf — raw copy (contains private key; permissions must be tight)
-  sudo cp "$wg_src" "$managed_dir/wireguard.conf"
-  sudo chmod 600 "$managed_dir/wireguard.conf"
+  cp "$wg_src" "$managed_dir/wireguard.conf"
+  chmod 600 "$managed_dir/wireguard.conf"
 
   # wireguard-wg.conf — DNS lines stripped; passed directly to wg setconf so
   # the hook needs no temp file and wg cannot modify host DNS.
-  grep -v '^\s*DNS\s*=' "$wg_src" \
-    | sudo tee "$managed_dir/wireguard-wg.conf" > /dev/null
-  sudo chmod 600 "$managed_dir/wireguard-wg.conf"
+  grep -v '^\s*DNS\s*=' "$wg_src" > "$managed_dir/wireguard-wg.conf"
+  chmod 600 "$managed_dir/wireguard-wg.conf"
 
   # wireguard-endpoint — pre-validated numeric endpoint IP for the hook to use
   # when computing the loop-prevention route.
-  printf '%s' "$wg_endpoint" \
-    | sudo tee "$managed_dir/wireguard-endpoint" > /dev/null
-  sudo chmod 600 "$managed_dir/wireguard-endpoint"
+  printf '%s' "$wg_endpoint" > "$managed_dir/wireguard-endpoint"
+  chmod 600 "$managed_dir/wireguard-endpoint"
 
   # wireguard-dns — normalized comma-separated DNS IPs (absent if no DNS line).
   # Consumed by wg_setup_rules and wg_teardown; replaces /run/migrant/${vm}.wgdns.
@@ -291,11 +295,10 @@ sync_wireguard_config() {
   wg_dns=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
     "$wg_src")
   if [[ -n "$wg_dns" ]]; then
-    printf '%s' "$wg_dns" \
-      | sudo tee "$managed_dir/wireguard-dns" > /dev/null
-    sudo chmod 600 "$managed_dir/wireguard-dns"
+    printf '%s' "$wg_dns" > "$managed_dir/wireguard-dns"
+    chmod 600 "$managed_dir/wireguard-dns"
   else
-    sudo rm -f "$managed_dir/wireguard-dns"
+    rm -f "$managed_dir/wireguard-dns"
   fi
 }
 ```
@@ -742,24 +745,53 @@ yet tunneled.
 Remove the managed config directory when a VM is destroyed:
 
 ```bash
-sudo rm -rf "/etc/migrant/${VM_NAME}"
+rm -rf "/etc/migrant/${VM_NAME}"
 ```
 
-This should run after `virsh undefine` in `teardown_vm`, so stale configs do
-not accumulate in `/etc/migrant/` for long-deleted VMs.
+No `sudo` is needed: the directory is owned by the invoking user. This should
+run after `virsh undefine` in `teardown_vm`, so stale configs do not accumulate
+in `/etc/migrant/` for long-deleted VMs.
 
 ---
 
 ## `cmd_setup`
 
-No new sections are needed. The qemu hook is content-checked with `cmp` on
-every `setup` run. Adding WireGuard logic to the hook body will cause `cmp` to
-fail, triggering the existing "hook is outdated, reinstalling" path. Users must
-re-run `migrant.sh setup` after the update, as they would for any hook change.
+The qemu hook is content-checked with `cmp` on every `setup` run. Adding
+WireGuard logic to the hook body will cause `cmp` to fail, triggering the
+existing "hook is outdated, reinstalling" path. Users must re-run
+`migrant.sh setup` after the update, as they would for any hook change.
 
 The `wireguard-tools` prerequisite is intentionally not checked here. `setup`
 configures host infrastructure; WireGuard is an optional per-VM feature. The
 error in `cmd_up` is the appropriate place.
+
+`cmd_setup` must also create `/etc/migrant/` with the correct ownership and
+permissions. This is the only step that requires elevated privileges for
+WireGuard — everything else in `sync_wireguard_config` runs as the invoking
+user. The directory is owned by `root:libvirt` with the setgid bit set so that
+subdirectories created by libvirt group members inherit the group automatically:
+
+```bash
+if [[ ! -d /etc/migrant ]]; then
+  echo "Creating /etc/migrant for WireGuard managed configs..."
+  sudo mkdir -p /etc/migrant
+  sudo chown root:libvirt /etc/migrant
+  sudo chmod 2770 /etc/migrant
+  echo "  Created."
+elif [[ "$(stat -c '%G' /etc/migrant)" != "libvirt" \
+     || "$(stat -c '%a' /etc/migrant)" != "2770" ]]; then
+  echo "Updating /etc/migrant permissions..."
+  sudo chown root:libvirt /etc/migrant
+  sudo chmod 2770 /etc/migrant
+  echo "  Updated."
+else
+  echo "/etc/migrant already configured."
+fi
+```
+
+Because `cmd_setup` verifies the user is in the `libvirt` group (and adds them
+if not), the invoking user is guaranteed to have write access to `/etc/migrant/`
+by the time they run `migrant.sh up`. No new group is needed.
 
 ---
 
