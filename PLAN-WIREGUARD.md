@@ -323,6 +323,19 @@ sync_wireguard_config() {
 }
 ```
 
+### `wg_iface_and_table` (helper — main script)
+
+An identical helper lives in the main script (lowercase variables to match the
+surrounding code style) and is shared by `verify_wireguard_tunnel` and
+`cmd_status`:
+
+```bash
+wg_iface_and_table() {
+  wg_iface="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+  wg_table=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
+}
+```
+
 ### Post-start tunnel verification
 
 After the VM is started, `cmd_up` verifies that WireGuard setup completed
@@ -341,10 +354,8 @@ verify_wireguard_tunnel() {
   # No-op if WireGuard is not configured for this VM
   [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]] || return 0
 
-  local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
-  local wg_table
-  wg_table=$(( 10000 + ( 16#$(printf '%s' "$VM_NAME" | md5sum | head -c5) % 10000 ) ))
-  local wg_table_hex
+  local wg_iface wg_table wg_table_hex
+  wg_iface_and_table "$VM_NAME"
   wg_table_hex=$(printf '%x' "$wg_table")
 
   # Both checks are synchronous: the interface and ip rule are created in the
@@ -401,6 +412,20 @@ The existing `apply_rules` (NETWORK_ISOLATION iptables) and `remove_rules`
 functions stay on `started`/`release` as before. `wg_setup_iface` is added as
 a new `prepare` branch in the hook's `case` statement.
 
+### `wg_iface_and_table` (helper — defined once, used by all three hook functions)
+
+Sets `WG_IFACE` and `WG_TABLE` for a given VM name. Both values are derived
+directly from the VM name so there is no double-hashing. Callers declare the
+variables `local` before calling so bash's dynamic scoping keeps them out of
+the global namespace.
+
+```bash
+wg_iface_and_table() {
+  WG_IFACE="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
+}
+```
+
 ### `wg_setup_iface` (called on `prepare` — synchronous)
 
 A non-zero exit here aborts the VM start. Any failure to create the interface or
@@ -420,9 +445,8 @@ wg_setup_iface() {
     return 1
   }
 
-  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
-  local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
 
   # Clean up any state left by a previous failed setup attempt. Without this, a
   # partial failure (e.g. wg setconf fails on a malformed key) leaves the
@@ -510,9 +534,8 @@ wg_setup_rules() {
   local vm="$1" iface="$2"
   [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] || return 0
 
-  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
-  local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
 
   # Mark all packets from this VM's tap with the WireGuard table ID. The policy
   # rule that routes marked packets via the WireGuard table was already added in
@@ -550,9 +573,8 @@ started, but the interface and rules still need cleaning up).
 wg_teardown() {
   local vm="$1" iface="$2"
 
-  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
-  local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
 
   iptables -t mangle -D PREROUTING -i "$iface" -j MARK \
     --set-mark "$WG_TABLE" 2>/dev/null || true
@@ -716,10 +738,8 @@ directory is absent, so the WireGuard block outputs `Tunnel:   none` and the
 `$state` comparison is never reached.
 
 ```bash
-# Derive interface name and table ID the same way the hook does
-local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
-local wg_table wg_table_hex
-wg_table=$(( 10000 + ( 16#$(printf '%s' "$VM_NAME" | md5sum | head -c5) % 10000 ) ))
+local wg_iface wg_table wg_table_hex
+wg_iface_and_table "$VM_NAME"
 wg_table_hex=$(printf '%x' "$wg_table")
 
 if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
