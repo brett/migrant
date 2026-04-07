@@ -148,10 +148,11 @@ into `/etc/migrant/<vm-name>/`. The hook reads those files directly:
 
 | File                | Content                                    |
 | ------------------- | ------------------------------------------ |
-| `wireguard.conf`    | Raw copy (contains private key)            |
+| `wireguard.conf`    | Raw copy (contains private key)                      |
 | `wireguard-wg.conf` | `wg-quick`-only fields stripped; passed to `wg setconf` |
-| `wireguard-endpoint`| Validated numeric endpoint IP              |
-| `wireguard-dns`     | Normalized comma-separated DNS IPs (absent if none) |
+| `wireguard-endpoint`| Validated numeric endpoint IP                        |
+| `wireguard-address` | Normalized comma-separated interface addresses       |
+| `wireguard-dns`     | Normalized comma-separated DNS IPs (absent if none)  |
 
 Interface bring-up in the hook:
 
@@ -161,9 +162,7 @@ ip link add "$WG_IFACE" type wireguard
 # wireguard-wg.conf has wg-quick-only fields stripped at sync time; no temp file needed.
 wg setconf "$WG_IFACE" "/etc/migrant/${VM_NAME}/wireguard-wg.conf"
 
-WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' \
-  "/etc/migrant/${VM_NAME}/wireguard.conf")
-IFS=',' read -ra addr_list <<< "$WG_ADDRS"
+IFS=',' read -ra addr_list <<< "$(cat "/etc/migrant/${VM_NAME}/wireguard-address")"
 for addr in "${addr_list[@]}"; do
   addr="${addr// /}"
   [[ -n "$addr" ]] && ip addr add "$addr" dev "$WG_IFACE"
@@ -289,7 +288,7 @@ sync_wireguard_config() {
   #   [Peer]:      PublicKey, PresharedKey, AllowedIPs, Endpoint, PersistentKeepalive
   # Fields like Address, DNS, MTU, Table, PostUp/Down, PreUp/Down are wg-quick
   # extensions that wg setconf rejects as parse errors. Strip them all here;
-  # Address is consumed separately below, DNS is written to wireguard-dns.
+  # Address is normalized to wireguard-address below, DNS to wireguard-dns.
   grep -Ev '^\s*(Address|DNS|MTU|Table|Pre(Up|Down)|Post(Up|Down))\s*=' \
     "$wg_src" > "$managed_dir/wireguard-wg.conf"
   chmod 600 "$managed_dir/wireguard-wg.conf"
@@ -298,6 +297,16 @@ sync_wireguard_config() {
   # when computing the loop-prevention route.
   printf '%s' "$wg_endpoint" > "$managed_dir/wireguard-endpoint"
   chmod 600 "$managed_dir/wireguard-endpoint"
+
+  # wireguard-address — normalized comma-separated interface addresses. Multiple
+  # Address = lines (or a single comma-separated value) are collapsed to one line
+  # by the same pattern used for wireguard-dns. The hook reads this file so it
+  # never needs to parse wireguard.conf directly.
+  local wg_addrs
+  wg_addrs=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
+    "$wg_src")
+  printf '%s' "$wg_addrs" > "$managed_dir/wireguard-address"
+  chmod 600 "$managed_dir/wireguard-address"
 
   # wireguard-dns — normalized comma-separated DNS IPs (absent if no DNS line).
   # Consumed by wg_setup_rules and wg_teardown; replaces /run/migrant/${vm}.wgdns.
@@ -425,9 +434,7 @@ wg_setup_iface() {
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
 
   # All parsing and validation was done at sync time; the hook reads files.
-  local WG_ADDRS WG_ENDPOINT_IP
-  WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' \
-    "$managed/wireguard.conf")
+  local WG_ENDPOINT_IP
   WG_ENDPOINT_IP=$(cat "$managed/wireguard-endpoint")
 
   # Capture real gateway to the endpoint BEFORE touching routing.
@@ -462,7 +469,7 @@ wg_setup_iface() {
   # wireguard-wg.conf has DNS lines stripped at sync time; no temp file needed.
   wg setconf "$WG_IFACE" "$managed/wireguard-wg.conf"
 
-  IFS=',' read -ra addr_list <<< "$WG_ADDRS"
+  IFS=',' read -ra addr_list <<< "$(cat "$managed/wireguard-address")"
   for addr in "${addr_list[@]}"; do
     addr="${addr// /}"
     [[ -n "$addr" ]] && ip addr add "$addr" dev "$WG_IFACE"
