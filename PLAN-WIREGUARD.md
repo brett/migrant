@@ -268,9 +268,12 @@ else
 fi
 ```
 
-This block runs unconditionally on every `up`, including when the VM is already
-running. If the VM is running, nothing changes at runtime; the fresh copy takes
-effect on the next start.
+This block runs only when the VM is not already running — it is placed after
+the "VM is already running" early return in `cmd_up`. The managed copy must
+reflect the config the VM is actually running with: `cmd_status` reads from
+`/etc/migrant/${VM_NAME}/wireguard.conf` to report tunnel state, so overwriting
+it on a running VM would cause `cmd_status` to show a config that is not in
+effect. Changes to `wireguard.conf` take effect on the next `halt` + `up`.
 
 ### Post-start tunnel verification
 
