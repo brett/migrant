@@ -398,11 +398,14 @@ successfully. It is called once per start path, immediately after
 `verify_shared_folder_mounts`, before any further branching hands control to the
 user. See the exit-path table above for exact placement.
 
-Both the interface and the `ip rule` are created synchronously in `prepare`, so
-no polling is required — if `virsh start` succeeds, both are guaranteed to be
-present. The mangle PREROUTING rule (added asynchronously in `started`) is not
-checked here; its absence means packets are not marked and therefore not routed
-via the WireGuard table, which is equivalent to the interface check failing.
+The interface and `ip rule` are created synchronously in `prepare` and checked
+without root using `ip link show` and `ip rule show`. The mangle PREROUTING
+rule is added asynchronously in `started` by `wg_setup_rules`, which also
+writes `/run/migrant/<vm>.wgmark` as its final action. Checking that file
+rather than querying iptables avoids needing root in `cmd_up`. The poll is
+short in practice — `started` fires almost immediately after `virsh start`
+returns, well before the VM has booted — but a 5-second timeout provides a
+safe margin and fails closed.
 
 ```bash
 verify_wireguard_tunnel() {
@@ -413,8 +416,8 @@ verify_wireguard_tunnel() {
   wg_iface_and_table "$VM_NAME"
   wg_table_hex=$(printf '%x' "$wg_table")
 
-  # Both checks are synchronous: the interface and ip rule are created in the
-  # prepare hook, which must complete before virsh start returns.
+  # Synchronous checks: interface and ip rule are created in prepare, which
+  # completes before virsh start returns.
   if ! ip link show "$wg_iface" &>/dev/null; then
     echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
@@ -428,6 +431,20 @@ verify_wireguard_tunnel() {
     virsh destroy "$VM_NAME" 2>/dev/null || true
     exit 70  # EX_SOFTWARE
   fi
+
+  # Async check: poll for the sentinel written by wg_setup_rules in 'started'.
+  # Its presence confirms the mangle PREROUTING mark rule was successfully
+  # applied. Querying iptables directly would require root.
+  local deadline=$(( SECONDS + 5 ))
+  while [[ ! -f "/run/migrant/${VM_NAME}.wgmark" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Error: WireGuard marking rule not applied after 5s." >&2
+      echo "  Traffic is NOT tunneled. Halting VM." >&2
+      virsh destroy "$VM_NAME" 2>/dev/null || true
+      exit 70  # EX_SOFTWARE
+    fi
+    sleep 1
+  done
 
   echo "WireGuard tunnel active: $wg_iface (table $wg_table)." >&2
 }
@@ -607,6 +624,11 @@ wg_setup_rules() {
     done
   fi
 
+  # Sentinel: written last so its presence means all rules above succeeded.
+  # verify_wireguard_tunnel polls for this file rather than querying iptables
+  # (which requires root). Deleted by wg_teardown on release.
+  echo "ok" > "/run/migrant/${vm}.wgmark"
+
   echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
 }
 ```
@@ -643,6 +665,8 @@ wg_teardown() {
 
   ip link set "$WG_IFACE" down 2>/dev/null || true
   ip link del "$WG_IFACE" 2>/dev/null || true
+
+  rm -f "/run/migrant/${vm}.wgmark"
 
   echo "migrant: WireGuard torn down: $WG_IFACE for $vm" >&2
 }
