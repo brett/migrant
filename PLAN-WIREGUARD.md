@@ -149,7 +149,7 @@ into `/etc/migrant/<vm-name>/`. The hook reads those files directly:
 | File                | Content                                    |
 | ------------------- | ------------------------------------------ |
 | `wireguard.conf`    | Raw copy (contains private key)            |
-| `wireguard-wg.conf` | `DNS =` lines stripped; passed to `wg setconf` |
+| `wireguard-wg.conf` | `wg-quick`-only fields stripped; passed to `wg setconf` |
 | `wireguard-endpoint`| Validated numeric endpoint IP              |
 | `wireguard-dns`     | Normalized comma-separated DNS IPs (absent if none) |
 
@@ -158,7 +158,7 @@ Interface bring-up in the hook:
 ```bash
 ip link add "$WG_IFACE" type wireguard
 
-# wireguard-wg.conf has DNS stripped at sync time; no temp file needed.
+# wireguard-wg.conf has wg-quick-only fields stripped at sync time; no temp file needed.
 wg setconf "$WG_IFACE" "/etc/migrant/${VM_NAME}/wireguard-wg.conf"
 
 WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' \
@@ -279,9 +279,15 @@ sync_wireguard_config() {
   cp "$wg_src" "$managed_dir/wireguard.conf"
   chmod 600 "$managed_dir/wireguard.conf"
 
-  # wireguard-wg.conf — DNS lines stripped; passed directly to wg setconf so
-  # the hook needs no temp file and wg cannot modify host DNS.
-  grep -v '^\s*DNS\s*=' "$wg_src" > "$managed_dir/wireguard-wg.conf"
+  # wireguard-wg.conf — wg-quick-only fields stripped before passing to wg setconf.
+  # wg setconf only understands the core WireGuard kernel interface fields:
+  #   [Interface]: PrivateKey, ListenPort, FwMark
+  #   [Peer]:      PublicKey, PresharedKey, AllowedIPs, Endpoint, PersistentKeepalive
+  # Fields like Address, DNS, MTU, Table, PostUp/Down, PreUp/Down are wg-quick
+  # extensions that wg setconf rejects as parse errors. Strip them all here;
+  # Address is consumed separately below, DNS is written to wireguard-dns.
+  grep -Ev '^\s*(Address|DNS|MTU|Table|Pre(Up|Down)|Post(Up|Down))\s*=' \
+    "$wg_src" > "$managed_dir/wireguard-wg.conf"
   chmod 600 "$managed_dir/wireguard-wg.conf"
 
   # wireguard-endpoint — pre-validated numeric endpoint IP for the hook to use
