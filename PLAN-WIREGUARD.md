@@ -194,9 +194,10 @@ consequence.
 
 If `wireguard.conf` has no `DNS` line, `wireguard-dns` is not created. The VM
 uses the host's resolver via libvirt's DHCP (`192.168.200.1`). DNS queries are
-resolved by the host and are not routed through the VPN. This is an acceptable
-trade-off; users who want full DNS isolation through the VPN should include a
-`DNS` line in their config.
+resolved by the host and are not routed through the VPN. The host is trusted, so
+this is acceptable; `sync_wireguard_config` prints a one-line warning so the user
+is aware rather than surprised. Users who want DNS routed through the VPN should
+add a `DNS` line to their config.
 
 ---
 
@@ -308,6 +309,7 @@ sync_wireguard_config() {
     chmod 600 "$managed_dir/wireguard-dns"
   else
     rm -f "$managed_dir/wireguard-dns"
+    echo "Warning: wireguard.conf has no DNS line — DNS will use the host resolver, not the VPN." >&2
   fi
 }
 ```
