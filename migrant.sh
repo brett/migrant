@@ -263,6 +263,149 @@ ensure_shared_folder_images() {
   done
 }
 
+wg_iface_and_table() {
+  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # 7 chars = 28 bits of hash; collision probability is negligible at any
+  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
+  # 15-char kernel interface name limit.
+  wg_iface="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+
+  # Routing table ID: the same 7 hex chars interpreted as an integer.
+  # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability
+  # at ~19,000 VMs. The four kernel-reserved table IDs (0, 253–255) are hit
+  # with probability < 2e-6. The same ID is reused as the fwmark value and
+  # the ip rule priority, so all three are unique per VM by construction.
+  wg_table=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
+}
+
+sync_wireguard_config() {
+  local wg_src="$VM_DIR/wireguard.conf"
+  local managed_dir="/etc/migrant/${VM_NAME}"
+
+  if [[ ! -f "$wg_src" ]]; then
+    # Source absent: remove the managed directory so the hook finds nothing.
+    rm -rf "$managed_dir"
+    return 0
+  fi
+
+  if ! command -v wg &>/dev/null; then
+    echo "Error: wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
+    echo "  Install wireguard-tools or remove wireguard.conf to start without a VPN." >&2
+    exit 69  # EX_UNAVAILABLE
+  fi
+
+  # Validate that Endpoint is a numeric IP. Done here so the error surfaces in
+  # the user's terminal rather than the libvirt journal.
+  local wg_endpoint
+  wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
+    "$wg_src" | cut -d: -f1)
+  if [[ -z "$wg_endpoint" ]]; then
+    echo "Error: wireguard.conf has no Endpoint line." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
+  if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  # The subdirectory is owner-only (700): other libvirt group members can create
+  # entries in /etc/migrant/ but cannot read each other's private keys.
+  # The qemu hook runs as root and is unaffected by these permissions.
+  mkdir -p "$managed_dir"
+  chmod 700 "$managed_dir"
+
+  # wireguard.conf — raw copy (contains private key; permissions must be tight)
+  cp "$wg_src" "$managed_dir/wireguard.conf"
+  chmod 600 "$managed_dir/wireguard.conf"
+
+  # wireguard-wg.conf — wg-quick-only fields stripped before passing to wg setconf.
+  # wg setconf only understands the core WireGuard kernel interface fields:
+  #   [Interface]: PrivateKey, ListenPort, FwMark
+  #   [Peer]:      PublicKey, PresharedKey, AllowedIPs, Endpoint, PersistentKeepalive
+  # Fields like Address, DNS, MTU, Table, SaveConfig, PostUp/Down, PreUp/Down
+  # are wg-quick extensions that wg setconf rejects as parse errors. Strip them
+  # all here; Address is normalized to wireguard-address below, DNS to wireguard-dns.
+  grep -Ev '^\s*(Address|DNS|MTU|Table|SaveConfig|Pre(Up|Down)|Post(Up|Down))\s*=' \
+    "$wg_src" > "$managed_dir/wireguard-wg.conf"
+  chmod 600 "$managed_dir/wireguard-wg.conf"
+
+  # wireguard-endpoint — pre-validated numeric endpoint IP; stored so cmd_status
+  # can display it without re-parsing wireguard.conf.
+  printf '%s' "$wg_endpoint" > "$managed_dir/wireguard-endpoint"
+  chmod 600 "$managed_dir/wireguard-endpoint"
+
+  # wireguard-address — normalized comma-separated interface addresses. Multiple
+  # Address = lines (or a single comma-separated value) are collapsed to one line
+  # by the same pattern used for wireguard-dns. The hook reads this file so it
+  # never needs to parse wireguard.conf directly.
+  local wg_addrs
+  wg_addrs=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
+    "$wg_src")
+  if [[ -z "$wg_addrs" ]]; then
+    echo "Error: wireguard.conf has no Address line." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
+  printf '%s' "$wg_addrs" > "$managed_dir/wireguard-address"
+  chmod 600 "$managed_dir/wireguard-address"
+
+  # wireguard-dns — normalized comma-separated DNS IPs (absent if no DNS line).
+  # Consumed by wg_setup_rules and wg_teardown; replaces /run/migrant/${vm}.wgdns.
+  local wg_dns
+  wg_dns=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
+    "$wg_src")
+  if [[ -n "$wg_dns" ]]; then
+    printf '%s' "$wg_dns" > "$managed_dir/wireguard-dns"
+    chmod 600 "$managed_dir/wireguard-dns"
+  else
+    rm -f "$managed_dir/wireguard-dns"
+    echo "Warning: wireguard.conf has no DNS line — DNS will use the host resolver, not the VPN." >&2
+  fi
+}
+
+verify_wireguard_tunnel() {
+  # No-op if WireGuard is not configured for this VM
+  [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]] || return 0
+
+  local wg_iface wg_table wg_table_hex
+  wg_iface_and_table "$VM_NAME"
+  wg_table_hex=$(printf '%x' "$wg_table")
+
+  # Synchronous checks: interface and ip rule are created in prepare, which
+  # completes before virsh start returns.
+  if ! ip link show "$wg_iface" &>/dev/null; then
+    echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
+    echo "  Traffic is NOT tunneled. Halting VM." >&2
+    virsh destroy "$VM_NAME" 2>/dev/null || true
+    exit 70  # EX_SOFTWARE
+  fi
+
+  if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+    echo "Error: WireGuard routing rule for $wg_iface is missing after VM start." >&2
+    echo "  Traffic is NOT tunneled. Halting VM." >&2
+    virsh destroy "$VM_NAME" 2>/dev/null || true
+    exit 70  # EX_SOFTWARE
+  fi
+
+  # Async check: poll for the sentinel written by wg_setup_rules in 'started'.
+  # Its presence confirms the mangle PREROUTING mark rule was successfully
+  # applied. Querying iptables directly would require root.
+  local deadline=$(( SECONDS + 5 ))
+  while [[ ! -f "/run/migrant/${VM_NAME}.wgmark" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Error: WireGuard marking rule not applied after 5s." >&2
+      echo "  Traffic is NOT tunneled. Halting VM." >&2
+      virsh destroy "$VM_NAME" 2>/dev/null || true
+      exit 70  # EX_SOFTWARE
+    fi
+    sleep 1
+  done
+
+  echo "WireGuard tunnel active: $wg_iface (table $wg_table)." >&2
+}
+
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
     echo "Error: No cloud-init.yml found in $VM_DIR" >&2
@@ -310,8 +453,10 @@ cmd_up() {
     check_managed_key_match start
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
+    sync_wireguard_config
     virsh start "$VM_NAME"
     verify_shared_folder_mounts
+    verify_wireguard_tunnel
     if [[ "${AUTOCONNECT:-}" == "console" ]]; then
       do_autoconnect
       return
@@ -427,6 +572,8 @@ EOF
   [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
     && vm_description+=",shared-folder-isolation=false"
 
+  sync_wireguard_config
+
   virt-install \
     --name "$VM_NAME" \
     --description "$vm_description" \
@@ -443,6 +590,7 @@ EOF
     "${extra_args[@]}"
 
   verify_shared_folder_mounts
+  verify_wireguard_tunnel
 
   # AUTOCONNECT=console with no provisioning needed: attach immediately after
   # the VM starts, letting the user watch the boot. Skip wait_for_ip entirely.
@@ -541,6 +689,24 @@ cmd_setup() {
     echo "  Done. Log out and back in (or run 'newgrp libvirt') for this to take effect."
   fi
 
+  # --- /etc/migrant/ (WireGuard managed config directory) ---
+  echo ""
+  if [[ ! -d /etc/migrant ]]; then
+    echo "Creating /etc/migrant for WireGuard managed configs..."
+    sudo mkdir -p /etc/migrant
+    sudo chown root:libvirt /etc/migrant
+    sudo chmod 2770 /etc/migrant
+    echo "  Created."
+  elif [[ "$(stat -c '%G' /etc/migrant)" != "libvirt" \
+       || "$(stat -c '%a' /etc/migrant)" != "2770" ]]; then
+    echo "Updating /etc/migrant permissions..."
+    sudo chown root:libvirt /etc/migrant
+    sudo chmod 2770 /etc/migrant
+    echo "  Updated."
+  else
+    echo "/etc/migrant already configured."
+  fi
+
   # --- firewall backend ---
   echo ""
   echo "Checking firewall backend..."
@@ -572,7 +738,7 @@ cmd_setup() {
     echo "  Firewall backend '$current_backend' — no change needed."
   fi
 
-  # --- qemu hook (network isolation) ---
+  # --- qemu hook (network isolation + WireGuard) ---
   echo ""
   cat > "$expected_qemu_hook" << 'MIGRANT_QEMU_EOF'
 #!/bin/bash
@@ -591,10 +757,212 @@ CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 # so calling virsh against the same domain deadlocks.)
 xml=$(cat)
 echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
-echo "$xml" | grep -q "network-isolation=true" || exit 0
+
+HAS_NETWORK_ISOLATION=false
+echo "$xml" | grep -q "network-isolation=true" && HAS_NETWORK_ISOLATION=true
+
+VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
+
+wg_iface_and_table() {
+  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # 7 chars = 28 bits of hash; collision probability is negligible at any
+  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
+  # 15-char kernel interface name limit.
+  WG_IFACE="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+
+  # Routing table ID: the same 7 hex chars interpreted as an integer.
+  # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability
+  # at ~19,000 VMs. The four kernel-reserved table IDs (0, 253–255) are hit
+  # with probability < 2e-6. The same ID is reused as the fwmark value and
+  # the ip rule priority, so all three are unique per VM by construction.
+  WG_TABLE=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
+}
+
+vm_block_mac() {
+  local vm="$1"
+  [[ "$HAS_NETWORK_ISOLATION" == true ]] \
+    || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    || return 0
+  [[ -z "$VM_MAC" ]] && return 0
+
+  # nftables bridge 'prerouting' is the right hook: internet-bound traffic from
+  # the VM reaches the bridge with the gateway MAC as destination, so it is
+  # handled by the bridge input path — not the forward path between ports.
+  # The 'prerouting' hook catches all bridge traffic regardless of path.
+  #
+  # Infrastructure (table, set, chain, drop rule) is shared across VMs.
+  # 'add' is idempotent on table and set; the chain add returns non-zero if it
+  # already exists, which is used to gate the one-time rule insertion.
+  nft add table bridge migrant 2>/dev/null || true
+  nft add set bridge migrant blocked_macs \
+    '{ type ether_addr ; }' 2>/dev/null || true
+  if nft add chain bridge migrant prerouting \
+      '{ type filter hook prerouting priority -200 ; policy accept ; }' 2>/dev/null; then
+    nft add rule bridge migrant prerouting ether saddr @blocked_macs drop
+  fi
+
+  # Remove any stale MAC entry from a previous failed setup, then add this VM.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+  nft add element bridge migrant blocked_macs "{ $VM_MAC }"
+}
+
+wg_setup_iface() {
+  local vm="$1"
+  local managed="/etc/migrant/${vm}"
+  [[ -f "$managed/wireguard.conf" ]] || return 0
+
+  # wg absence was already caught by cmd_up before virsh start was called,
+  # but check defensively in case the hook fires via another path.
+  command -v wg &>/dev/null || {
+    echo "migrant: wg_setup_iface: 'wg' not found; cannot set up tunnel for $vm" >&2
+    return 1
+  }
+
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
+
+  # Clean up any state left by a previous failed setup attempt. Without this, a
+  # partial failure (e.g. wg setconf fails on a malformed key) leaves the
+  # interface in the kernel. The next start attempt then fails at ip link add
+  # with "File exists" and the VM cannot start until the user manually runs
+  # ip link del. ip route flush and ip rule del are similarly defensive.
+  ip link del "$WG_IFACE" 2>/dev/null || true
+  ip route flush table "$WG_TABLE" 2>/dev/null || true
+  ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
+
+  ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
+    echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
+    echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
+    return 1
+  }
+
+  # Disable reverse path filtering on the WireGuard interface. With the default
+  # rp_filter=1 (strict mode, the default on linux-hardened), the kernel checks
+  # that the route to a packet's source address uses the same interface the
+  # packet arrived on. Decrypted packets from the Mullvad peer arrive on
+  # wg-XXXXXXX but are destined for 192.168.200.X; the route to that subnet
+  # goes via virbr-migrant, so strict rp_filter silently drops them. This is
+  # the same issue that affects virbr-migrant itself and is handled there by
+  # the existing network hook (migrant-network). The sysctl entry is created
+  # by the kernel when the interface is added and disappears when it is deleted,
+  # so no cleanup is needed in wg_teardown.
+  sysctl -w "net.ipv4.conf.${WG_IFACE}.rp_filter=0" >/dev/null
+
+  # wireguard-wg.conf has DNS lines stripped at sync time; no temp file needed.
+  wg setconf "$WG_IFACE" "$managed/wireguard-wg.conf"
+
+  IFS=',' read -ra addr_list <<< "$(cat "$managed/wireguard-address")"
+  for addr in "${addr_list[@]}"; do
+    addr="${addr// /}"
+    [[ -n "$addr" ]] && ip addr add "$addr" dev "$WG_IFACE"
+  done
+  # WireGuard adds ~60 bytes of per-packet overhead; 1420 keeps encapsulated
+  # packets under the 1500-byte Ethernet MTU and prevents fragmentation.
+  ip link set "$WG_IFACE" mtu 1420
+  ip link set "$WG_IFACE" up
+
+  # All VM traffic exits via the WireGuard interface. No endpoint exclusion
+  # route is needed: WireGuard's encrypted UDP is locally generated (OUTPUT
+  # path) and is never marked by the PREROUTING rule, so it routes via the
+  # main table without interference.
+  ip route add default dev "$WG_IFACE" table "$WG_TABLE"
+
+  # Policy rule: divert marked packets to the WireGuard table. This does not
+  # require the tap interface and is placed here (prepare) so that
+  # verify_wireguard_tunnel can confirm it synchronously after virsh start
+  # returns, with no polling required.
+  #
+  # Priority 100 places this rule before the main table (32766). WG_TABLE is
+  # not used as the priority: its value is in [0, 2^28-1], which is always
+  # above 32766, so the main table would win and the fwmark rule would never
+  # be reached. The fwmark condition already uniquely identifies this VM's
+  # traffic; a shared low priority is fine for multiple simultaneous VMs.
+  ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
+
+  echo "migrant: WireGuard interface up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
+}
+
+wg_setup_rules() {
+  local vm="$1" iface="$2"
+  [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] || return 0
+
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
+
+  # Mark all packets from this VM's tap with the WireGuard table ID. The policy
+  # rule that routes marked packets via the WireGuard table was already added in
+  # the prepare hook (wg_setup_iface), where it doesn't require the tap interface.
+  #
+  # -m physdev --physdev-in is required here instead of plain -i. In iptables
+  # PREROUTING, bridged packets appear to arrive on the bridge device
+  # (virbr-migrant), not the physical tap port (vnet1). physdev matches the
+  # underlying bridge port, which is what uniquely identifies this VM's traffic.
+  iptables -t mangle -A PREROUTING \
+    -m physdev --physdev-in "$iface" -j MARK --set-mark "$WG_TABLE"
+
+  # Drop all IPv6 from this VM. The fwmark routing is IPv4-only; without this
+  # rule IPv6 traffic would bypass the tunnel and exit via the host's default
+  # IPv6 path. The libvirt network provides no routable IPv6 to VMs, so this
+  # rule enforces an existing de-facto limitation rather than removing capability.
+  ip6tables -I FORWARD -i "$iface" -j DROP
+
+  # DNS FORWARD exceptions — IPs pre-parsed and normalized at sync time.
+  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
+  if [[ -f "$wg_dns_file" ]]; then
+    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
+    for dns_ip in "${dns_list[@]}"; do
+      dns_ip="${dns_ip// /}"
+      [[ -z "$dns_ip" ]] && continue
+      iptables -I FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT
+    done
+  fi
+
+  echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
+}
+
+wg_teardown() {
+  local vm="$1" iface="$2"
+
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
+
+  iptables -t mangle -D PREROUTING \
+    -m physdev --physdev-in "$iface" -j MARK \
+    --set-mark "$WG_TABLE" 2>/dev/null || true
+  ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
+  ip route flush table "$WG_TABLE" 2>/dev/null || true
+
+  ip6tables -D FORWARD -i "$iface" -j DROP 2>/dev/null || true
+
+  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
+  if [[ -f "$wg_dns_file" ]]; then
+    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
+    for dns_ip in "${dns_list[@]}"; do
+      dns_ip="${dns_ip// /}"
+      [[ -z "$dns_ip" ]] && continue
+      iptables -D FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
+    done
+  fi
+
+  ip link set "$WG_IFACE" down 2>/dev/null || true
+  ip link del "$WG_IFACE" 2>/dev/null || true
+
+  rm -f "/run/migrant/${vm}.wgmark"
+
+  # Defensive cleanup: if wg_setup_rules never ran (e.g. 'started' hook
+  # crashed before unblocking), the MAC entry may still be in the set.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+
+  echo "migrant: WireGuard torn down: $WG_IFACE for $vm" >&2
+}
 
 apply_rules() {
   local vm="$1"
+
+  # No work needed if this VM uses neither network isolation nor WireGuard.
+  [[ "$HAS_NETWORK_ISOLATION" == true ]] \
+    || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    || return 0
 
   # Locate the tap interface for this VM without calling virsh.
   # The kernel exposes the interface name in /proc/PID/fdinfo/N for each open
@@ -624,18 +992,34 @@ apply_rules() {
   mkdir -p /run/migrant
   echo "$iface" > "/run/migrant/${vm}.iface"
 
-  # Per-VM INPUT chain: block new connections from VM to host.
-  # DNS and DHCP are already accepted by libvirt's LIBVIRT_INP chain
-  # which runs before this one.
-  iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
-  iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-  iptables -I INPUT -i "$iface" -j "$CHAIN"
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    # Per-VM INPUT chain: block new connections from VM to host.
+    # DNS and DHCP are already accepted by libvirt's LIBVIRT_INP chain
+    # which runs before this one.
+    iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
+    iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
+    iptables -I INPUT -i "$iface" -j "$CHAIN"
 
-  # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
-  # so VMs cannot communicate with each other over the shared bridge)
-  iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
-  iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
+    # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
+    # so VMs cannot communicate with each other over the shared bridge)
+    iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
+    iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
+    iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
+  fi
+
+  wg_setup_rules "$vm" "$iface"
+
+  # Unblock the VM's MAC now that all rules are in place (both NI and WG).
+  # vm_block_mac ran in prepare for any managed VM; this is the corresponding
+  # unblock. It runs here — not inside wg_setup_rules — so NI-only VMs are
+  # also unblocked after their REJECT rules are applied.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+
+  # Sentinel: written last so its presence implies all rules applied and MAC
+  # unblocked. verify_wireguard_tunnel polls for this rather than querying
+  # iptables (which requires root). Deleted by wg_teardown on release.
+  [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    && echo "ok" > "/run/migrant/${vm}.wgmark"
 }
 
 remove_rules() {
@@ -644,34 +1028,49 @@ remove_rules() {
   iface=$(cat "/run/migrant/${vm}.iface" 2>/dev/null) || return 0
   [[ -z "$iface" ]] && return 0
 
-  iptables -D INPUT -i "$iface" -j "$CHAIN" 2>/dev/null || true
-  iptables -F "$CHAIN" 2>/dev/null || true
-  iptables -X "$CHAIN" 2>/dev/null || true
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    iptables -D INPUT -i "$iface" -j "$CHAIN" 2>/dev/null || true
+    iptables -F "$CHAIN" 2>/dev/null || true
+    iptables -X "$CHAIN" 2>/dev/null || true
 
-  iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-  iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+  fi
+
+  local WG_IFACE WG_TABLE
+  wg_iface_and_table "$vm"
+  if ip link show "$WG_IFACE" &>/dev/null \
+      || [[ -f "/etc/migrant/${vm}/wireguard-dns" ]]; then
+    wg_teardown "$vm" "$iface"
+  fi
+
+  # Defensive MAC cleanup: covers NI-only VMs (wg_teardown never runs for them)
+  # and any case where apply_rules crashed before the unblock. Idempotent.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
 
   rm -f "/run/migrant/${vm}.iface"
 }
 
 case "$OPERATION" in
-  started) apply_rules "$VM_NAME" ;;
-  release) remove_rules "$VM_NAME" ;;
+  prepare) vm_block_mac   "$VM_NAME"    # all managed VMs (NI or WG)
+           wg_setup_iface "$VM_NAME" ;; # WG VMs only
+  started) apply_rules    "$VM_NAME" ;; # NI rules + wg_setup_rules; unblock MAC; sentinel
+  release) remove_rules   "$VM_NAME" ;; # wg_teardown if WG; defensive MAC cleanup
 esac
 MIGRANT_QEMU_EOF
   if [[ -f "$qemu_hook" ]] && cmp -s "$expected_qemu_hook" "$qemu_hook"; then
-    echo "VM firewall hook already up to date."
+    echo "VM hook already up to date."
   else
     if [[ ! -f "$qemu_hook" ]]; then
-      echo "Installing VM firewall hook ($qemu_hook)."
-      echo "  When a migrant.sh-managed VM with NETWORK_ISOLATION=true starts,"
-      echo "  iptables rules will be added to:"
-      echo "    - block the VM from initiating new connections to the host"
-      echo "    - block the VM from reaching other hosts on the local network"
-      echo "  The rules are removed automatically when the VM stops."
+      echo "Installing VM hook ($qemu_hook)."
+      echo "  When a migrant.sh-managed VM starts, this hook:"
+      echo "    - sets up a WireGuard tunnel (if wireguard.conf is present in the VM directory)"
+      echo "    - blocks the VM from initiating new connections to the host (if NETWORK_ISOLATION=true)"
+      echo "    - blocks the VM from reaching other hosts on the local network (if NETWORK_ISOLATION=true)"
+      echo "  All rules and interfaces are removed automatically when the VM stops."
     else
-      echo "VM firewall hook is outdated, reinstalling ($qemu_hook)."
+      echo "VM hook is outdated, reinstalling ($qemu_hook)."
     fi
     echo "  Elevated permissions are required to write to /etc/libvirt/hooks/."
     install_hook "$expected_qemu_hook" "$qemu_hook"
@@ -939,6 +1338,7 @@ teardown_vm() {
   local keep_snapshot="${1:-}"
   virsh destroy "$VM_NAME" 2>/dev/null || true
   virsh undefine "$VM_NAME" --remove-all-storage --nvram 2>/dev/null || true
+  rm -rf "/etc/migrant/${VM_NAME}"
   if [[ "$keep_snapshot" == "keep_snapshot" ]]; then
     rm -f "$DISK_PATH" "$SEED_ISO"
   else
@@ -1349,10 +1749,11 @@ cmd_unmount() {
 }
 
 cmd_status() {
+  local state=""
+
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
     echo "VM '$VM_NAME' has not been created. Run 'migrant.sh up' to create it."
   else
-    local state
     state=$(virsh domstate "$VM_NAME")
 
     case "$state" in
@@ -1398,6 +1799,33 @@ cmd_status() {
         echo "Loop image: $img_path (not mounted)"
       fi
     done
+  fi
+
+  local wg_iface wg_table wg_table_hex
+  wg_iface_and_table "$VM_NAME"
+  wg_table_hex=$(printf '%x' "$wg_table")
+
+  if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
+    local wg_endpoint wg_dns
+    wg_endpoint=$(cat "/etc/migrant/${VM_NAME}/wireguard-endpoint")
+    wg_dns=$(cat "/etc/migrant/${VM_NAME}/wireguard-dns" 2>/dev/null || true)
+
+    if ip link show "$wg_iface" &>/dev/null \
+        && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+      echo "Tunnel:   active — $wg_iface → $wg_endpoint"
+    elif [[ "$state" == "running" ]]; then
+      echo "Tunnel:   ERROR — configured but traffic is NOT tunneled"
+    else
+      echo "Tunnel:   $wg_endpoint (configured, inactive while VM is stopped)"
+    fi
+
+    if [[ -n "$wg_dns" ]]; then
+      echo "DNS:      $wg_dns (through tunnel)"
+    else
+      echo "DNS:      host"
+    fi
+  else
+    echo "Tunnel:   none"
   fi
 }
 

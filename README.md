@@ -614,6 +614,9 @@ Add `*.img` to `.gitignore` to avoid committing the loop image to source
 control. The `e2fsprogs` package (`mkfs.ext4`) must be installed on the
 host; it is standard on all Linux distributions.
 
+Add `*/wireguard.conf` to `.gitignore` to avoid committing WireGuard private
+keys to source control if your VM directory is in a git repository.
+
 ---
 
 ## Firmware (BIOS vs UEFI)

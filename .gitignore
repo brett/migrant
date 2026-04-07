@@ -1,3 +1,4 @@
 *.img
+*/wireguard.conf
 */workspace/
 .worktrees/
