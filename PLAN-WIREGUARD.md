@@ -90,12 +90,14 @@ ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority "$WG_TABLE"
 
 ### Routing table ID
 
-Policy routing tables require integer IDs. The ID is derived directly from the
-VM name, placing it in the range 10000–19999 (well clear of reserved values and
-common tool ranges):
+Policy routing tables require integer IDs. The ID is derived by interpreting
+the same 7-char hex hash as an integer, giving 2²⁸ = 268,435,456 possible
+values (50% collision probability at ~19,000 VMs — negligible in practice).
+The four kernel-reserved table IDs (0, 253–255) are avoided with probability
+< 2 × 10⁻⁶:
 
 ```bash
-WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
+WG_TABLE=$(( 16#$(printf '%s' "$vm" | md5sum | head -c7) ))
 ```
 
 The table contains one entry:
@@ -123,8 +125,7 @@ are marked by the mangle PREROUTING rule, and are then subject to policy routing
 However, the destination of a reply is `192.168.200.1` — the host's own bridge
 IP. Linux's local routing table (table 255, priority 0) is evaluated before any
 user-defined rule. It always contains a local route for `192.168.200.1`. The
-policy rule (at priority `WG_TABLE`, in the range 10000–19999) is never reached for traffic destined to the host
-itself. SSH from the host to the VM works correctly with the tunnel active.
+policy rule (at priority `WG_TABLE`) is never reached for traffic destined to the host itself. SSH from the host to the VM works correctly with the tunnel active.
 
 ---
 
@@ -331,13 +332,12 @@ wg_iface_and_table() {
   # 15-char kernel interface name limit.
   wg_iface="wg-$(printf '%s' "$1" | md5sum | head -c7)"
 
-  # Routing table ID: derived directly from the VM name (not from the
-  # interface name) so there is no double-hashing. 5 hex chars (20 bits)
-  # mod 10000 gives a stable value in 10000–19999, clear of the kernel
-  # reserved tables (253–255) and common tool ranges. The same ID is reused
-  # as the fwmark value and the ip rule priority, so all three are unique
-  # per VM by construction.
-  wg_table=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
+  # Routing table ID: the same 7 hex chars interpreted as an integer.
+  # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability
+  # at ~19,000 VMs. The four kernel-reserved table IDs (0, 253–255) are hit
+  # with probability < 2e-6. The same ID is reused as the fwmark value and
+  # the ip rule priority, so all three are unique per VM by construction.
+  wg_table=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
 }
 ```
 
@@ -432,13 +432,12 @@ wg_iface_and_table() {
   # 15-char kernel interface name limit.
   WG_IFACE="wg-$(printf '%s' "$1" | md5sum | head -c7)"
 
-  # Routing table ID: derived directly from the VM name (not from the
-  # interface name) so there is no double-hashing. 5 hex chars (20 bits)
-  # mod 10000 gives a stable value in 10000–19999, clear of the kernel
-  # reserved tables (253–255) and common tool ranges. The same ID is reused
-  # as the fwmark value and the ip rule priority, so all three are unique
-  # per VM by construction.
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
+  # Routing table ID: the same 7 hex chars interpreted as an integer.
+  # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability
+  # at ~19,000 VMs. The four kernel-reserved table IDs (0, 253–255) are hit
+  # with probability < 2e-6. The same ID is reused as the fwmark value and
+  # the ip rule priority, so all three are unique per VM by construction.
+  WG_TABLE=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
 }
 ```
 
