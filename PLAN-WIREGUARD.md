@@ -407,14 +407,14 @@ short in practice — `started` fires almost immediately after `virsh start`
 returns, well before the VM has booted — but a 5-second timeout provides a
 safe margin and fails closed.
 
-The gap between `prepare` completing and `wg_setup_rules` finishing is a
-potential bypass window: no PREROUTING mark rule exists yet, so traffic from
-the VM could leave unencrypted. This is closed by `wg_setup_iface` blocking
-the VM's MAC address at the nftables bridge layer before QEMU starts.
-`wg_setup_rules` unblocks the MAC after the PREROUTING rule is in place,
-atomically transitioning from bridge-level block to tunnel enforcement. The
-sentinel write follows the unblock, so `cmd_up`'s observation of the sentinel
-implies the MAC is already unblocked and the tunnel is active.
+The gap between `prepare` completing and `apply_rules` finishing is a potential
+bypass window. For WireGuard VMs, traffic could leave unencrypted; for
+NETWORK_ISOLATION VMs, traffic could reach the host or LAN before the REJECT
+rules land. Both cases are closed by `vm_block_mac`, which blocks the VM's MAC
+address at the nftables bridge layer before QEMU starts. `apply_rules` unblocks
+the MAC as its penultimate action — after all NI and WG rules are in place —
+then writes the sentinel. The sentinel's presence therefore implies the MAC is
+unblocked and all rules are active.
 
 ```bash
 verify_wireguard_tunnel() {
@@ -483,15 +483,17 @@ The tap interface (e.g. `vnet0`) does not exist in `prepare` — it is created b
 QEMU during startup, after `prepare` completes. This divides the WireGuard work
 naturally:
 
-| Phase     | Operation         | What can be done                                                                              | Failure mode              |
-| --------- | ----------------- | --------------------------------------------------------------------------------------------- | ------------------------- |
-| `prepare` | `wg_setup_iface`  | Create WG interface, assign addr, routing table, `ip rule`; DROP VM MAC at bridge             | Aborts VM start           |
-| `started` | `wg_setup_rules`  | mangle PREROUTING mark rule, DNS FORWARD ACCEPTs; unblock MAC                                | Async; caught by `cmd_up` |
-| `release` | `wg_teardown`     | Remove all of the above                                                                       | —                         |
+| Phase     | Operation                           | What can be done                                                                          | Failure mode              |
+| --------- | ----------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------- |
+| `prepare` | `vm_block_mac` + `wg_setup_iface`   | DROP VM MAC at bridge (any NI or WG VM); create WG interface, routing, `ip rule` (WG)    | Aborts VM start           |
+| `started` | `apply_rules` → `wg_setup_rules`    | NI iptables rules; WG PREROUTING mark + DNS ACCEPTs; unblock MAC; write sentinel         | Async; caught by `cmd_up` |
+| `release` | `remove_rules` → `wg_teardown`      | Remove all of the above; defensive MAC unblock                                            | —                         |
 
 The existing `apply_rules` (NETWORK_ISOLATION iptables) and `remove_rules`
-functions stay on `started`/`release` as before. `wg_setup_iface` is added as
-a new `prepare` branch in the hook's `case` statement.
+functions stay on `started`/`release` as before. `vm_block_mac` and
+`wg_setup_iface` are added as a new `prepare` branch in the hook's `case`
+statement. The MAC unblock and sentinel write are centralised at the end of
+`apply_rules` so they cover both NI-only and WG VMs.
 
 ### `wg_iface_and_table` (helper — defined once, used by all three hook functions)
 
@@ -517,7 +519,45 @@ wg_iface_and_table() {
 }
 ```
 
-### `wg_setup_iface` (called on `prepare` — synchronous)
+### `vm_block_mac` (called on `prepare` — for any NI or WG VM)
+
+Blocks the VM's MAC address at the bridge before QEMU starts, closing the
+boot-time race window that exists between `prepare` completing and `apply_rules`
+finishing in `started`. This applies to **any** managed VM that uses network
+isolation or WireGuard — not just WireGuard VMs. Without it, an NI-only VM
+could reach the host or LAN between QEMU start and the REJECT rules landing.
+
+```bash
+vm_block_mac() {
+  local vm="$1"
+  [[ "$HAS_NETWORK_ISOLATION" == true ]] \
+    || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    || return 0
+  [[ -z "$VM_MAC" ]] && return 0
+
+  # nftables bridge 'prerouting' is the right hook: internet-bound traffic from
+  # the VM reaches the bridge with the gateway MAC as destination, so it is
+  # handled by the bridge input path — not the forward path between ports.
+  # The 'prerouting' hook catches all bridge traffic regardless of path.
+  #
+  # Infrastructure (table, set, chain, drop rule) is shared across VMs.
+  # 'add' is idempotent on table and set; the chain add returns non-zero if it
+  # already exists, which is used to gate the one-time rule insertion.
+  nft add table bridge migrant 2>/dev/null || true
+  nft add set bridge migrant blocked_macs \
+    '{ type ether_addr ; }' 2>/dev/null || true
+  if nft add chain bridge migrant prerouting \
+      '{ type filter hook prerouting priority -200 ; policy accept ; }' 2>/dev/null; then
+    nft add rule bridge migrant prerouting ether saddr @blocked_macs drop
+  fi
+
+  # Remove any stale MAC entry from a previous failed setup, then add this VM.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+  nft add element bridge migrant blocked_macs "{ $VM_MAC }"
+}
+```
+
+### `wg_setup_iface` (called on `prepare` — synchronous, WG VMs only)
 
 A non-zero exit here aborts the VM start. Any failure to create the interface or
 configure the routing table is immediately visible to `cmd_up` as a failed
@@ -547,32 +587,6 @@ wg_setup_iface() {
   ip link del "$WG_IFACE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
-
-  # Boot-time race window: between prepare completing and wg_setup_rules
-  # finishing in 'started', no PREROUTING mark rule exists. Any traffic the VM
-  # sends during that window would bypass the tunnel entirely. Close the window
-  # by blocking the VM's MAC address at the bridge layer before QEMU starts.
-  # The block is lifted in wg_setup_rules after the PREROUTING mark is in place.
-  #
-  # nftables bridge 'prerouting' is the right hook: internet-bound traffic from
-  # the VM reaches the bridge with the gateway MAC as destination (not the host
-  # MAC), so it is handled by the bridge input path — not the forward path.
-  # The 'prerouting' hook catches all bridge traffic regardless of path.
-  #
-  # Infrastructure (table, set, chain, drop rule) is shared across VMs.
-  # 'add' is idempotent on table and set; the chain add returns non-zero if it
-  # already exists, which is used to gate the one-time rule insertion.
-  nft add table bridge migrant 2>/dev/null || true
-  nft add set bridge migrant blocked_macs \
-    '{ type ether_addr ; }' 2>/dev/null || true
-  if nft add chain bridge migrant prerouting \
-      '{ type filter hook prerouting priority -200 ; policy accept ; }' 2>/dev/null; then
-    nft add rule bridge migrant prerouting ether saddr @blocked_macs drop
-  fi
-
-  # Remove any stale MAC entry from a previous failed setup, then add this VM.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
-  nft add element bridge migrant blocked_macs "{ $VM_MAC }"
 
   ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
     echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
@@ -658,16 +672,6 @@ wg_setup_rules() {
       iptables -I FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT
     done
   fi
-
-  # Unblock the VM's MAC now that the PREROUTING mark rule is in place.
-  # This closes the boot-time race window opened in wg_setup_iface.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
-
-  # Sentinel: written last so its presence means all rules above succeeded,
-  # including the MAC unblock. verify_wireguard_tunnel polls for this file
-  # rather than querying iptables (which requires root). Deleted by
-  # wg_teardown on release.
-  echo "ok" > "/run/migrant/${vm}.wgmark"
 
   echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
 }
@@ -792,6 +796,18 @@ apply_rules() {
   fi
 
   wg_setup_rules "$vm" "$iface"
+
+  # Unblock the VM's MAC now that all rules are in place (both NI and WG).
+  # vm_block_mac ran in prepare for any managed VM; this is the corresponding
+  # unblock. It runs here — not inside wg_setup_rules — so NI-only VMs are
+  # also unblocked after their REJECT rules are applied.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+
+  # Sentinel: written last so its presence implies all rules applied and MAC
+  # unblocked. verify_wireguard_tunnel polls for this rather than querying
+  # iptables (which requires root). Deleted by wg_teardown on release.
+  [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    && echo "ok" > "/run/migrant/${vm}.wgmark"
 }
 ```
 
@@ -823,6 +839,10 @@ remove_rules() {
     wg_teardown "$vm" "$iface"
   fi
 
+  # Defensive MAC cleanup: covers NI-only VMs (wg_teardown never runs for them)
+  # and any case where apply_rules crashed before the unblock. Idempotent.
+  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+
   rm -f "/run/migrant/${vm}.iface"
 }
 ```
@@ -831,9 +851,10 @@ remove_rules() {
 
 ```bash
 case "$OPERATION" in
-  prepare) wg_setup_iface  "$VM_NAME" ;;
-  started) apply_rules     "$VM_NAME" ;;   # calls wg_setup_rules at the end
-  release) remove_rules    "$VM_NAME" ;;   # calls wg_teardown if iface exists
+  prepare) vm_block_mac   "$VM_NAME"   # all managed VMs (NI or WG)
+           wg_setup_iface "$VM_NAME" ;;  # WG VMs only
+  started) apply_rules    "$VM_NAME" ;;  # NI rules + wg_setup_rules; unblock MAC; sentinel
+  release) remove_rules   "$VM_NAME" ;;  # wg_teardown if WG; defensive MAC cleanup
 esac
 ```
 
