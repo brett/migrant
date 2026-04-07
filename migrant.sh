@@ -904,7 +904,7 @@ wg_setup_rules() {
   # rule IPv6 traffic would bypass the tunnel and exit via the host's default
   # IPv6 path. The libvirt network provides no routable IPv6 to VMs, so this
   # rule enforces an existing de-facto limitation rather than removing capability.
-  ip6tables -I FORWARD -i "$iface" -j DROP
+  ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
 
   # DNS handling — IPs pre-parsed and normalized at sync time.
   # For each DNS IP:
@@ -924,7 +924,7 @@ wg_setup_rules() {
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
-      iptables -I FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT
+      iptables -I FORWARD -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT
       [[ -z "$first_dns" ]] && first_dns="$dns_ip"
     done
     if [[ -n "$first_dns" ]]; then
@@ -952,7 +952,7 @@ wg_teardown() {
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
 
-  ip6tables -D FORWARD -i "$iface" -j DROP 2>/dev/null || true
+  ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
 
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
@@ -961,7 +961,7 @@ wg_teardown() {
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
-      iptables -D FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
+      iptables -D FORWARD -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
       [[ -z "$first_dns" ]] && first_dns="$dns_ip"
     done
     if [[ -n "$first_dns" ]]; then
@@ -1028,13 +1028,13 @@ apply_rules() {
     # which runs before this one.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    iptables -I INPUT -i "$iface" -j "$CHAIN"
+    iptables -I INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
 
     # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
     # so VMs cannot communicate with each other over the shared bridge)
-    iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
-    iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
-    iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
   fi
 
   wg_setup_rules "$vm" "$iface"
@@ -1059,13 +1059,13 @@ remove_rules() {
   [[ -z "$iface" ]] && return 0
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-    iptables -D INPUT -i "$iface" -j "$CHAIN" 2>/dev/null || true
+    iptables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN" 2>/dev/null || true
     iptables -F "$CHAIN" 2>/dev/null || true
     iptables -X "$CHAIN" 2>/dev/null || true
 
-    iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
-    iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-    iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
   fi
 
   local WG_IFACE WG_TABLE

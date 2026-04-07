@@ -70,6 +70,15 @@ libvirt pipes it for every operation. Do not read from `/etc/libvirt/qemu/{name}
 — that file may not exist during initial `virt-install` and reading it was the
 source of a previous bug. Any future hook code must read from stdin.
 
+## iptables in the hook: always use physdev, never -i
+
+VM traffic arrives on the bridge device (`virbr-migrant`), not the tap port
+(`vnet0`, `vnet6`, etc.). In every iptables chain — PREROUTING, FORWARD,
+INPUT — the kernel reports `iif=virbr-migrant` for bridged packets. Using
+`-i vnetN` never matches. Every rule targeting a specific VM's tap must use
+`-m physdev --physdev-in vnetN` instead. This applies to all tables (filter,
+mangle, nat) and ip6tables.
+
 ## How VMs are identified
 
 - libvirt domains are tagged with `--description "managed-by=migrant.sh"` at
