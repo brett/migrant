@@ -906,15 +906,35 @@ wg_setup_rules() {
   # rule enforces an existing de-facto limitation rather than removing capability.
   ip6tables -I FORWARD -i "$iface" -j DROP
 
-  # DNS FORWARD exceptions — IPs pre-parsed and normalized at sync time.
+  # DNS handling — IPs pre-parsed and normalized at sync time.
+  # For each DNS IP:
+  #   1. FORWARD ACCEPT punches through the NI RFC1918 REJECT rules so the
+  #      query can be forwarded through the WireGuard tunnel.
+  #   2. DNAT in nat PREROUTING intercepts all DNS traffic from the VM
+  #      (regardless of the destination the VM chose) and rewrites the
+  #      destination to the configured DNS IP. This forces DNS through the
+  #      tunnel without any configuration inside the VM — the VM continues
+  #      to believe it is talking to 192.168.200.1; conntrack reverses the
+  #      translation on the response. physdev is required for the same
+  #      reason it is required for the mangle mark rule above.
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
+    local first_dns=""
     IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
       iptables -I FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT
+      [[ -z "$first_dns" ]] && first_dns="$dns_ip"
     done
+    if [[ -n "$first_dns" ]]; then
+      iptables -t nat -A PREROUTING \
+        -m physdev --physdev-in "$iface" -p udp --dport 53 \
+        -j DNAT --to-destination "$first_dns"
+      iptables -t nat -A PREROUTING \
+        -m physdev --physdev-in "$iface" -p tcp --dport 53 \
+        -j DNAT --to-destination "$first_dns"
+    fi
   fi
 
   echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
@@ -936,12 +956,22 @@ wg_teardown() {
 
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
+    local first_dns=""
     IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
       iptables -D FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
+      [[ -z "$first_dns" ]] && first_dns="$dns_ip"
     done
+    if [[ -n "$first_dns" ]]; then
+      iptables -t nat -D PREROUTING \
+        -m physdev --physdev-in "$iface" -p udp --dport 53 \
+        -j DNAT --to-destination "$first_dns" 2>/dev/null || true
+      iptables -t nat -D PREROUTING \
+        -m physdev --physdev-in "$iface" -p tcp --dport 53 \
+        -j DNAT --to-destination "$first_dns" 2>/dev/null || true
+    fi
   fi
 
   ip link set "$WG_IFACE" down 2>/dev/null || true
