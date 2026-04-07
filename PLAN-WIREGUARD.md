@@ -411,6 +411,18 @@ wg_setup_iface() {
     return 1
   }
 
+  # Disable reverse path filtering on the WireGuard interface. With the default
+  # rp_filter=1 (strict mode, the default on linux-hardened), the kernel checks
+  # that the route to a packet's source address uses the same interface the
+  # packet arrived on. Decrypted packets from the Mullvad peer arrive on
+  # wg-XXXXXXX but are destined for 192.168.200.X; the route to that subnet
+  # goes via virbr-migrant, so strict rp_filter silently drops them. This is
+  # the same issue that affects virbr-migrant itself and is handled there by
+  # the existing network hook (migrant-network). The sysctl entry is created
+  # by the kernel when the interface is added and disappears when it is deleted,
+  # so no cleanup is needed in wg_teardown.
+  sysctl -w "net.ipv4.conf.${WG_IFACE}.rp_filter=0" >/dev/null
+
   local wg_tmp
   wg_tmp=$(mktemp)
   # Strip DNS: we parse it ourselves and must not let wg-quick touch host DNS.
