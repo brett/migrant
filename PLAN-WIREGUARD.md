@@ -888,8 +888,9 @@ wg_iface_and_table "$VM_NAME"
 wg_table_hex=$(printf '%x' "$wg_table")
 
 if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
-  local wg_endpoint
+  local wg_endpoint wg_dns
   wg_endpoint=$(cat "/etc/migrant/${VM_NAME}/wireguard-endpoint")
+  wg_dns=$(cat "/etc/migrant/${VM_NAME}/wireguard-dns" 2>/dev/null || true)
 
   if ip link show "$wg_iface" &>/dev/null \
       && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
@@ -898,6 +899,12 @@ if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
     echo "Tunnel:   ERROR — configured but traffic is NOT tunneled"
   else
     echo "Tunnel:   $wg_endpoint (configured, inactive while VM is stopped)"
+  fi
+
+  if [[ -n "$wg_dns" ]]; then
+    echo "DNS:      $wg_dns (through tunnel)"
+  else
+    echo "DNS:      host"
   fi
 else
   echo "Tunnel:   none"
@@ -913,6 +920,13 @@ The three running-VM states map to distinct messages:
 | Managed conf exists but interface down | `ERROR — configured but traffic is NOT tunneled`  |
 | VM stopped, managed conf exists        | `142.147.89.210 (configured, inactive while VM is stopped)` |
 | No managed conf                        | `none`                                             |
+
+The `DNS:` line appears whenever a tunnel is configured (regardless of VM state):
+
+| `wireguard-dns` content | Output                                  |
+| ----------------------- | --------------------------------------- |
+| One or more IPs         | `10.64.0.1 (through tunnel)`           |
+| Absent or empty         | `host`                                  |
 
 The "ERROR" line uses the same wording as the `verify_wireguard_tunnel` failure
 message so the user sees a consistent signal regardless of how they discover the
@@ -1043,7 +1057,7 @@ WireGuard private keys from any of the three example VM directories.
 | ------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `migrant.sh` — `sync_wireguard_config`    | New function: validates, copies, and pre-parses WireGuard config into managed files  |
 | `migrant.sh` — `cmd_up`                   | Call `sync_wireguard_config`; call `verify_wireguard_tunnel` after start             |
-| `migrant.sh` — `cmd_status`               | Report tunnel state (active/error/configured/none) with interface and endpoint IP    |
+| `migrant.sh` — `cmd_status`               | Report tunnel state (active/error/configured/none) with interface and endpoint IP; report DNS (through tunnel or host) |
 | `migrant.sh` — `teardown_vm`              | `rm -rf /etc/migrant/<name>/`                                                        |
 | `migrant.sh` — qemu hook `case` statement | Add `prepare` branch calling `wg_setup_iface`; remove top-level network-isolation guard |
 | `migrant.sh` — qemu hook body             | Add `wg_setup_iface`, `wg_setup_rules`, `wg_teardown` functions                     |
