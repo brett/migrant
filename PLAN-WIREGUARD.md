@@ -142,31 +142,27 @@ routing tables, and running arbitrary scripts. Instead, the hook brings up the
 interface using the lower-level `wg` and `ip` commands directly, which gives
 full control and no host side effects.
 
-The managed conf is parsed manually:
+All parsing and validation of `wireguard.conf` is done at sync time by
+`sync_wireguard_config` (called from `cmd_up`), which writes pre-processed files
+into `/etc/migrant/<vm-name>/`. The hook reads those files directly:
 
-```bash
-wg_conf="/etc/migrant/${VM_NAME}/wireguard.conf"
+| File                | Content                                    |
+| ------------------- | ------------------------------------------ |
+| `wireguard.conf`    | Raw copy (contains private key)            |
+| `wireguard-wg.conf` | `DNS =` lines stripped; passed to `wg setconf` |
+| `wireguard-endpoint`| Validated numeric endpoint IP              |
+| `wireguard-dns`     | Normalized comma-separated DNS IPs (absent if none) |
 
-# Address may be comma-separated (IPv4 + IPv6)
-WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /, "", $2); print $2}' "$wg_conf")
-WG_ENDPOINT_IP=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /, "", $2); print $2}' \
-  "$wg_conf" | cut -d: -f1)
-```
-
-Interface bring-up:
+Interface bring-up in the hook:
 
 ```bash
 ip link add "$WG_IFACE" type wireguard
 
-# Apply crypto config. The DNS line is stripped: we resolve the DNS field
-# ourselves (see below). We do not want wg or wg-quick to touch host DNS.
-local wg_tmp
-wg_tmp=$(mktemp)
-trap 'rm -f "$wg_tmp"' RETURN
-grep -v '^\s*DNS\s*=' "$wg_conf" > "$wg_tmp"
-wg setconf "$WG_IFACE" "$wg_tmp"
+# wireguard-wg.conf has DNS stripped at sync time; no temp file needed.
+wg setconf "$WG_IFACE" "/etc/migrant/${VM_NAME}/wireguard-wg.conf"
 
-# Assign addresses
+WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' \
+  "/etc/migrant/${VM_NAME}/wireguard.conf")
 IFS=',' read -ra addr_list <<< "$WG_ADDRS"
 for addr in "${addr_list[@]}"; do
   addr="${addr// /}"
@@ -180,35 +176,24 @@ ip link set "$WG_IFACE" up
 
 ## DNS handling
 
-If the Mullvad config contains a `DNS` line (e.g. `DNS = 10.64.0.1`), the hook
-parses the value and stores it in `/run/migrant/<vm-name>.wgdns` for use at
-teardown time. When `NETWORK_ISOLATION=true` is also set, the RFC1918 FORWARD
-REJECT rules would otherwise block the VM from reaching `10.64.0.1` — even
-though the traffic travels inside the WireGuard tunnel. A targeted FORWARD
-ACCEPT rule is inserted before the REJECT rules for each DNS IP:
+If the Mullvad config contains a `DNS` line (e.g. `DNS = 10.64.0.1`),
+`sync_wireguard_config` parses and normalizes the value into
+`/etc/migrant/<vm-name>/wireguard-dns` (comma-separated IPs). When
+`NETWORK_ISOLATION=true` is also set, the RFC1918 FORWARD REJECT rules would
+otherwise block the VM from reaching `10.64.0.1` — even though the traffic
+travels inside the WireGuard tunnel. `wg_setup_rules` reads `wireguard-dns` and
+inserts a targeted FORWARD ACCEPT rule before the REJECT rules for each DNS IP.
+`wg_teardown` reads the same file to remove those rules on shutdown.
 
-```bash
-WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' "$wg_conf")
+The ACCEPT rules are harmless when `NETWORK_ISOLATION=false` — there are no
+RFC1918 blocks to punch through, so the rules simply match nothing of
+consequence.
 
-if [[ -n "$WG_DNS" ]]; then
-  printf '%s' "$WG_DNS" > "/run/migrant/${VM_NAME}.wgdns"
-  IFS=',' read -ra dns_list <<< "$WG_DNS"
-  for dns_ip in "${dns_list[@]}"; do
-    dns_ip="${dns_ip// /}"
-    [[ -z "$dns_ip" ]] && continue
-    # -I inserts at position 1 (head of chain), before the RFC1918 REJECTs
-    iptables -I FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT
-  done
-fi
-```
-
-The condition is only relevant when `NETWORK_ISOLATION=true`. Without it, there
-are no RFC1918 blocks to punch through. The ACCEPT rules are harmless either way.
-
-If `wireguard.conf` has no `DNS` line, the VM uses the host's resolver via
-libvirt's DHCP (`192.168.200.1`). DNS queries are resolved by the host and are
-not routed through the VPN. This is an acceptable trade-off; users who want
-full DNS isolation through the VPN should include a `DNS` line in their config.
+If `wireguard.conf` has no `DNS` line, `wireguard-dns` is not created. The VM
+uses the host's resolver via libvirt's DHCP (`192.168.200.1`). DNS queries are
+resolved by the host and are not routed through the VPN. This is an acceptable
+trade-off; users who want full DNS isolation through the VPN should include a
+`DNS` line in their config.
 
 ---
 
@@ -243,37 +228,77 @@ is a standard Mullvad recommendation for NAT traversal.
 
 ### Config sync
 
-Before starting the VM (in both the "existing stopped VM" and "new VM" paths),
-sync the managed config. If `wireguard.conf` is present but `wg` is not
-installed, exit immediately with an error rather than continuing without VPN:
+All WireGuard setup that can be done as the invoking user (with sudo for writes
+to `/etc/migrant/`) is handled by `sync_wireguard_config`. The hooks receive
+pre-validated, pre-parsed files and do no parsing of their own.
+
+`cmd_up` calls `sync_wireguard_config` after the "VM is already running" early
+return. The managed directory must reflect the config the VM is actually running
+with: `cmd_status` reads from it to report tunnel state, so syncing on a running
+VM would show a config not yet in effect. Changes to `wireguard.conf` take effect
+on the next `halt` + `up`.
 
 ```bash
-# Sync WireGuard config to managed location
-local wg_src="$VM_DIR/wireguard.conf"
-local wg_managed="/etc/migrant/${VM_NAME}/wireguard.conf"
+sync_wireguard_config() {
+  local wg_src="$VM_DIR/wireguard.conf"
+  local managed_dir="/etc/migrant/${VM_NAME}"
 
-if [[ -f "$wg_src" ]]; then
+  if [[ ! -f "$wg_src" ]]; then
+    # Source absent: remove the managed directory so the hook finds nothing.
+    sudo rm -rf "$managed_dir"
+    return 0
+  fi
+
   if ! command -v wg &>/dev/null; then
     echo "Error: wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
     echo "  Install wireguard-tools or remove wireguard.conf to start without a VPN." >&2
     exit 69  # EX_UNAVAILABLE
   fi
-  sudo mkdir -p "/etc/migrant/${VM_NAME}"
-  sudo chmod 700 "/etc/migrant/${VM_NAME}"
-  sudo cp "$wg_src" "$wg_managed"
-  sudo chmod 600 "$wg_managed"
-else
-  # Source absent: remove stale managed copy so the hook does not use it
-  sudo rm -f "$wg_managed" 2>/dev/null || true
-fi
-```
 
-This block runs only when the VM is not already running — it is placed after
-the "VM is already running" early return in `cmd_up`. The managed copy must
-reflect the config the VM is actually running with: `cmd_status` reads from
-`/etc/migrant/${VM_NAME}/wireguard.conf` to report tunnel state, so overwriting
-it on a running VM would cause `cmd_status` to show a config that is not in
-effect. Changes to `wireguard.conf` take effect on the next `halt` + `up`.
+  # Validate that Endpoint is a numeric IP. Done here so the error surfaces in
+  # the user's terminal rather than the libvirt journal.
+  local wg_endpoint
+  wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
+    "$wg_src" | cut -d: -f1)
+  if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  sudo mkdir -p "$managed_dir"
+  sudo chmod 700 "$managed_dir"
+
+  # wireguard.conf — raw copy (contains private key; permissions must be tight)
+  sudo cp "$wg_src" "$managed_dir/wireguard.conf"
+  sudo chmod 600 "$managed_dir/wireguard.conf"
+
+  # wireguard-wg.conf — DNS lines stripped; passed directly to wg setconf so
+  # the hook needs no temp file and wg cannot modify host DNS.
+  grep -v '^\s*DNS\s*=' "$wg_src" \
+    | sudo tee "$managed_dir/wireguard-wg.conf" > /dev/null
+  sudo chmod 600 "$managed_dir/wireguard-wg.conf"
+
+  # wireguard-endpoint — pre-validated numeric endpoint IP for the hook to use
+  # when computing the loop-prevention route.
+  printf '%s' "$wg_endpoint" \
+    | sudo tee "$managed_dir/wireguard-endpoint" > /dev/null
+  sudo chmod 600 "$managed_dir/wireguard-endpoint"
+
+  # wireguard-dns — normalized comma-separated DNS IPs (absent if no DNS line).
+  # Consumed by wg_setup_rules and wg_teardown; replaces /run/migrant/${vm}.wgdns.
+  local wg_dns
+  wg_dns=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
+    "$wg_src")
+  if [[ -n "$wg_dns" ]]; then
+    printf '%s' "$wg_dns" \
+      | sudo tee "$managed_dir/wireguard-dns" > /dev/null
+    sudo chmod 600 "$managed_dir/wireguard-dns"
+  else
+    sudo rm -f "$managed_dir/wireguard-dns"
+  fi
+}
+```
 
 ### Post-start tunnel verification
 
@@ -370,8 +395,8 @@ configure the routing table is immediately visible to `cmd_up` as a failed
 ```bash
 wg_setup_iface() {
   local vm="$1"
-  local wg_conf="/etc/migrant/${vm}/wireguard.conf"
-  [[ -f "$wg_conf" ]] || return 0
+  local managed="/etc/migrant/${vm}"
+  [[ -f "$managed/wireguard.conf" ]] || return 0
 
   # wg absence was already caught by cmd_up before virsh start was called,
   # but check defensively in case the hook fires via another path.
@@ -392,19 +417,11 @@ wg_setup_iface() {
   ip link del "$WG_IFACE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
 
+  # All parsing and validation was done at sync time; the hook reads files.
   local WG_ADDRS WG_ENDPOINT_IP
-  WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' "$wg_conf")
-  WG_ENDPOINT_IP=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
-    "$wg_conf" | cut -d: -f1)
-
-  # Require a numeric IP. Hostnames are valid in the WireGuard spec but the
-  # hook runs as root with no guaranteed DNS resolver; a lookup failure would
-  # surface as a confusing "no route to endpoint" error later. Mullvad configs
-  # always use IPs, so this is a safety check rather than a real restriction.
-  if [[ ! "$WG_ENDPOINT_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "migrant: wg_setup_iface: Endpoint must be an IP address, not a hostname ($WG_ENDPOINT_IP)" >&2
-    return 1
-  fi
+  WG_ADDRS=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); print $2}' \
+    "$managed/wireguard.conf")
+  WG_ENDPOINT_IP=$(cat "$managed/wireguard-endpoint")
 
   # Capture real gateway to the endpoint BEFORE touching routing.
   local via_info via_gw via_dev
@@ -435,12 +452,8 @@ wg_setup_iface() {
   # so no cleanup is needed in wg_teardown.
   sysctl -w "net.ipv4.conf.${WG_IFACE}.rp_filter=0" >/dev/null
 
-  local wg_tmp
-  wg_tmp=$(mktemp)
-  # Strip DNS: we parse it ourselves and must not let wg-quick touch host DNS.
-  grep -v '^\s*DNS\s*=' "$wg_conf" > "$wg_tmp"
-  wg setconf "$WG_IFACE" "$wg_tmp"
-  rm -f "$wg_tmp"
+  # wireguard-wg.conf has DNS lines stripped at sync time; no temp file needed.
+  wg setconf "$WG_IFACE" "$managed/wireguard-wg.conf"
 
   IFS=',' read -ra addr_list <<< "$WG_ADDRS"
   for addr in "${addr_list[@]}"; do
@@ -472,8 +485,7 @@ network isolation), there are no REJECT rules; the ACCEPT rules are harmless.
 ```bash
 wg_setup_rules() {
   local vm="$1" iface="$2"
-  local wg_conf="/etc/migrant/${vm}/wireguard.conf"
-  [[ -f "$wg_conf" ]] || return 0
+  [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] || return 0
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   local WG_TABLE
@@ -483,12 +495,10 @@ wg_setup_rules() {
   iptables -t mangle -A PREROUTING -i "$iface" -j MARK --set-mark "$WG_TABLE"
   ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
-  # DNS FORWARD exceptions.
-  local WG_DNS
-  WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' "$wg_conf")
-  if [[ -n "$WG_DNS" ]]; then
-    printf '%s' "$WG_DNS" > "/run/migrant/${vm}.wgdns"
-    IFS=',' read -ra dns_list <<< "$WG_DNS"
+  # DNS FORWARD exceptions — IPs pre-parsed and normalized at sync time.
+  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
+  if [[ -f "$wg_dns_file" ]]; then
+    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
@@ -519,14 +529,14 @@ wg_teardown() {
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
 
-  if [[ -f "/run/migrant/${vm}.wgdns" ]]; then
-    IFS=',' read -ra dns_list <<< "$(cat "/run/migrant/${vm}.wgdns")"
+  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
+  if [[ -f "$wg_dns_file" ]]; then
+    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
     for dns_ip in "${dns_list[@]}"; do
       dns_ip="${dns_ip// /}"
       [[ -z "$dns_ip" ]] && continue
       iptables -D FORWARD -i "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
     done
-    rm -f "/run/migrant/${vm}.wgdns"
   fi
 
   ip link set "$WG_IFACE" down 2>/dev/null || true
@@ -631,7 +641,7 @@ remove_rules() {
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   if ip link show "$WG_IFACE" &>/dev/null \
-      || [[ -f "/run/migrant/${vm}.wgdns" ]]; then
+      || [[ -f "/etc/migrant/${vm}/wireguard-dns" ]]; then
     wg_teardown "$vm" "$iface"
   fi
 
@@ -666,8 +676,7 @@ wg_table_hex=$(printf '%x' "$wg_table")
 
 if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
   local wg_endpoint
-  wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
-    "/etc/migrant/${VM_NAME}/wireguard.conf" | cut -d: -f1)
+  wg_endpoint=$(cat "/etc/migrant/${VM_NAME}/wireguard-endpoint")
 
   if ip link show "$wg_iface" &>/dev/null \
       && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
@@ -776,14 +785,15 @@ WireGuard private keys from any of the three example VM directories.
 
 ## Summary of file changes
 
-| File                                       | Change                                                              |
-| ------------------------------------------ | ------------------------------------------------------------------- |
-| `migrant.sh` — `cmd_up`                   | Error+abort if `wg` missing; sync conf; call `verify_wireguard_tunnel` after start  |
-| `migrant.sh` — `cmd_status`               | Report tunnel state (active/error/configured/none) with interface and endpoint IP   |
-| `migrant.sh` — `teardown_vm`              | `rm -rf /etc/migrant/<name>/`                                       |
-| `migrant.sh` — qemu hook `case` statement | Add `prepare` branch calling `wg_setup_iface`                       |
-| `migrant.sh` — qemu hook body             | Add `wg_setup_iface`, `wg_setup_rules`, `wg_teardown` functions     |
-| `migrant.sh` — qemu hook `apply_rules`    | Call `wg_setup_rules` after NETWORK_ISOLATION rules                 |
-| `migrant.sh` — qemu hook `remove_rules`   | Call `wg_teardown` if WG interface exists                           |
-| `.gitignore`                               | Add `*/wireguard.conf`                                              |
-| `README.md`                               | Add private key gitignore warning                                   |
+| File                                       | Change                                                                               |
+| ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `migrant.sh` — `sync_wireguard_config`    | New function: validates, copies, and pre-parses WireGuard config into managed files  |
+| `migrant.sh` — `cmd_up`                   | Call `sync_wireguard_config`; call `verify_wireguard_tunnel` after start             |
+| `migrant.sh` — `cmd_status`               | Report tunnel state (active/error/configured/none) with interface and endpoint IP    |
+| `migrant.sh` — `teardown_vm`              | `rm -rf /etc/migrant/<name>/`                                                        |
+| `migrant.sh` — qemu hook `case` statement | Add `prepare` branch calling `wg_setup_iface`; remove top-level network-isolation guard |
+| `migrant.sh` — qemu hook body             | Add `wg_setup_iface`, `wg_setup_rules`, `wg_teardown` functions                     |
+| `migrant.sh` — qemu hook `apply_rules`    | Discover tap unconditionally; gate isolation rules on `HAS_NETWORK_ISOLATION`; call `wg_setup_rules` |
+| `migrant.sh` — qemu hook `remove_rules`   | Gate isolation teardown on `HAS_NETWORK_ISOLATION`; call `wg_teardown` if WG state exists |
+| `.gitignore`                               | Add `*/wireguard.conf`                                                               |
+| `README.md`                               | Add private key gitignore warning                                                    |
