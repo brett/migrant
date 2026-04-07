@@ -331,7 +331,18 @@ surrounding code style) and is shared by `verify_wireguard_tunnel` and
 
 ```bash
 wg_iface_and_table() {
+  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # 7 chars = 28 bits of hash; collision probability is negligible at any
+  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
+  # 15-char kernel interface name limit.
   wg_iface="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+
+  # Routing table ID: derived directly from the VM name (not from the
+  # interface name) so there is no double-hashing. 5 hex chars (20 bits)
+  # mod 10000 gives a stable value in 10000–19999, clear of the kernel
+  # reserved tables (253–255) and common tool ranges. The same ID is reused
+  # as the fwmark value and the ip rule priority, so all three are unique
+  # per VM by construction.
   wg_table=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
 }
 ```
@@ -421,7 +432,18 @@ the global namespace.
 
 ```bash
 wg_iface_and_table() {
+  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # 7 chars = 28 bits of hash; collision probability is negligible at any
+  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
+  # 15-char kernel interface name limit.
   WG_IFACE="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+
+  # Routing table ID: derived directly from the VM name (not from the
+  # interface name) so there is no double-hashing. 5 hex chars (20 bits)
+  # mod 10000 gives a stable value in 10000–19999, clear of the kernel
+  # reserved tables (253–255) and common tool ranges. The same ID is reused
+  # as the fwmark value and the ip rule priority, so all three are unique
+  # per VM by construction.
   WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$1" | md5sum | head -c5) % 10000 ) ))
 }
 ```
