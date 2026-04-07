@@ -98,26 +98,20 @@ common tool ranges):
 WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
 ```
 
-The table contains two entries:
+The table contains one entry:
 
 ```bash
-# 1. Endpoint exclusion: the Mullvad server's IP must reach the host's real
-#    default gateway, not wg-iface (which would create an infinite loop).
-#    Capture the real gateway before bringing up the WireGuard interface.
-via_info=$(ip route get "$WG_ENDPOINT_IP")
-via_gw=$(awk 'NR==1{for(i=1;i<NF;i++) if ($i=="via"){print $(i+1); exit}}' <<< "$via_info")
-via_dev=$(awk 'NR==1{for(i=1;i<NF;i++) if ($i=="dev"){print $(i+1); exit}}' <<< "$via_info")
-
-if [[ -n "$via_gw" ]]; then
-  ip route add "${WG_ENDPOINT_IP}/32" via "$via_gw" dev "$via_dev" table "$WG_TABLE"
-else
-  # Endpoint is on a directly connected network (no gateway hop)
-  ip route add "${WG_ENDPOINT_IP}/32" dev "$via_dev" table "$WG_TABLE"
-fi
-
-# 2. Default: all other traffic exits via the WireGuard interface
+# All VM traffic exits via the WireGuard interface.
 ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 ```
+
+No endpoint exclusion route is needed. The mangle PREROUTING mark only applies
+to packets *received* on the VM's tap interface. WireGuard's own outgoing
+encrypted UDP is a locally-generated packet: it is born in the kernel and flows
+through the `OUTPUT` chain, never through `PREROUTING`. It is therefore never
+marked with `WG_TABLE`, the policy rule never applies to it, and it routes via
+the main table to the real gateway. There is no routing loop under any
+circumstances.
 
 ### Why SSH from the host is unaffected
 
@@ -150,7 +144,7 @@ into `/etc/migrant/<vm-name>/`. The hook reads those files directly:
 | ------------------- | ------------------------------------------ |
 | `wireguard.conf`    | Raw copy (contains private key)                      |
 | `wireguard-wg.conf` | `wg-quick`-only fields stripped; passed to `wg setconf` |
-| `wireguard-endpoint`| Validated numeric endpoint IP                        |
+| `wireguard-endpoint`| Validated numeric endpoint IP (used by `cmd_status`) |
 | `wireguard-address` | Normalized comma-separated interface addresses       |
 | `wireguard-dns`     | Normalized comma-separated DNS IPs (absent if none)  |
 
@@ -479,21 +473,6 @@ wg_setup_iface() {
   ip route flush table "$WG_TABLE" 2>/dev/null || true
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
 
-  # All parsing and validation was done at sync time; the hook reads files.
-  local WG_ENDPOINT_IP
-  WG_ENDPOINT_IP=$(cat "$managed/wireguard-endpoint")
-
-  # Capture real gateway to the endpoint BEFORE touching routing.
-  local via_info via_gw via_dev
-  via_info=$(ip route get "$WG_ENDPOINT_IP" 2>/dev/null) || {
-    echo "migrant: wg_setup_iface: no route to endpoint $WG_ENDPOINT_IP" >&2
-    return 1
-  }
-  via_gw=$(awk 'NR==1{for(i=1;i<NF;i++) if($i=="via"){print $(i+1);exit}}' \
-    <<< "$via_info")
-  via_dev=$(awk 'NR==1{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}' \
-    <<< "$via_info")
-
   ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
     echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
     echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
@@ -525,12 +504,10 @@ wg_setup_iface() {
   ip link set "$WG_IFACE" mtu 1420
   ip link set "$WG_IFACE" up
 
-  # Routing table: endpoint via real gateway (loop prevention) + default via WG.
-  if [[ -n "$via_gw" ]]; then
-    ip route add "${WG_ENDPOINT_IP}/32" via "$via_gw" dev "$via_dev" table "$WG_TABLE"
-  else
-    ip route add "${WG_ENDPOINT_IP}/32" dev "$via_dev" table "$WG_TABLE"
-  fi
+  # All VM traffic exits via the WireGuard interface. No endpoint exclusion
+  # route is needed: WireGuard's encrypted UDP is locally generated (OUTPUT
+  # path) and is never marked by the PREROUTING rule, so it routes via the
+  # main table without interference.
   ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 
   # Policy rule: divert marked packets to the WireGuard table. This does not
