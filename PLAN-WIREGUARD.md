@@ -188,7 +188,7 @@ though the traffic travels inside the WireGuard tunnel. A targeted FORWARD
 ACCEPT rule is inserted before the REJECT rules for each DNS IP:
 
 ```bash
-WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /, "", $2); print $2}' "$wg_conf")
+WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' "$wg_conf")
 
 if [[ -n "$WG_DNS" ]]; then
   printf '%s' "$WG_DNS" > "/run/migrant/${VM_NAME}.wgdns"
@@ -485,7 +485,7 @@ wg_setup_rules() {
 
   # DNS FORWARD exceptions.
   local WG_DNS
-  WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); print $2}' "$wg_conf")
+  WG_DNS=$(awk -F= '/^\s*DNS\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' "$wg_conf")
   if [[ -n "$WG_DNS" ]]; then
     printf '%s' "$WG_DNS" > "/run/migrant/${vm}.wgdns"
     IFS=',' read -ra dns_list <<< "$WG_DNS"
