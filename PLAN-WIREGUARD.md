@@ -90,12 +90,12 @@ ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority "$WG_TABLE"
 
 ### Routing table ID
 
-Policy routing tables require integer IDs. The ID is derived from the interface
-name, placing it in the range 10000–19999 (well clear of reserved values and
+Policy routing tables require integer IDs. The ID is derived directly from the
+VM name, placing it in the range 10000–19999 (well clear of reserved values and
 common tool ranges):
 
 ```bash
-WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
+WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
 ```
 
 The table contains two entries:
@@ -343,7 +343,7 @@ verify_wireguard_tunnel() {
 
   local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
   local wg_table
-  wg_table=$(( 10000 + ( 16#$(printf '%s' "$wg_iface" | md5sum | head -c4) % 10000 ) ))
+  wg_table=$(( 10000 + ( 16#$(printf '%s' "$VM_NAME" | md5sum | head -c5) % 10000 ) ))
   local wg_table_hex
   wg_table_hex=$(printf '%x' "$wg_table")
 
@@ -422,7 +422,7 @@ wg_setup_iface() {
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
+  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
 
   # Clean up any state left by a previous failed setup attempt. Without this, a
   # partial failure (e.g. wg setconf fails on a malformed key) leaves the
@@ -512,7 +512,7 @@ wg_setup_rules() {
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
+  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
 
   # Mark all packets from this VM's tap with the WireGuard table ID. The policy
   # rule that routes marked packets via the WireGuard table was already added in
@@ -552,7 +552,7 @@ wg_teardown() {
 
   local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
   local WG_TABLE
-  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$WG_IFACE" | md5sum | head -c4) % 10000 ) ))
+  WG_TABLE=$(( 10000 + ( 16#$(printf '%s' "$vm" | md5sum | head -c5) % 10000 ) ))
 
   iptables -t mangle -D PREROUTING -i "$iface" -j MARK \
     --set-mark "$WG_TABLE" 2>/dev/null || true
@@ -719,7 +719,7 @@ directory is absent, so the WireGuard block outputs `Tunnel:   none` and the
 # Derive interface name and table ID the same way the hook does
 local wg_iface="wg-$(printf '%s' "$VM_NAME" | md5sum | head -c7)"
 local wg_table wg_table_hex
-wg_table=$(( 10000 + ( 16#$(printf '%s' "$wg_iface" | md5sum | head -c4) % 10000 ) ))
+wg_table=$(( 10000 + ( 16#$(printf '%s' "$VM_NAME" | md5sum | head -c5) % 10000 ) ))
 wg_table_hex=$(printf '%x' "$wg_table")
 
 if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
