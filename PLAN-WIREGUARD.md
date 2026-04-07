@@ -428,9 +428,10 @@ wg_setup_iface() {
 ### `wg_setup_rules` (called from `apply_rules` on `started` — async)
 
 This function requires the tap interface, which exists by the time `started`
-fires. It is called at the end of `apply_rules`, after NETWORK_ISOLATION has
-inserted its REJECT rules, so that the DNS ACCEPT rules (inserted with `-I` at
-the head) end up before the REJECTs.
+fires. It is called at the end of `apply_rules`. When `NETWORK_ISOLATION=true`,
+the REJECT rules are already in place by that point, so the DNS ACCEPT rules
+(inserted with `-I`) end up before them. When only WireGuard is configured (no
+network isolation), there are no REJECT rules; the ACCEPT rules are harmless.
 
 ```bash
 wg_setup_rules() {
@@ -499,6 +500,109 @@ wg_teardown() {
 }
 ```
 
+### Hook guard restructuring
+
+The existing hook has two top-level guards:
+
+```bash
+echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
+echo "$xml" | grep -q "network-isolation=true" || exit 0
+```
+
+The second guard must be removed. WireGuard is activated by the presence of
+`/etc/migrant/<vm-name>/wireguard.conf`, not by the `network-isolation=true`
+description flag. A VM may use WireGuard without network isolation, and vice
+versa. With both guards at the top, the hook exits before `wg_setup_iface` runs
+for any VM where `NETWORK_ISOLATION` is not set.
+
+Instead, the flag is read into a local variable immediately after the
+`managed-by` check:
+
+```bash
+echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
+
+HAS_NETWORK_ISOLATION=false
+echo "$xml" | grep -q "network-isolation=true" && HAS_NETWORK_ISOLATION=true
+```
+
+`apply_rules` is updated to gate the INPUT/FORWARD iptables rules on
+`$HAS_NETWORK_ISOLATION`. The tap interface discovery and `/run/migrant/` write
+run unconditionally — they are needed by `wg_setup_rules` regardless of whether
+network isolation is active:
+
+```bash
+apply_rules() {
+  local vm="$1"
+
+  local iface=""
+  local qemu_pid
+  qemu_pid=$(pgrep -af 'qemu' 2>/dev/null | grep -F "guest=${vm}," | awk 'NR==1{print $1}')
+  if [[ -n "$qemu_pid" ]]; then
+    for fd in /proc/"${qemu_pid}"/fd/*; do
+      [[ "$(readlink "$fd" 2>/dev/null)" == "/dev/net/tun" ]] || continue
+      local candidate
+      candidate=$(awk '/^iff:/{print $2}' \
+        "/proc/${qemu_pid}/fdinfo/$(basename "$fd")" 2>/dev/null)
+      if [[ -n "$candidate" ]]; then
+        iface="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$iface" ]]; then
+    echo "migrant: no tap interface found for $vm" >&2
+    return 1
+  fi
+
+  mkdir -p /run/migrant
+  echo "$iface" > "/run/migrant/${vm}.iface"
+
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
+    iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
+    iptables -I INPUT -i "$iface" -j "$CHAIN"
+
+    iptables -I FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT
+    iptables -I FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT
+    iptables -I FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT
+  fi
+
+  wg_setup_rules "$vm" "$iface"
+}
+```
+
+`remove_rules` mirrors this structure. The isolation teardown is conditional;
+the WireGuard teardown is unconditional (guarded by interface existence rather
+than the flag, because the conf may have been removed since the VM started):
+
+```bash
+remove_rules() {
+  local vm="$1"
+  local iface
+  iface=$(cat "/run/migrant/${vm}.iface" 2>/dev/null) || return 0
+  [[ -z "$iface" ]] && return 0
+
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    iptables -D INPUT -i "$iface" -j "$CHAIN" 2>/dev/null || true
+    iptables -F "$CHAIN" 2>/dev/null || true
+    iptables -X "$CHAIN" 2>/dev/null || true
+
+    iptables -D FORWARD -i "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -i "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
+    iptables -D FORWARD -i "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+  fi
+
+  local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
+  if ip link show "$WG_IFACE" &>/dev/null \
+      || [[ -f "/run/migrant/${vm}.wgdns" ]]; then
+    wg_teardown "$vm" "$iface"
+  fi
+
+  rm -f "/run/migrant/${vm}.iface"
+}
+```
+
 ### Hook `case` statement
 
 ```bash
@@ -507,16 +611,6 @@ case "$OPERATION" in
   started) apply_rules     "$VM_NAME" ;;   # calls wg_setup_rules at the end
   release) remove_rules    "$VM_NAME" ;;   # calls wg_teardown if iface exists
 esac
-```
-
-`remove_rules` checks for the WireGuard interface before calling `wg_teardown`:
-
-```bash
-local WG_IFACE="wg-$(printf '%s' "$vm" | md5sum | head -c7)"
-if ip link show "$WG_IFACE" &>/dev/null \
-    || [[ -f "/run/migrant/${vm}.wgdns" ]]; then
-  wg_teardown "$vm" "$iface"
-fi
 ```
 
 ---
