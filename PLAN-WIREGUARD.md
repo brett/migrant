@@ -85,7 +85,7 @@ then routes all marked packets via the WireGuard-specific routing table:
 
 ```bash
 iptables -t mangle -A PREROUTING -i "$iface" -j MARK --set-mark "$WG_TABLE"
-ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
+ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority "$WG_TABLE"
 ```
 
 ### Routing table ID
@@ -129,7 +129,7 @@ are marked by the mangle PREROUTING rule, and are then subject to policy routing
 However, the destination of a reply is `192.168.200.1` — the host's own bridge
 IP. Linux's local routing table (table 255, priority 0) is evaluated before any
 user-defined rule. It always contains a local route for `192.168.200.1`. The
-policy rule at priority 100 is never reached for traffic destined to the host
+policy rule (at priority `WG_TABLE`, in the range 10000–19999) is never reached for traffic destined to the host
 itself. SSH from the host to the VM works correctly with the tunnel active.
 
 ---
@@ -491,7 +491,7 @@ wg_setup_iface() {
   # require the tap interface and is placed here (prepare) so that
   # verify_wireguard_tunnel can confirm it synchronously after virsh start
   # returns, with no polling required.
-  ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
+  ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority "$WG_TABLE"
 
   echo "migrant: WireGuard interface up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
 }
