@@ -281,10 +281,10 @@ sync_wireguard_config() {
   # wg setconf only understands the core WireGuard kernel interface fields:
   #   [Interface]: PrivateKey, ListenPort, FwMark
   #   [Peer]:      PublicKey, PresharedKey, AllowedIPs, Endpoint, PersistentKeepalive
-  # Fields like Address, DNS, MTU, Table, PostUp/Down, PreUp/Down are wg-quick
-  # extensions that wg setconf rejects as parse errors. Strip them all here;
-  # Address is normalized to wireguard-address below, DNS to wireguard-dns.
-  grep -Ev '^\s*(Address|DNS|MTU|Table|Pre(Up|Down)|Post(Up|Down))\s*=' \
+  # Fields like Address, DNS, MTU, Table, SaveConfig, PostUp/Down, PreUp/Down
+  # are wg-quick extensions that wg setconf rejects as parse errors. Strip them
+  # all here; Address is normalized to wireguard-address below, DNS to wireguard-dns.
+  grep -Ev '^\s*(Address|DNS|MTU|Table|SaveConfig|Pre(Up|Down)|Post(Up|Down))\s*=' \
     "$wg_src" > "$managed_dir/wireguard-wg.conf"
   chmod 600 "$managed_dir/wireguard-wg.conf"
 
