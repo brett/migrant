@@ -397,6 +397,15 @@ wg_setup_iface() {
   WG_ENDPOINT_IP=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
     "$wg_conf" | cut -d: -f1)
 
+  # Require a numeric IP. Hostnames are valid in the WireGuard spec but the
+  # hook runs as root with no guaranteed DNS resolver; a lookup failure would
+  # surface as a confusing "no route to endpoint" error later. Mullvad configs
+  # always use IPs, so this is a safety check rather than a real restriction.
+  if [[ ! "$WG_ENDPOINT_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "migrant: wg_setup_iface: Endpoint must be an IP address, not a hostname ($WG_ENDPOINT_IP)" >&2
+    return 1
+  fi
+
   # Capture real gateway to the endpoint BEFORE touching routing.
   local via_info via_gw via_dev
   via_info=$(ip route get "$WG_ENDPOINT_IP" 2>/dev/null) || {
