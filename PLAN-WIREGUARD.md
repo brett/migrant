@@ -169,6 +169,9 @@ for addr in "${addr_list[@]}"; do
   [[ -n "$addr" ]] && ip addr add "$addr" dev "$WG_IFACE"
 done
 
+# WireGuard adds ~60 bytes of per-packet overhead; 1420 keeps encapsulated
+# packets under the 1500-byte Ethernet MTU and prevents fragmentation.
+ip link set "$WG_IFACE" mtu 1420
 ip link set "$WG_IFACE" up
 ```
 
@@ -469,6 +472,9 @@ wg_setup_iface() {
     addr="${addr// /}"
     [[ -n "$addr" ]] && ip addr add "$addr" dev "$WG_IFACE"
   done
+  # WireGuard adds ~60 bytes of per-packet overhead; 1420 keeps encapsulated
+  # packets under the 1500-byte Ethernet MTU and prevents fragmentation.
+  ip link set "$WG_IFACE" mtu 1420
   ip link set "$WG_IFACE" up
 
   # Routing table: endpoint via real gateway (loop prevention) + default via WG.
