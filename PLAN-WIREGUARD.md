@@ -287,8 +287,8 @@ sync_wireguard_config() {
     "$wg_src" > "$managed_dir/wireguard-wg.conf"
   chmod 600 "$managed_dir/wireguard-wg.conf"
 
-  # wireguard-endpoint — pre-validated numeric endpoint IP for the hook to use
-  # when computing the loop-prevention route.
+  # wireguard-endpoint — pre-validated numeric endpoint IP; stored so cmd_status
+  # can display it without re-parsing wireguard.conf.
   printf '%s' "$wg_endpoint" > "$managed_dir/wireguard-endpoint"
   chmod 600 "$managed_dir/wireguard-endpoint"
 
