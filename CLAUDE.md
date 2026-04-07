@@ -65,9 +65,10 @@ add features that encourage putting untrusted content in a Migrantfile.
 
 libvirtd holds a per-domain lock when invoking hooks. Calling `virsh` against
 that domain from inside a hook will deadlock — the hook waits for libvirtd,
-which waits for the hook. The qemu hook reads
-`/etc/libvirt/qemu/{name}.xml` directly as a workaround. Any future hook code
-must follow the same pattern.
+which waits for the hook. The hook reads the domain XML from stdin (`xml=$(cat)`);
+libvirt pipes it for every operation. Do not read from `/etc/libvirt/qemu/{name}.xml`
+— that file may not exist during initial `virt-install` and reading it was the
+source of a previous bug. Any future hook code must read from stdin.
 
 ## How VMs are identified
 
