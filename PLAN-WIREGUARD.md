@@ -495,6 +495,12 @@ wg_setup_rules() {
   iptables -t mangle -A PREROUTING -i "$iface" -j MARK --set-mark "$WG_TABLE"
   ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
+  # Drop all IPv6 from this VM. The fwmark routing is IPv4-only; without this
+  # rule IPv6 traffic would bypass the tunnel and exit via the host's default
+  # IPv6 path. The libvirt network provides no routable IPv6 to VMs, so this
+  # rule enforces an existing de-facto limitation rather than removing capability.
+  ip6tables -I FORWARD -i "$iface" -j DROP
+
   # DNS FORWARD exceptions — IPs pre-parsed and normalized at sync time.
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
@@ -528,6 +534,8 @@ wg_teardown() {
     --set-mark "$WG_TABLE" 2>/dev/null || true
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
+
+  ip6tables -D FORWARD -i "$iface" -j DROP 2>/dev/null || true
 
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
