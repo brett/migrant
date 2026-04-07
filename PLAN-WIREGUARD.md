@@ -665,7 +665,23 @@ esac
 
 `cmd_status` should report tunnel state so the user can confirm at a glance
 whether traffic is actually being tunneled. The check is based on the managed
-conf (for configuration) and the live kernel state (for active status):
+conf (for configuration) and the live kernel state (for active status).
+
+The WireGuard block uses `$state` (the VM's libvirt domain state) to distinguish
+between "running but untunneled" and "stopped with config present". Currently
+`state` is declared inside the `else` branch of the VM-exists check, making it
+unavailable at the outer scope where snapshot and shared folder output also run.
+Hoist the declaration to the top of `cmd_status`:
+
+```bash
+local state=""
+```
+
+and set it inside the `else` branch as before. The WireGuard block then sits
+at the outer scope alongside snapshot and shared folder output, with `state`
+available. When the VM does not exist, `state` is empty and the managed
+directory is absent, so the WireGuard block outputs `Tunnel:   none` and the
+`$state` comparison is never reached.
 
 ```bash
 # Derive interface name and table ID the same way the hook does
