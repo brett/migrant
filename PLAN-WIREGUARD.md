@@ -305,6 +305,11 @@ sync_wireguard_config() {
   local wg_addrs
   wg_addrs=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
     "$wg_src")
+  if [[ -z "$wg_addrs" ]]; then
+    echo "Error: wireguard.conf has no Address line." >&2
+    echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
+    exit 65  # EX_DATAERR
+  fi
   printf '%s' "$wg_addrs" > "$managed_dir/wireguard-address"
   chmod 600 "$managed_dir/wireguard-address"
 
