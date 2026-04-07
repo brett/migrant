@@ -233,11 +233,51 @@ they can create and manage their own subdirectory there without elevated
 privileges. The hooks receive pre-validated, pre-parsed files and do no parsing
 of their own.
 
-`cmd_up` calls `sync_wireguard_config` after the "VM is already running" early
-return. The managed directory must reflect the config the VM is actually running
-with: `cmd_status` reads from it to report tunnel state, so syncing on a running
-VM would show a config not yet in effect. Changes to `wireguard.conf` take effect
-on the next `halt` + `up`.
+`cmd_up` has two distinct VM-start paths (existing-not-running and new-VM) and
+several early exits that fire before any start. `sync_wireguard_config` and
+`verify_wireguard_tunnel` are placed once in each start path. The already-running
+early return intentionally skips both: the managed directory must reflect the
+config the VM is actually running with (`cmd_status` reads from it), so syncing
+on a live VM would show a config not yet in effect.
+
+**Pre-start exits** — `sync_wireguard_config` and `verify_wireguard_tunnel` not called:
+
+| Exit point                                   | Notes                              |
+| -------------------------------------------- | ---------------------------------- |
+| `cloud-init.yml` not found                   | exits before any VM work           |
+| Required Migrantfile var missing             | exits before any VM work           |
+| Base image mismatch                          | exits before any VM work           |
+| VM already running → `do_autoconnect; return`| intentional skip (see above)       |
+| `curl` fetch fails                           | new-VM path only, exits before start |
+| Downloaded file is not a valid disk image    | new-VM path only, exits before start |
+
+**Existing-VM-not-running path:**
+
+```
+sync_wireguard_config              ← called here (before virsh start)
+virsh start "$VM_NAME"
+verify_shared_folder_mounts
+verify_wireguard_tunnel            ← called here (synchronous; both checks pass or VM is destroyed)
+if AUTOCONNECT=console:
+    do_autoconnect; return         ← after verify ✓
+wait_for_ip
+[wait_for_ssh if applicable]
+do_autoconnect; return             ← after verify ✓
+```
+
+**New-VM path:**
+
+```
+sync_wireguard_config              ← called here (before virt-install)
+virt-install ...
+verify_shared_folder_mounts
+verify_wireguard_tunnel            ← called here
+if AUTOCONNECT=console AND (from_snapshot OR no playbook):
+    do_autoconnect; return         ← after verify ✓
+wait_for_ip
+[cloud-init wait + cmd_provision if new VM with playbook]
+do_autoconnect                     ← after verify ✓ (falls through; no explicit return needed)
+```
 
 ```bash
 sync_wireguard_config() {
@@ -354,9 +394,9 @@ wg_iface_and_table() {
 ### Post-start tunnel verification
 
 After the VM is started, `cmd_up` verifies that WireGuard setup completed
-successfully. This is called immediately after `virsh start` (or `virt-install`)
-in every code path, including the `AUTOCONNECT=console` early return, before the
-user is handed control.
+successfully. It is called once per start path, immediately after
+`verify_shared_folder_mounts`, before any further branching hands control to the
+user. See the exit-path table above for exact placement.
 
 Both the interface and the `ip rule` are created synchronously in `prepare`, so
 no polling is required — if `virsh start` succeeds, both are guaranteed to be
