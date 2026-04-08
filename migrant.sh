@@ -1808,39 +1808,40 @@ cmd_unmount() {
 cmd_status() {
   local state=""
 
-  printf '%-10s%s\n' 'name:' "$VM_NAME"
+  printf '%-12s%s\n' 'name:' "$VM_NAME"
+  printf '%-12s%s\n' 'dir:' "$VM_DIR"
 
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
-    printf '%-10s%s\n' 'state:' 'not created'
+    printf '%-12s%s\n' 'state:' 'not created'
   else
     state=$(virsh domstate "$VM_NAME")
 
     case "$state" in
       running)
-        printf '%-10s%s\n' 'state:' 'running'
+        printf '%-12s%s\n' 'state:' 'running'
         local ip
         ip=$(get_vm_ip)
         if [[ -n "$ip" ]]; then
-          printf '%-10s%s\n' 'ip:' "$ip"
+          printf '%-12s%s\n' 'ip:' "$ip"
         else
-          printf '%-10s%s\n' 'ip:' 'pending [WARNING]'
+          printf '%-12s%s\n' 'ip:' 'pending [WARNING]'
         fi
         ;;
       shut\ off)
-        printf '%-10s%s\n' 'state:' 'shut off'
+        printf '%-12s%s\n' 'state:' 'shut off'
         ;;
       paused)
-        printf '%-10s%s\n' 'state:' 'paused'
+        printf '%-12s%s\n' 'state:' 'paused'
         ;;
       crashed)
-        printf '%-10s%s\n' 'state:' 'crashed [ERROR]'
-        printf '  %-8s%s\n' 'note:' "run 'migrant.sh destroy' then 'migrant.sh up' to rebuild"
+        printf '%-12s%s\n' 'state:' 'crashed [ERROR]'
+        printf '  %-10s%s\n' 'note:' "run 'migrant.sh destroy' then 'migrant.sh up' to rebuild"
         ;;
       blocked)
-        printf '%-10s%s\n' 'state:' 'blocked [WARNING]'
+        printf '%-12s%s\n' 'state:' 'blocked [WARNING]'
         ;;
       *)
-        printf '%-10s%s\n' 'state:' "unknown ($state) [WARNING]"
+        printf '%-12s%s\n' 'state:' "unknown ($state) [WARNING]"
         ;;
     esac
   fi
@@ -1857,35 +1858,43 @@ cmd_status() {
     if ip link show "$wg_iface" &>/dev/null \
         && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
       if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
-        printf '%-10s%s\n' 'tunnel:' 'active [ERROR]'
-        printf '  %-8s%s\n' 'iface:' "$wg_iface"
-        printf '  %-8s%s\n' 'peer:' "$wg_endpoint"
-        printf '  %-8s%s\n' 'dns:' "${wg_dns:-host}"
-        printf '  %-8s%s\n' 'note:' 'PrivateKey is invalid — no internet'
+        printf '%-12s%s\n' 'tunnel:' 'active [ERROR]'
+        printf '  %-10s%s\n' 'iface:' "$wg_iface"
+        printf '  %-10s%s\n' 'peer:' "$wg_endpoint"
+        printf '  %-10s%s\n' 'dns:' "${wg_dns:-host}"
+        printf '  %-10s%s\n' 'note:' 'PrivateKey is invalid — no internet'
       else
-        printf '%-10s%s\n' 'tunnel:' 'active'
-        printf '  %-8s%s\n' 'iface:' "$wg_iface"
-        printf '  %-8s%s\n' 'peer:' "$wg_endpoint"
-        printf '  %-8s%s\n' 'dns:' "${wg_dns:-host}"
+        printf '%-12s%s\n' 'tunnel:' 'active'
+        printf '  %-10s%s\n' 'iface:' "$wg_iface"
+        printf '  %-10s%s\n' 'peer:' "$wg_endpoint"
+        printf '  %-10s%s\n' 'dns:' "${wg_dns:-host}"
       fi
     elif [[ "$state" == "running" ]]; then
-      printf '%-10s%s\n' 'tunnel:' 'error [ERROR]'
-      printf '  %-8s%s\n' 'peer:' "$wg_endpoint"
-      printf '  %-8s%s\n' 'dns:' "${wg_dns:-host}"
-      printf '  %-8s%s\n' 'note:' 'configured but traffic is NOT tunneled'
+      printf '%-12s%s\n' 'tunnel:' 'error [ERROR]'
+      printf '  %-10s%s\n' 'peer:' "$wg_endpoint"
+      printf '  %-10s%s\n' 'dns:' "${wg_dns:-host}"
+      printf '  %-10s%s\n' 'note:' 'configured but traffic is NOT tunneled'
     else
-      printf '%-10s%s\n' 'tunnel:' 'configured'
-      printf '  %-8s%s\n' 'peer:' "$wg_endpoint"
-      printf '  %-8s%s\n' 'dns:' "${wg_dns:-host}"
+      printf '%-12s%s\n' 'tunnel:' 'configured'
+      printf '  %-10s%s\n' 'peer:' "$wg_endpoint"
+      printf '  %-10s%s\n' 'dns:' "${wg_dns:-host}"
     fi
   else
-    printf '%-10s%s\n' 'tunnel:' 'none'
+    printf '%-12s%s\n' 'tunnel:' 'none'
+  fi
+
+  local vm_desc
+  vm_desc=$(virsh desc "$VM_NAME" 2>/dev/null || true)
+  if echo "$vm_desc" | grep -q "network-isolation=true"; then
+    printf '%-12s%s\n' 'isolation:' 'enabled'
+  else
+    printf '%-12s%s\n' 'isolation:' 'disabled'
   fi
 
   if [[ -f "$SNAPSHOT_PATH" ]]; then
-    printf '%-10s%s\n' 'snapshot:' "$SNAPSHOT_PATH"
+    printf '%-12s%s\n' 'snapshot:' "$SNAPSHOT_PATH"
   else
-    printf '%-10s%s\n' 'snapshot:' 'none'
+    printf '%-12s%s\n' 'snapshot:' 'none'
   fi
 
   if shared_folder_isolation_enabled && [[ -n "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
@@ -1894,11 +1903,11 @@ cmd_status() {
       host_path=$(shared_folder_host_path "$shared_folder")
       local img_path="${host_path%/}.img"
       [[ -f "$img_path" ]] || continue
-      printf '%-10s%s\n' 'loop:' "$img_path"
+      printf '%-12s%s\n' 'loop:' "$img_path"
       if mountpoint -q "$host_path" 2>/dev/null; then
-        printf '  %-8s%s\n' 'mount:' "$host_path"
+        printf '  %-10s%s\n' 'mount:' "$host_path"
       else
-        printf '  %-8s%s\n' 'mount:' 'none'
+        printf '  %-10s%s\n' 'mount:' 'none'
       fi
     done
   fi
