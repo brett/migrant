@@ -673,61 +673,67 @@ cmd_setup() {
   # shellcheck disable=SC2064
   trap "rm -f '$expected_qemu_hook' '$expected_network_hook' '$net_xml' '$expected_loop_hook' '$expected_zsh_completion'" EXIT
 
+  local kw=21   # key column width
+  local skw=19  # sub-field key column width (kw - 2 for the indent)
+  local changes=0
+
   # --- KVM check ---
   check_kvm
 
-  # --- libvirtd sockets ---
+  echo "Setup requires elevated permissions to install hooks and configure services."
+  sudo -v
   echo ""
-  local changed=false
+
+  # --- libvirtd sockets ---
+  local unit_actions
   for unit in libvirtd.socket virtlogd.socket; do
+    unit_actions=""
     if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
       sudo systemctl enable "$unit"
-      echo "  Enabled $unit."
-      changed=true
+      unit_actions="enabled"
     fi
     if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
       sudo systemctl start "$unit"
-      echo "  Started $unit."
-      changed=true
+      unit_actions="${unit_actions:+${unit_actions}, }started"
+    fi
+    if [[ -n "$unit_actions" ]]; then
+      printf '%-*s%s\n' "$kw" "${unit}:" "${unit_actions} [changed]"
+      (( changes++ )) || true
+    else
+      printf '%-*s%s\n' "$kw" "${unit}:" "ok"
     fi
   done
-  if [[ "$changed" == false ]]; then
-    echo "libvirtd.socket and virtlogd.socket already enabled and active."
-  fi
 
   # --- libvirt group ---
-  echo ""
   local current_user
   current_user=$(whoami)
   if groups "$current_user" | grep -qw libvirt; then
-    echo "User '$current_user' is already in the libvirt group."
+    printf '%-*s%s\n' "$kw" "libvirt group:" "ok"
   else
-    echo "Adding '$current_user' to the libvirt group..."
     sudo usermod -aG libvirt "$current_user"
-    echo "  Done. Log out and back in (or run 'newgrp libvirt') for this to take effect."
+    printf '%-*s%s\n' "$kw" "libvirt group:" "added [changed]"
+    printf '  %-*s%s\n' "$skw" "note:" "log out and back in (or run 'newgrp libvirt')"
+    (( changes++ )) || true
   fi
 
   # --- /etc/migrant/ (WireGuard managed config directory) ---
-  echo ""
   if [[ ! -d /etc/migrant ]]; then
-    echo "Creating /etc/migrant for WireGuard managed configs..."
     sudo mkdir -p /etc/migrant
     sudo chown root:libvirt /etc/migrant
     sudo chmod 2770 /etc/migrant
-    echo "  Created."
+    printf '%-*s%s\n' "$kw" "/etc/migrant:" "created [changed]"
+    (( changes++ )) || true
   elif [[ "$(stat -c '%G' /etc/migrant)" != "libvirt" \
        || "$(stat -c '%a' /etc/migrant)" != "2770" ]]; then
-    echo "Updating /etc/migrant permissions..."
     sudo chown root:libvirt /etc/migrant
     sudo chmod 2770 /etc/migrant
-    echo "  Updated."
+    printf '%-*s%s\n' "$kw" "/etc/migrant:" "permissions updated [changed]"
+    (( changes++ )) || true
   else
-    echo "/etc/migrant already configured."
+    printf '%-*s%s\n' "$kw" "/etc/migrant:" "ok"
   fi
 
   # --- firewall backend ---
-  echo ""
-  echo "Checking firewall backend..."
   local network_conf="/etc/libvirt/network.conf"
   local current_backend
   current_backend=$(grep -oP '(?<=^firewall_backend = ")[^"]+' "$network_conf" 2>/dev/null || echo "")
@@ -745,19 +751,17 @@ cmd_setup() {
   fi
 
   if $host_uses_legacy_iptables && [[ "$current_backend" != "iptables" ]]; then
-    echo "  Detected legacy iptables firewall — setting firewall_backend=iptables."
-    echo "  Elevated permissions required to modify $network_conf."
     sudo sed -i 's/#\?\s*firewall_backend\s*=\s*"[^"]*"/firewall_backend = "iptables"/' \
       "$network_conf" 2>/dev/null \
       || echo 'firewall_backend = "iptables"' | sudo tee -a "$network_conf" > /dev/null
     sudo systemctl restart libvirtd
-    echo "  libvirtd restarted with iptables backend."
+    printf '%-*s%s\n' "$kw" "firewall backend:" "switched to iptables [changed]"
+    (( changes++ )) || true
   else
-    echo "  Firewall backend '$current_backend' — no change needed."
+    printf '%-*s%s\n' "$kw" "firewall backend:" "$current_backend"
   fi
 
   # --- qemu hook (network isolation + WireGuard) ---
-  echo ""
   cat > "$expected_qemu_hook" << 'MIGRANT_QEMU_EOF'
 #!/bin/bash
 # Managed by migrant.sh
@@ -1125,25 +1129,16 @@ case "$OPERATION" in
 esac
 MIGRANT_QEMU_EOF
   if [[ -f "$qemu_hook" ]] && cmp -s "$expected_qemu_hook" "$qemu_hook"; then
-    echo "VM hook already up to date."
+    printf '%-*s%s\n' "$kw" "qemu hook:" "ok"
   else
-    if [[ ! -f "$qemu_hook" ]]; then
-      echo "Installing VM hook ($qemu_hook)."
-      echo "  When a migrant.sh-managed VM starts, this hook:"
-      echo "    - sets up a WireGuard tunnel (if wireguard.conf is present in the VM directory)"
-      echo "    - blocks the VM from initiating new connections to the host (if NETWORK_ISOLATION=true)"
-      echo "    - blocks the VM from reaching other hosts on the local network (if NETWORK_ISOLATION=true)"
-      echo "  All rules and interfaces are removed automatically when the VM stops."
-    else
-      echo "VM hook is outdated, reinstalling ($qemu_hook)."
-    fi
-    echo "  Elevated permissions are required to write to /etc/libvirt/hooks/."
+    local qemu_hook_verb="installed"
+    [[ -f "$qemu_hook" ]] && qemu_hook_verb="reinstalled"
     install_hook "$expected_qemu_hook" "$qemu_hook"
-    echo "  Installed."
+    printf '%-*s%s\n' "$kw" "qemu hook:" "${qemu_hook_verb} [changed]"
+    (( changes++ )) || true
   fi
 
   # --- qemu hook (loop image mount/unmount) ---
-  echo ""
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
 
   cat > "$expected_loop_hook" << 'MIGRANT_LOOP_EOF'
@@ -1248,29 +1243,22 @@ case "$OPERATION" in
 esac
 MIGRANT_LOOP_EOF
   if [[ -f "$loop_hook" ]] && cmp -s "$expected_loop_hook" "$loop_hook"; then
-    echo "Shared folder loop image hook already up to date."
+    printf '%-*s%s\n' "$kw" "loop hook:" "ok"
   else
-    if [[ ! -f "$loop_hook" ]]; then
-      echo "Installing shared folder loop image hook ($loop_hook)."
-      echo "  When a migrant.sh-managed VM starts, the shared folder loop image"
-      echo "  will be mounted with nosymfollow before virtiofsd starts."
-      echo "  The image is unmounted automatically when the VM stops."
-    else
-      echo "Shared folder loop image hook is outdated, reinstalling ($loop_hook)."
-    fi
-    echo "  Elevated permissions are required to write to /etc/libvirt/hooks/."
+    local loop_hook_verb="installed"
+    [[ -f "$loop_hook" ]] && loop_hook_verb="reinstalled"
     install_hook "$expected_loop_hook" "$loop_hook"
-    echo "  Installed."
+    printf '%-*s%s\n' "$kw" "loop hook:" "${loop_hook_verb} [changed]"
+    (( changes++ )) || true
   fi
 
   # --- network hook (rp_filter) ---
-  echo ""
   local default_rp_filter
   default_rp_filter=$(cat /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null \
     || echo 0)
 
   if [[ "$default_rp_filter" -eq 0 ]]; then
-    echo "net.ipv4.conf.default.rp_filter=0 — rp_filter hook not needed."
+    printf '%-*s%s\n' "$kw" "rp_filter hook:" "skipped (rp_filter=0)"
   else
     cat > "$expected_network_hook" << 'MIGRANT_NETWORK_EOF'
 #!/bin/bash
@@ -1281,33 +1269,26 @@ if [[ "$1" == "migrant" && "$2" == "started" ]]; then
 fi
 MIGRANT_NETWORK_EOF
     if [[ -f "$network_hook" ]] && cmp -s "$expected_network_hook" "$network_hook"; then
-      echo "rp_filter hook already up to date."
+      printf '%-*s%s\n' "$kw" "rp_filter hook:" "ok"
     else
-      if [[ ! -f "$network_hook" ]]; then
-        echo "Detected net.ipv4.conf.default.rp_filter=$default_rp_filter."
-        echo "  New network interfaces will have reverse path filtering enabled."
-        echo "  This causes the kernel to drop DHCP discover packets (source 0.0.0.0)"
-        echo "  before dnsmasq can receive them — a known issue with linux-hardened."
-        echo "  Installing network hook to set rp_filter=0 on the libvirt bridge."
-      else
-        echo "rp_filter hook is outdated, reinstalling ($network_hook)."
-      fi
-      echo "  Elevated permissions are required to write to /etc/libvirt/hooks/."
+      local rp_hook_verb="installed"
+      [[ -f "$network_hook" ]] && rp_hook_verb="reinstalled"
       install_hook "$expected_network_hook" "$network_hook"
-      echo "  Installed."
+      printf '%-*s%s\n' "$kw" "rp_filter hook:" "${rp_hook_verb} [changed]"
+      (( changes++ )) || true
     fi
   fi
 
   # --- migrant network ---
-  echo ""
   if virsh net-info migrant &>/dev/null; then
-    echo "Migrant libvirt network already exists."
     if virsh net-info migrant | grep -q "Autostart:.*yes"; then
       virsh net-autostart migrant --disable
-      echo "  Autostart disabled — 'migrant.sh up' will start it on demand."
+      printf '%-*s%s\n' "$kw" "migrant network:" "autostart disabled [changed]"
+      (( changes++ )) || true
+    else
+      printf '%-*s%s\n' "$kw" "migrant network:" "ok"
     fi
   else
-    echo "Creating migrant libvirt network..."
     cat > "$net_xml" << 'NET_EOF'
 <network>
   <name>migrant</name>
@@ -1322,26 +1303,29 @@ MIGRANT_NETWORK_EOF
 </network>
 NET_EOF
     virsh net-define "$net_xml"
-    echo "  Migrant network defined."
+    printf '%-*s%s\n' "$kw" "migrant network:" "created [changed]"
+    (( changes++ )) || true
   fi
 
   # --- images directory permissions ---
-  echo ""
+  local images_dir_action=""
   if [[ ! -d "$IMAGES_DIR" ]]; then
-    echo "Creating images directory $IMAGES_DIR..."
     sudo mkdir -p "$IMAGES_DIR"
+    images_dir_action="created"
   fi
-  if [[ -w "$IMAGES_DIR" ]]; then
-    echo "Images directory $IMAGES_DIR is already writable."
-  else
-    echo "Granting libvirt group write access to $IMAGES_DIR..."
+  if [[ ! -w "$IMAGES_DIR" ]]; then
     sudo chown root:libvirt "$IMAGES_DIR"
     sudo chmod g+rwx "$IMAGES_DIR"
-    echo "  Done."
+    images_dir_action="${images_dir_action:+${images_dir_action}, }permissions updated"
+  fi
+  if [[ -n "$images_dir_action" ]]; then
+    printf '%-*s%s\n' "$kw" "images dir:" "${images_dir_action} [changed]"
+    (( changes++ )) || true
+  else
+    printf '%-*s%s\n' "$kw" "images dir:" "ok"
   fi
 
   # --- ZSH completions ---
-  echo ""
   if [[ -d "$ZSH_SITE_FUNCTIONS" ]]; then
     cat > "$expected_zsh_completion" << 'MIGRANT_ZSH_EOF'
 #compdef migrant.sh
@@ -1382,21 +1366,22 @@ MIGRANT_ZSH_EOF
 
     local zsh_completion_dest="$ZSH_SITE_FUNCTIONS/_migrant"
     if [[ -f "$zsh_completion_dest" ]] && cmp -s "$expected_zsh_completion" "$zsh_completion_dest"; then
-      echo "ZSH completions already up to date."
+      printf '%-*s%s\n' "$kw" "zsh completions:" "ok"
     else
-      if [[ ! -f "$zsh_completion_dest" ]]; then
-        echo "Installing ZSH completions ($zsh_completion_dest)."
-      else
-        echo "ZSH completions are outdated, reinstalling ($zsh_completion_dest)."
-      fi
-      echo "  Elevated permissions are required to write to $ZSH_SITE_FUNCTIONS/."
+      local zsh_verb="installed"
+      [[ -f "$zsh_completion_dest" ]] && zsh_verb="reinstalled"
       sudo install -m 644 "$expected_zsh_completion" "$zsh_completion_dest"
-      echo "  Installed. Run 'compinit' or start a new shell to activate."
+      printf '%-*s%s\n' "$kw" "zsh completions:" "${zsh_verb} [changed]"
+      (( changes++ )) || true
     fi
   fi
 
   echo ""
-  echo "Setup complete."
+  if (( changes == 0 )); then
+    echo "No changes made."
+  else
+    echo "${changes} changes made."
+  fi
 }
 
 teardown_vm() {
