@@ -28,6 +28,16 @@ careful consideration. Key containment properties to preserve:
 - Be DRY, but not at the cost of meaningful complexity — discuss trade-offs
   before refactoring
 
+## sudo discipline
+
+VM lifecycle commands (`up`, `halt`, `destroy`, `snapshot`, `status`, etc.) must
+not call `sudo`. All privileged operations belong in `cmd_setup`, which runs once
+and persists results via sentinel files or installed artifacts so lifecycle
+commands can operate unprivileged.
+
+`sudo` is permitted only in convenience wrapper subcommands unrelated to VM
+lifecycle: `mount`, `unmount`, `wg`, and similar helpers.
+
 ## Exit codes
 
 Non-zero exits follow sysexits.h semantics. Reserve `1` for runtime state
