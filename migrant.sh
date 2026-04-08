@@ -1947,7 +1947,7 @@ cmd_wg() {
 }
 
 cmd_dominfo() {
-  virsh --connect qemu:///system dominfo "$VM_NAME"
+  virsh dominfo "$VM_NAME"
 }
 
 # Print the human-readable disk usage of a single file.
