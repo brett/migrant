@@ -38,6 +38,19 @@ commands can operate unprivileged.
 `sudo` is permitted only in convenience wrapper subcommands unrelated to VM
 lifecycle: `mount`, `unmount`, `wg`, and similar helpers.
 
+## cmd_setup output format
+
+`cmd_setup` uses the same aligned `key: value` pairs as `cmd_status`. Key design
+rules:
+
+- **`sudo -v` must run before the first `printf`** — this pre-authenticates sudo
+  so the password prompt never appears mid-output; the explanatory message
+  immediately before `sudo -v` tells the user why elevation is needed
+- **`[changed]` marker**: append to any line where an action was taken; increment
+  the `changes` counter with `(( changes++ )) || true`
+- **Informational rows** (e.g. `firewall backend:`) report a plain value with no
+  `[changed]` marker — they describe detected state, not an action taken
+
 ## cmd_status output format
 
 `cmd_status` uses aligned `key: value` pairs with indented sub-fields for
