@@ -750,6 +750,13 @@ OPERATION="$2"
 # the chain name stays within that limit regardless of VM name length.
 CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 
+# All stderr goes to a persistent log file. libvirtd does not reliably forward
+# hook stderr to the journal, so this is the only reliable debug channel.
+# /run is tmpfs and clears on reboot; the log accumulates across hook calls.
+mkdir -p /run/migrant
+exec 2>>/run/migrant/hook.log
+echo "$(date --iso-8601=seconds) [$VM_NAME $OPERATION] hook start" >&2
+
 # Read the domain XML from stdin. libvirt pipes it to the hook for every
 # operation, so this is always available — unlike the persistent XML file,
 # which may not exist yet when the hook fires during initial virt-install.
@@ -815,7 +822,7 @@ wg_setup_iface() {
   # but check defensively in case the hook fires via another path.
   command -v wg &>/dev/null || {
     echo "migrant: wg_setup_iface: 'wg' not found; cannot set up tunnel for $vm" >&2
-    return 1
+    return 2
   }
 
   local WG_IFACE WG_TABLE
@@ -833,7 +840,7 @@ wg_setup_iface() {
   ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
     echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
     echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
-    return 1
+    return 3
   }
 
   # Disable reverse path filtering on the WireGuard interface. With the default
@@ -988,6 +995,7 @@ wg_teardown() {
 
 apply_rules() {
   local vm="$1"
+  echo "$(date --iso-8601=seconds) [$vm started] apply_rules: enter" >&2
 
   # No work needed if this VM uses neither network isolation nor WireGuard.
   [[ "$HAS_NETWORK_ISOLATION" == true ]] \
@@ -995,33 +1003,22 @@ apply_rules() {
     || return 0
 
   # Locate the tap interface for this VM without calling virsh.
-  # Primary: libvirt pipes the runtime domain XML to the hook and by the
-  # 'started' phase it includes the assigned tap device as <target dev='vnetN'/>.
   local iface=""
-  iface=$(echo "$xml" | grep -o "target dev='[^']*'" | head -1 | cut -d"'" -f2)
 
-  # Fallback: scan the QEMU process's open /dev/net/tun fds via /proc/PID/fdinfo.
-  # The kernel exposes the interface name as the "iff:" field in fdinfo.
+  # libvirt assigns tap interfaces before firing 'started begin', so the live
+  # domain XML always contains <target dev='vnetN'/> by this point.
+  # Anchor to 'vnet' to avoid matching disk targets (<target dev='vda' bus='virtio'/>).
+  # Try both quote forms since XML permits either.
+  iface=$(echo "$xml" | grep -o "target dev='vnet[^']*'" | head -1 | cut -d"'" -f2)
   if [[ -z "$iface" ]]; then
-    local qemu_pid
-    qemu_pid=$(pgrep -af 'qemu' 2>/dev/null | grep -F "guest=${vm}," | awk 'NR==1{print $1}')
-    if [[ -n "$qemu_pid" ]]; then
-      for fd in /proc/"${qemu_pid}"/fd/*; do
-        [[ "$(readlink "$fd" 2>/dev/null)" == "/dev/net/tun" ]] || continue
-        local candidate
-        candidate=$(awk '/^iff:/{print $2}' \
-          "/proc/${qemu_pid}/fdinfo/$(basename "$fd")" 2>/dev/null)
-        if [[ -n "$candidate" ]]; then
-          iface="$candidate"
-          break
-        fi
-      done
-    fi
+    iface=$(echo "$xml" | grep -o 'target dev="vnet[^"]*"' | head -1 | cut -d'"' -f2)
   fi
 
   if [[ -z "$iface" ]]; then
+    echo "$(date --iso-8601=seconds) [$vm started] no tap found; XML target lines:" >&2
+    echo "$xml" | grep -i "target" >&2
     echo "migrant: no tap interface found for $vm" >&2
-    return 1
+    return 4
   fi
 
   mkdir -p /run/migrant
@@ -1053,8 +1050,9 @@ apply_rules() {
   # Sentinel: written last so its presence implies all rules applied and MAC
   # unblocked. verify_wireguard_tunnel polls for this rather than querying
   # iptables (which requires root). Deleted by wg_teardown on release.
-  [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
-    && echo "ok" > "/run/migrant/${vm}.wgmark"
+  if [[ -f "/etc/migrant/${vm}/wireguard.conf" ]]; then
+    echo "ok" > "/run/migrant/${vm}.wgmark"
+  fi
 }
 
 remove_rules() {
