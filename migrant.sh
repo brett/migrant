@@ -74,13 +74,13 @@ EOF
 
 require_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Error: No Migrantfile found in $VM_DIR" >&2
+    echo "[ERROR] No Migrantfile found in $VM_DIR" >&2
     exit 78
   fi
   # shellcheck source=/dev/null
   source "$CONFIG_FILE"
   if [[ -z "${VM_NAME:-}" ]]; then
-    echo "Error: 'VM_NAME' is not set in Migrantfile" >&2
+    echo "[ERROR] 'VM_NAME' is not set in Migrantfile" >&2
     exit 78
   fi
   DISK_PATH="$IMAGES_DIR/${VM_NAME}.qcow2"
@@ -97,7 +97,7 @@ require_config() {
 
 require_vm() {
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
-    echo "VM '$VM_NAME' has not been created. Run 'migrant.sh up' to create it." >&2
+    echo "[ERROR] VM '$VM_NAME' has not been created. Run 'migrant.sh up' to create it." >&2
     exit 1
   fi
 }
@@ -107,15 +107,15 @@ require_running() {
   local state
   state=$(virsh domstate "$VM_NAME")
   if [[ "$state" != "running" ]]; then
-    echo "VM '$VM_NAME' is not running (state: $state). Run 'migrant.sh up' first." >&2
+    echo "[ERROR] VM '$VM_NAME' is not running (state: $state). Run 'migrant.sh up' first." >&2
     exit 1
   fi
 }
 
 check_kvm() {
   if [[ ! -e /dev/kvm ]]; then
-    echo "Warning: /dev/kvm not found. KVM acceleration is unavailable — check that" >&2
-    echo "virtualization extensions (VT-x/AMD-V) are enabled in your BIOS/UEFI." >&2
+    echo "[WARNING] /dev/kvm not found. KVM acceleration is unavailable — check that" >&2
+    echo "  virtualization extensions (VT-x/AMD-V) are enabled in your BIOS/UEFI." >&2
   fi
 }
 
@@ -142,11 +142,11 @@ wait_for_ip() {
     ip=$(get_vm_ip)
     [[ -n "$ip" ]] && break
     if ! virsh domstate "$VM_NAME" 2>/dev/null | grep -q "^running"; then
-      echo "Error: VM '$VM_NAME' is no longer running." >&2
+      echo "[ERROR] VM '$VM_NAME' is no longer running." >&2
       exit 1
     fi
     if (( SECONDS >= deadline )); then
-      echo "Error: timed out waiting for '$VM_NAME' to obtain an IP address." >&2
+      echo "[ERROR] timed out waiting for '$VM_NAME' to obtain an IP address." >&2
       exit 75
     fi
     sleep 1
@@ -173,7 +173,7 @@ wait_for_shutdown() {
     state=$(virsh domstate "$VM_NAME" 2>/dev/null) || break
     [[ "$state" == "shut off" ]] && break
     if (( SECONDS >= deadline )); then
-      echo "Error: timed out waiting for '$VM_NAME' to shut down." >&2
+      echo "[ERROR] timed out waiting for '$VM_NAME' to shut down." >&2
       echo "  The VM may be unresponsive. Run 'virsh destroy $VM_NAME' to force-stop it." >&2
       exit 75
     fi
@@ -189,7 +189,7 @@ wait_for_shutdown() {
       host_path=$(shared_folder_host_path "$shared_folder")
       while mountpoint -q "$host_path" 2>/dev/null; do
         if (( SECONDS >= unmount_deadline )); then
-          echo "Error: timed out waiting for '$host_path' to unmount." >&2
+          echo "[ERROR] timed out waiting for '$host_path' to unmount." >&2
           exit 75
         fi
         sleep 1
@@ -212,7 +212,7 @@ wait_for_ssh() {
       break
     fi
     if (( SECONDS >= deadline )); then
-      echo "Error: timed out waiting for SSH on '$VM_NAME'." >&2
+      echo "[ERROR] timed out waiting for SSH on '$VM_NAME'." >&2
       exit 75
     fi
     sleep 1
@@ -226,7 +226,7 @@ verify_shared_folder_mounts() {
     local host_path
     host_path=$(shared_folder_host_path "$shared_folder")
     if ! mountpoint -q "$host_path" 2>/dev/null; then
-      echo "Error: VM started but '$host_path' is not mounted." >&2
+      echo "[ERROR] VM started but '$host_path' is not mounted." >&2
       echo "  The loop hook may have failed." >&2
       echo "  Check: cat /run/migrant/hook.log" >&2
       exit 1
@@ -238,7 +238,7 @@ ensure_shared_folder_images() {
   shared_folder_isolation_enabled || return 0
   local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
   if [[ ! -f "$loop_hook" ]]; then
-    echo "Error: shared folder isolation is enabled but the loop image hook is not installed." >&2
+    echo "[ERROR] shared folder isolation is enabled but the loop image hook is not installed." >&2
     echo "  Run 'migrant.sh setup' first, then re-run this command." >&2
     exit 1
   fi
@@ -252,7 +252,7 @@ ensure_shared_folder_images() {
       actual_size=$(du --apparent-size -b "$img_path" 2>/dev/null | cut -f1 || echo 0)
       local expected_size=$(( size_gb * 1024 * 1024 * 1024 ))
       if (( actual_size != expected_size )); then
-        echo "Note: $img_path is $(( actual_size / 1024 / 1024 / 1024 ))G" \
+        echo "[NOTE] $img_path is $(( actual_size / 1024 / 1024 / 1024 ))G" \
           "but SHARED_FOLDER_SIZE_GB=${size_gb}." >&2
         echo "  To resize: halt the VM, back up workspace/ contents," \
           "run 'rm $img_path', then 'migrant.sh up'." >&2
@@ -266,7 +266,7 @@ ensure_shared_folder_images() {
       # disabling it avoids reserving inode table space for online resize.
       if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
         rm -f "$img_path"
-        echo "Error: mkfs.ext4 failed for $img_path." >&2
+        echo "[ERROR] mkfs.ext4 failed for $img_path." >&2
         exit 74
       fi
       debugfs -w -R "rmdir lost+found" "$img_path" > /dev/null 2>&1
@@ -300,7 +300,7 @@ sync_wireguard_config() {
   fi
 
   if ! command -v wg &>/dev/null; then
-    echo "Error: wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
+    echo "[ERROR] wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
     echo "  Install wireguard-tools or remove wireguard.conf to start without a VPN." >&2
     exit 69  # EX_UNAVAILABLE
   fi
@@ -311,12 +311,12 @@ sync_wireguard_config() {
   wg_endpoint=$(awk -F= '/^\s*Endpoint\s*=/{gsub(/ /,"",$2); print $2}' \
     "$wg_src" | cut -d: -f1)
   if [[ -z "$wg_endpoint" ]]; then
-    echo "Error: wireguard.conf has no Endpoint line." >&2
+    echo "[ERROR] wireguard.conf has no Endpoint line." >&2
     echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
     exit 65  # EX_DATAERR
   fi
   if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Error: wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
+    echo "[ERROR] wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
     echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
     exit 65  # EX_DATAERR
   fi
@@ -355,7 +355,7 @@ sync_wireguard_config() {
   wg_addrs=$(awk -F= '/^\s*Address\s*=/{gsub(/ /,"",$2); printf "%s%s", sep, $2; sep=","}' \
     "$wg_src")
   if [[ -z "$wg_addrs" ]]; then
-    echo "Error: wireguard.conf has no Address line." >&2
+    echo "[ERROR] wireguard.conf has no Address line." >&2
     echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
     exit 65  # EX_DATAERR
   fi
@@ -372,7 +372,7 @@ sync_wireguard_config() {
     chmod 600 "$managed_dir/wireguard-dns"
   else
     rm -f "$managed_dir/wireguard-dns"
-    echo "Warning: wireguard.conf has no DNS line — DNS will use the host resolver, not the VPN." >&2
+    echo "[WARNING] wireguard.conf has no DNS line — DNS will use the host resolver, not the VPN." >&2
   fi
 }
 
@@ -387,7 +387,7 @@ verify_wireguard_tunnel() {
   # Synchronous checks: interface and ip rule are created in prepare, which
   # completes before virsh start returns.
   if ! ip link show "$wg_iface" &>/dev/null; then
-    echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
+    echo "[ERROR] WireGuard interface $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
     echo "  Check: cat /run/migrant/hook.log" >&2
     virsh destroy "$VM_NAME" 2>/dev/null || true
@@ -395,7 +395,7 @@ verify_wireguard_tunnel() {
   fi
 
   if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
-    echo "Error: WireGuard routing rule for $wg_iface is missing after VM start." >&2
+    echo "[ERROR] WireGuard routing rule for $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
     echo "  Check: cat /run/migrant/hook.log" >&2
     virsh destroy "$VM_NAME" 2>/dev/null || true
@@ -408,7 +408,7 @@ verify_wireguard_tunnel() {
   local deadline=$(( SECONDS + 5 ))
   while [[ ! -f "/run/migrant/${VM_NAME}.wgmark" ]]; do
     if (( SECONDS >= deadline )); then
-      echo "Error: WireGuard marking rule not applied after 5s." >&2
+      echo "[ERROR] WireGuard marking rule not applied after 5s." >&2
       echo "  Traffic is NOT tunneled. Halting VM." >&2
       echo "  Check: cat /run/migrant/hook.log" >&2
       virsh destroy "$VM_NAME" 2>/dev/null || true
@@ -418,7 +418,7 @@ verify_wireguard_tunnel() {
   done
 
   if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
-    echo "Warning: WireGuard interface $wg_iface has no public key." >&2
+    echo "[WARNING] WireGuard interface $wg_iface has no public key." >&2
     echo "  The PrivateKey in wireguard.conf is likely invalid." >&2
     echo "  The VM is running but cannot reach the internet through the tunnel." >&2
     echo "  Fix PrivateKey in wireguard.conf, then run: migrant.sh halt && migrant.sh up" >&2
@@ -429,13 +429,13 @@ verify_wireguard_tunnel() {
 
 cmd_up() {
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
-    echo "Error: No cloud-init.yml found in $VM_DIR" >&2
+    echo "[ERROR] No cloud-init.yml found in $VM_DIR" >&2
     exit 78
   fi
 
   for var in VM_NAME RAM_MB VCPUS DISK_GB IMAGE_URL OS_VARIANT; do
     if [[ -z "${!var:-}" ]]; then
-      echo "Error: '$var' is not set in Migrantfile" >&2
+      echo "[ERROR] '$var' is not set in Migrantfile" >&2
       exit 78
     fi
   done
@@ -459,7 +459,7 @@ cmd_up() {
     if [[ -n "$current_base" \
         && "$current_base" != "$base_image" \
         && "$current_base" != "$(basename "$SNAPSHOT_PATH")" ]]; then
-      echo "Error: VM '$VM_NAME' was built from '$current_base' but Migrantfile" >&2
+      echo "[ERROR] VM '$VM_NAME' was built from '$current_base' but Migrantfile" >&2
       echo "  specifies '$base_image'. Run 'migrant.sh destroy' first." >&2
       exit 78
     fi
@@ -518,12 +518,12 @@ cmd_up() {
     if [[ ! -f "$base_image_path" ]] || [[ "$IMAGE_URL" == file://* ]]; then
       echo "Copying base image..."
       if ! curl --fail -L -o "$base_image_path" "$IMAGE_URL"; then
-        echo "Error: Failed to fetch base image. Check IMAGE_URL in Migrantfile." >&2
+        echo "[ERROR] Failed to fetch base image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
         exit 74
       fi
       if ! qemu-img info "$base_image_path" &>/dev/null; then
-        echo "Error: Downloaded file is not a valid disk image. Check IMAGE_URL in Migrantfile." >&2
+        echo "[ERROR] Downloaded file is not a valid disk image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
         exit 65
       fi
@@ -633,7 +633,7 @@ EOF
       echo "Waiting for cloud-init to finish..." >&2
       if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
         echo "" >&2
-        echo "Error: cloud-init failed on '$VM_NAME'." >&2
+        echo "[ERROR] cloud-init failed on '$VM_NAME'." >&2
         echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
         exit 70
       fi
@@ -644,7 +644,7 @@ EOF
     echo "VM '$VM_NAME' is ready." >&2
   elif [[ "$from_snapshot" == false ]]; then
     if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
-      echo "Note: cloud-init is still provisioning in the background." >&2
+      echo "[NOTE] cloud-init is still provisioning in the background." >&2
       echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
       echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
     fi
@@ -1483,7 +1483,7 @@ cmd_snapshot() {
     virsh shutdown "$VM_NAME"
     wait_for_shutdown
   elif [[ "$state" != "shut off" ]]; then
-    echo "Error: VM '$VM_NAME' is in state '$state'. Halt it before snapshotting." >&2
+    echo "[ERROR] VM '$VM_NAME' is in state '$state'. Halt it before snapshotting." >&2
     exit 1
   fi
 
@@ -1499,7 +1499,7 @@ cmd_snapshot() {
 
 cmd_reset() {
   if [[ ! -f "$SNAPSHOT_PATH" ]]; then
-    echo "Error: no snapshot found for '$VM_NAME'." >&2
+    echo "[ERROR] no snapshot found for '$VM_NAME'." >&2
     echo "  Run 'migrant.sh snapshot' to create one." >&2
     exit 1
   fi
@@ -1514,7 +1514,7 @@ cmd_reset() {
       [[ -n "$mac" ]] && macs+=("$mac")
     done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
   else
-    echo "Warning: VM '$VM_NAME' domain not found; MAC addresses cannot be preserved." >&2
+    echo "[WARNING] VM '$VM_NAME' domain not found; MAC addresses cannot be preserved." >&2
     echo "  Network may not work after reset. Run 'migrant.sh destroy && migrant.sh up' instead." >&2
   fi
 
@@ -1546,7 +1546,7 @@ check_managed_key_match() {
   [[ -z "$ci_material" ]] && return 0
 
   if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
-    echo "Error: cloud-init.yml contains a managed SSH key (comment: 'migrant')" >&2
+    echo "[ERROR] cloud-init.yml contains a managed SSH key (comment: 'migrant')" >&2
     echo "  but ~/.ssh/migrant was not found on this host." >&2
     if [[ "$context" == "create" ]]; then
       echo "  Run 'migrant.sh pubkey' to generate the key, update cloud-init.yml," >&2
@@ -1559,7 +1559,7 @@ check_managed_key_match() {
   fi
 
   if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
-    echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
+    echo "[ERROR] ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
     exit 66
   fi
 
@@ -1567,7 +1567,7 @@ check_managed_key_match() {
   host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
 
   if [[ "$ci_material" != "$host_material" ]]; then
-    echo "Error: the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
+    echo "[ERROR] the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
     echo "  Update cloud-init.yml with the output of 'migrant.sh pubkey'," >&2
     if [[ "$context" == "create" ]]; then
       echo "  then re-run 'migrant.sh up'." >&2
@@ -1582,7 +1582,7 @@ get_ssh_user() {
   local user
   user=$(awk '/^users:/{f=1} f && /- name:/{print $NF; exit}' "$CLOUD_INIT_FILE")
   if [[ -z "$user" ]]; then
-    echo "Error: could not determine username from cloud-init.yml." >&2
+    echo "[ERROR] could not determine username from cloud-init.yml." >&2
     exit 78
   fi
   echo "$user"
@@ -1605,19 +1605,19 @@ build_ssh_opts() {
 
   if [[ -n "$managed_material" ]]; then
     if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
-      echo "Error: cloud-init.yml references a managed SSH key but ~/.ssh/migrant not found." >&2
+      echo "[ERROR] cloud-init.yml references a managed SSH key but ~/.ssh/migrant not found." >&2
       echo "  Restore the key file, or update cloud-init.yml and rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
       exit 66
     fi
     if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
-      echo "Error: ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
+      echo "[ERROR] ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
       exit 66
     fi
     local host_material
     host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
     if [[ "$managed_material" != "$host_material" ]]; then
-      echo "Error: the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
+      echo "[ERROR] the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
       echo "  Update cloud-init.yml with 'migrant.sh pubkey' and rebuild with" >&2
       echo "  'migrant.sh destroy && migrant.sh up'." >&2
       exit 78
@@ -1625,7 +1625,7 @@ build_ssh_opts() {
     _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
   else
     if ! vm_has_ssh; then
-      echo "Error: no ssh_authorized_keys found in cloud-init.yml." >&2
+      echo "[ERROR] no ssh_authorized_keys found in cloud-init.yml." >&2
       echo "  Add your public key and rebuild with 'migrant.sh destroy && migrant.sh up'." >&2
       exit 78
     fi
@@ -1665,7 +1665,7 @@ do_autoconnect() {
   case "${AUTOCONNECT:-}" in
     ssh)
       if ! vm_has_ssh; then
-        echo "Note: AUTOCONNECT=ssh is set but no ssh_authorized_keys found in cloud-init.yml — skipping autoconnect." >&2
+        echo "[NOTE] AUTOCONNECT=ssh is set but no ssh_authorized_keys found in cloud-init.yml — skipping autoconnect." >&2
         return
       fi
       local user ssh_opts ip
@@ -1702,7 +1702,7 @@ cmd_provision() {
   require_running
 
   if ! command -v ansible-playbook &>/dev/null; then
-    echo "Error: ansible-playbook not found. Install Ansible to use provisioning." >&2
+    echo "[ERROR] ansible-playbook not found. Install Ansible to use provisioning." >&2
     exit 127
   fi
 
@@ -1726,7 +1726,7 @@ cmd_provision() {
     echo "Ansible provisioning complete." >&2
   else
     echo "" >&2
-    echo "Error: Ansible provisioning failed. The VM is still running." >&2
+    echo "[ERROR] Ansible provisioning failed. The VM is still running." >&2
     echo "  Fix playbook.yml and run 'migrant.sh provision' to retry." >&2
     exit 70
   fi
@@ -1768,7 +1768,7 @@ cmd_mount() {
     # Image is not mounted. Refuse if VM is running — mounting under an active
     # virtiofsd session is unsafe and indicates something went wrong.
     if $vm_running; then
-      echo "Error: VM '$VM_NAME' is running but $host_path is not mounted." >&2
+      echo "[ERROR] VM '$VM_NAME' is running but $host_path is not mounted." >&2
       echo "  The QEMU hook should have mounted it. Check the hook is installed" >&2
       echo "  by re-running 'migrant.sh setup', then halt and restart the VM." >&2
       exit 1
@@ -1795,7 +1795,7 @@ cmd_unmount() {
   # Refuse if VM is running — unmounting would break virtiofsd.
   if virsh dominfo "$VM_NAME" &>/dev/null \
       && [[ "$(virsh domstate "$VM_NAME")" == "running" ]]; then
-    echo "Error: VM '$VM_NAME' is running." >&2
+    echo "[ERROR] VM '$VM_NAME' is running." >&2
     echo "  Halt the VM with 'migrant.sh halt' before unmounting." >&2
     exit 1
   fi
@@ -1928,17 +1928,17 @@ cmd_wg() {
   wg_iface_and_table "$VM_NAME"
 
   if [[ ! -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
-    echo "No WireGuard configured for VM '$VM_NAME'." >&2
+    echo "[ERROR] No WireGuard configured for VM '$VM_NAME'." >&2
     exit 1
   fi
 
   if ! ip link show "$wg_iface" &>/dev/null; then
-    echo "WireGuard interface $wg_iface is not up (is the VM running?)." >&2
+    echo "[ERROR] WireGuard interface $wg_iface is not up (is the VM running?)." >&2
     exit 1
   fi
 
   if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
-    echo "Warning: PrivateKey in wireguard.conf is invalid — no peer connection possible." >&2
+    echo "[WARNING] PrivateKey in wireguard.conf is invalid — no peer connection possible." >&2
   fi
 
   sudo wg show "$wg_iface"
