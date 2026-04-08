@@ -644,7 +644,6 @@ EOF
     echo "VM '$VM_NAME' is ready." >&2
   elif [[ "$from_snapshot" == false ]]; then
     if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
-      echo "" >&2
       echo "Note: cloud-init is still provisioning in the background." >&2
       echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
       echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
@@ -2037,10 +2036,10 @@ cmd_storage() {
 
   echo "Base Images:"
   if [[ ${#base_images[@]} -eq 0 ]]; then
-    echo "    (none)"
+    echo "  (none)"
   else
     for f in "${base_images[@]}"; do
-      echo "    $f ($(image_file_size "$IMAGES_DIR/$f"))"
+      echo "  $f ($(image_file_size "$IMAGES_DIR/$f"))"
     done
   fi
 
@@ -2068,13 +2067,13 @@ cmd_storage() {
       label="$vm (destroyed)"
     fi
 
-    echo "    $label ($vm_total):"
-    $has_disk && echo "        Disk:     $disk_file ($(image_file_size "$IMAGES_DIR/$disk_file"))"
-    $has_iso  && echo "        Seed ISO: $iso_file ($(image_file_size "$IMAGES_DIR/$iso_file"))"
-    $has_snap && echo "        Snapshot: $snap_file ($(image_file_size "$IMAGES_DIR/$snap_file"))"
+    echo "  $label ($vm_total):"
+    $has_disk && echo "    disk:     $disk_file ($(image_file_size "$IMAGES_DIR/$disk_file"))"
+    $has_iso  && echo "    seed iso: $iso_file ($(image_file_size "$IMAGES_DIR/$iso_file"))"
+    $has_snap && echo "    snapshot: $snap_file ($(image_file_size "$IMAGES_DIR/$snap_file"))"
   done
   if [[ $vm_count -eq 0 ]]; then
-    echo "    (none)"
+    echo "  (none)"
   fi
 
   # Other: files not matched by any category above
@@ -2085,7 +2084,7 @@ cmd_storage() {
   if [[ ${#other_files[@]} -gt 0 ]]; then
     echo "Other:"
     for f in "${other_files[@]}"; do
-      echo "    $f ($(image_file_size "$IMAGES_DIR/$f"))"
+      echo "  $f ($(image_file_size "$IMAGES_DIR/$f"))"
     done
   fi
 }
