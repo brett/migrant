@@ -227,8 +227,8 @@ verify_shared_folder_mounts() {
     host_path=$(shared_folder_host_path "$shared_folder")
     if ! mountpoint -q "$host_path" 2>/dev/null; then
       echo "Error: VM started but '$host_path' is not mounted." >&2
-      echo "  The QEMU prepare hook may have failed." >&2
-      echo "  Check: sudo journalctl -u libvirtd" >&2
+      echo "  The loop hook may have failed." >&2
+      echo "  Check: cat /run/migrant/hook.log" >&2
       exit 1
     fi
   done
@@ -389,6 +389,7 @@ verify_wireguard_tunnel() {
   if ! ip link show "$wg_iface" &>/dev/null; then
     echo "Error: WireGuard interface $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
+    echo "  Check: cat /run/migrant/hook.log" >&2
     virsh destroy "$VM_NAME" 2>/dev/null || true
     exit 70  # EX_SOFTWARE
   fi
@@ -396,6 +397,7 @@ verify_wireguard_tunnel() {
   if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
     echo "Error: WireGuard routing rule for $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
+    echo "  Check: cat /run/migrant/hook.log" >&2
     virsh destroy "$VM_NAME" 2>/dev/null || true
     exit 70  # EX_SOFTWARE
   fi
@@ -408,6 +410,7 @@ verify_wireguard_tunnel() {
     if (( SECONDS >= deadline )); then
       echo "Error: WireGuard marking rule not applied after 5s." >&2
       echo "  Traffic is NOT tunneled. Halting VM." >&2
+      echo "  Check: cat /run/migrant/hook.log" >&2
       virsh destroy "$VM_NAME" 2>/dev/null || true
       exit 70  # EX_SOFTWARE
     fi
