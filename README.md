@@ -148,37 +148,22 @@ export PATH="$PATH:$HOME/bin"
 migrant.sh setup
 ```
 
-This performs all remaining configuration automatically:
+This configures everything needed to use migrant.sh: enables the libvirtd and
+virtlogd sockets, adds your user to the `libvirt` group, detects the host
+firewall backend (iptables or nftables) and updates `/etc/libvirt/network.conf`
+to match, defines the `migrant` NAT network, creates the images directory with
+group-writable permissions, installs three libvirt hooks (network isolation and
+WireGuard tunnel management, shared folder loop image mount/unmount, and
+`rp_filter` for the `linux-hardened` kernel), creates `/etc/migrant/` for
+WireGuard managed configs, and installs ZSH completions if `$ZSH_SITE_FUNCTIONS`
+is set.
 
-- **KVM check**: warns if `/dev/kvm` is not available
-- **libvirtd**: enables and starts `libvirtd.socket` and `virtlogd.socket` for
-  on-demand socket activation (libvirtd starts when first needed, not at boot)
-- **libvirt group**: adds the current user to the `libvirt` group (log out
-  and back in, or run `newgrp libvirt`, for this to take effect)
-- **Firewall backend**: detects whether the host uses legacy iptables or
-  nftables and configures `/etc/libvirt/network.conf` accordingly — the
-  backend must match, or VMs will boot but get no DHCP lease
-- **Migrant network**: creates (defines) the `migrant` NAT network
-  (`virbr-migrant`, 192.168.200.0/24) if it does not already exist; the network
-  is started on demand by `migrant.sh up`
-- **Images directory**: creates `/var/lib/libvirt/images/` if it does not
-  exist, and grants the `libvirt` group write access so VM disks can be
-  created without `sudo`
-- **VM firewall hook** (`/etc/libvirt/hooks/qemu.d/migrant`): adds iptables rules
-  when a VM with `NETWORK_ISOLATION=true` starts, blocking it from
-  initiating new connections to the host and from reaching other hosts on
-  the local network; removes the rules when the VM stops
-- **Shared folder loop image hook** (`/etc/libvirt/hooks/qemu.d/migrant-loop`):
-  mounts the shared folder loop image with `nosymfollow` before the VM
-  starts, and unmounts it after the VM stops; applies to all
-  migrant.sh-managed VMs unless `SHARED_FOLDER_ISOLATION=false`
-- **rp_filter hook** (`/etc/libvirt/hooks/network.d/migrant`): sets `rp_filter=0`
-  on `virbr-migrant` when the migrant network starts; only installed if
-  `net.ipv4.conf.default.rp_filter` is non-zero (the case on the
-  `linux-hardened` kernel, where the default causes DHCP to fail)
+If your user was not already in the `libvirt` group, setup will add it and then
+fail — the group change is not live in the current session. Log out and back in
+(or run `newgrp libvirt`) and re-run `migrant.sh setup` to complete the
+remaining steps.
 
-`setup` is idempotent — it can be re-run to update the hooks after
-upgrading migrant.sh.
+`setup` is idempotent — re-run it after upgrading migrant.sh to update the hooks.
 
 #### Firewall caveats
 
