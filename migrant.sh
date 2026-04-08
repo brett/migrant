@@ -403,7 +403,14 @@ verify_wireguard_tunnel() {
     sleep 1
   done
 
-  echo "WireGuard tunnel active: $wg_iface (table $wg_table)." >&2
+  if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
+    echo "Warning: WireGuard interface $wg_iface has no public key." >&2
+    echo "  The PrivateKey in wireguard.conf is likely invalid." >&2
+    echo "  The VM is running but cannot reach the internet through the tunnel." >&2
+    echo "  Fix PrivateKey in wireguard.conf, then run: migrant.sh halt && migrant.sh up" >&2
+  else
+    echo "WireGuard tunnel active: $wg_iface (table $wg_table)." >&2
+  fi
 }
 
 cmd_up() {
@@ -858,6 +865,19 @@ wg_setup_iface() {
   # wireguard-wg.conf has DNS lines stripped at sync time; no temp file needed.
   wg setconf "$WG_IFACE" "$managed/wireguard-wg.conf"
 
+  # A valid PrivateKey lets WireGuard derive a public key immediately. If the
+  # key is malformed (e.g. wrong length after base64-decoding), the kernel
+  # accepts the config but the interface has no public key. Detect this here
+  # while we have root, write a sentinel so cmd_up can warn without sudo.
+  local pub_key
+  pub_key=$(wg show "$WG_IFACE" public-key 2>/dev/null || true)
+  if [[ -z "$pub_key" || "$pub_key" == "(none)" ]]; then
+    echo "migrant: WireGuard: PrivateKey in wireguard.conf for $vm is invalid — no public key derived" >&2
+    touch "/run/migrant/${vm}.wgbadkey"
+  else
+    rm -f "/run/migrant/${vm}.wgbadkey"
+  fi
+
   IFS=',' read -ra addr_list <<< "$(cat "$managed/wireguard-address")"
   for addr in "${addr_list[@]}"; do
     addr="${addr// /}"
@@ -985,6 +1005,7 @@ wg_teardown() {
   ip link del "$WG_IFACE" 2>/dev/null || true
 
   rm -f "/run/migrant/${vm}.wgmark"
+  rm -f "/run/migrant/${vm}.wgbadkey"
 
   # Defensive cleanup: if wg_setup_rules never ran (e.g. 'started' hook
   # crashed before unblocking), the MAC entry may still be in the set.
@@ -1845,7 +1866,11 @@ cmd_status() {
 
     if ip link show "$wg_iface" &>/dev/null \
         && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
-      echo "Tunnel:   active — $wg_iface → $wg_endpoint"
+      if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
+        echo "Tunnel:   WARNING — interface up but PrivateKey is invalid (no internet)"
+      else
+        echo "Tunnel:   active — $wg_iface → $wg_endpoint"
+      fi
     elif [[ "$state" == "running" ]]; then
       echo "Tunnel:   ERROR — configured but traffic is NOT tunneled"
     else
