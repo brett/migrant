@@ -777,7 +777,13 @@ CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 # /run is tmpfs and clears on reboot; the log accumulates across hook calls.
 mkdir -p /run/migrant
 exec 2>>/run/migrant/hook.log
-echo "$(date --iso-8601=seconds) [$VM_NAME $OPERATION] hook start" >&2
+
+hook_log() {
+  local vm="$1"; shift
+  echo "$(date --iso-8601=seconds) [$vm $OPERATION] $*" >&2
+}
+
+hook_log "$VM_NAME" "hook start"
 
 # Read the domain XML from stdin. libvirt pipes it to the hook for every
 # operation, so this is always available — unlike the persistent XML file,
@@ -843,7 +849,7 @@ wg_setup_iface() {
   # wg absence was already caught by cmd_up before virsh start was called,
   # but check defensively in case the hook fires via another path.
   command -v wg &>/dev/null || {
-    echo "migrant: wg_setup_iface: 'wg' not found; cannot set up tunnel for $vm" >&2
+    hook_log "$vm" "wg_setup_iface: 'wg' not found; cannot set up tunnel"
     return 2
   }
 
@@ -860,8 +866,8 @@ wg_setup_iface() {
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
 
   ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
-    echo "migrant: wg_setup_iface: failed to create WireGuard interface for $vm" >&2
-    echo "migrant: is the 'wireguard' kernel module available? (try: modprobe wireguard)" >&2
+    hook_log "$vm" "wg_setup_iface: failed to create WireGuard interface"
+    hook_log "$vm" "is the 'wireguard' kernel module available? (try: modprobe wireguard)"
     return 3
   }
 
@@ -887,7 +893,7 @@ wg_setup_iface() {
   local pub_key
   pub_key=$(wg show "$WG_IFACE" public-key 2>/dev/null || true)
   if [[ -z "$pub_key" || "$pub_key" == "(none)" ]]; then
-    echo "migrant: WireGuard: PrivateKey in wireguard.conf for $vm is invalid — no public key derived" >&2
+    hook_log "$vm" "WireGuard: PrivateKey in wireguard.conf is invalid — no public key derived"
     touch "/run/migrant/${vm}.wgbadkey"
   else
     rm -f "/run/migrant/${vm}.wgbadkey"
@@ -921,7 +927,7 @@ wg_setup_iface() {
   # traffic; a shared low priority is fine for multiple simultaneous VMs.
   ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
-  echo "migrant: WireGuard interface up: $WG_IFACE (table $WG_TABLE) for $vm" >&2
+  hook_log "$vm" "WireGuard interface up: $WG_IFACE (table $WG_TABLE)"
 }
 
 wg_setup_rules() {
@@ -973,7 +979,7 @@ wg_setup_rules() {
     fi
   fi
 
-  echo "migrant: WireGuard routing rules applied for $vm ($iface → $WG_IFACE)" >&2
+  hook_log "$vm" "WireGuard routing rules applied ($iface → $WG_IFACE)"
 }
 
 wg_teardown() {
@@ -1018,12 +1024,12 @@ wg_teardown() {
   # crashed before unblocking), the MAC entry may still be in the set.
   nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
 
-  echo "migrant: WireGuard torn down: $WG_IFACE for $vm" >&2
+  hook_log "$vm" "WireGuard torn down: $WG_IFACE"
 }
 
 apply_rules() {
   local vm="$1"
-  echo "$(date --iso-8601=seconds) [$vm started] apply_rules: enter" >&2
+  hook_log "$vm" "apply_rules: enter"
 
   # No work needed if this VM uses neither network isolation nor WireGuard.
   [[ "$HAS_NETWORK_ISOLATION" == true ]] \
@@ -1043,9 +1049,9 @@ apply_rules() {
   fi
 
   if [[ -z "$iface" ]]; then
-    echo "$(date --iso-8601=seconds) [$vm started] no tap found; XML target lines:" >&2
+    hook_log "$vm" "no tap found; XML target lines:"
     echo "$xml" | grep -i "target" >&2
-    echo "migrant: no tap interface found for $vm" >&2
+    hook_log "$vm" "no tap interface found"
     return 4
   fi
 
@@ -1148,6 +1154,17 @@ MIGRANT_QEMU_EOF
 VM_NAME="$1"
 OPERATION="$2"
 
+# All stderr goes to a persistent log file. libvirtd does not reliably forward
+# hook stderr to the journal, so this is the only reliable debug channel.
+mkdir -p /run/migrant
+exec 2>>/run/migrant/hook.log
+
+hook_log() {
+  echo "$(date --iso-8601=seconds) [$VM_NAME $OPERATION] $*" >&2
+}
+
+hook_log "loop-hook start"
+
 # Read the domain XML from stdin. libvirt pipes it to the hook for every
 # operation, so this is always available — unlike the persistent XML file,
 # which may not exist yet when the hook fires during initial virt-install.
@@ -1181,7 +1198,7 @@ mount_shared_folders() {
   done < <(virtiofs_sources)
 
   if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "migrant: no virtiofs filesystems found in $local_xml" >&2
+    hook_log "no virtiofs filesystems found in $local_xml"
     return
   fi
 
@@ -1193,21 +1210,21 @@ mount_shared_folders() {
       # than silently serve an unprotected directory — the user opted into
       # isolation and must not be left thinking it is in effect when it is not.
       # A non-zero exit from a prepare hook causes libvirt to abort VM startup.
-      echo "migrant: error: shared folder image not found: $img_path" >&2
-      echo "migrant: run 'migrant.sh up' to recreate it" >&2
+      hook_log "error: shared folder image not found: $img_path"
+      hook_log "run 'migrant.sh up' to recreate it"
       exit 1
     fi
 
     if mountpoint -q "$source_dir" 2>/dev/null; then
-      echo "migrant: $source_dir already mounted" >&2
+      hook_log "$source_dir already mounted"
       continue
     fi
 
     mkdir -p "$source_dir"
     if mount -o loop,nosymfollow "$img_path" "$source_dir"; then
-      echo "migrant: mounted $img_path at $source_dir" >&2
+      hook_log "mounted $img_path at $source_dir"
     else
-      echo "migrant: failed to mount $img_path at $source_dir" >&2
+      hook_log "failed to mount $img_path at $source_dir"
     fi
   done
 }
@@ -1221,25 +1238,19 @@ unmount_shared_folders() {
   for source_dir in "${sources[@]}"; do
     if mountpoint -q "$source_dir" 2>/dev/null; then
       if umount "$source_dir"; then
-        echo "migrant: unmounted $source_dir" >&2
+        hook_log "unmounted $source_dir"
       else
-        echo "migrant: failed to unmount $source_dir" >&2
+        hook_log "failed to unmount $source_dir"
       fi
     else
-      echo "migrant: $source_dir not mounted, skipping" >&2
+      hook_log "$source_dir not mounted, skipping"
     fi
   done
 }
 
 case "$OPERATION" in
-  prepare)
-    echo "migrant: loop-hook prepare ${VM_NAME}" >&2
-    mount_shared_folders
-    ;;
-  release)
-    echo "migrant: loop-hook release ${VM_NAME}" >&2
-    unmount_shared_folders
-    ;;
+  prepare) mount_shared_folders ;;
+  release) unmount_shared_folders ;;
 esac
 MIGRANT_LOOP_EOF
   if [[ -f "$loop_hook" ]] && cmp -s "$expected_loop_hook" "$loop_hook"; then
