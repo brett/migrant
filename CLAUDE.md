@@ -38,6 +38,18 @@ commands can operate unprivileged.
 `sudo` is permitted only in convenience wrapper subcommands unrelated to VM
 lifecycle: `mount`, `unmount`, `wg`, and similar helpers.
 
+## cmd_status output format
+
+`cmd_status` uses aligned `key: value` pairs with indented sub-fields for
+grouped data (tunnel details, loop mount point). Key design rules:
+
+- **Field order**: name → state → ip → tunnel → snapshot → loop
+  (most operationally important first)
+- **Markers**: append `[ERROR]` for broken states, `[WARNING]` for transient
+  or degraded states; never use colors (breaks pipes/scripts)
+- **Hints**: only the `crashed` state includes a recovery hint (`note:` sub-field)
+  because the steps are non-obvious; all other action hints are omitted
+
 ## Exit codes
 
 Non-zero exits follow sysexits.h semantics. Reserve `1` for runtime state
