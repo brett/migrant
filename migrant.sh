@@ -275,11 +275,11 @@ ensure_shared_folder_images() {
 }
 
 wg_iface_and_table() {
-  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # Interface name: "mg-wg-" + first 7 hex chars of MD5(vm_name).
   # 7 chars = 28 bits of hash; collision probability is negligible at any
-  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
-  # 15-char kernel interface name limit.
-  wg_iface="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+  # realistic number of VMs. The "mg-wg-XXXXXXX" form (13 chars) stays well
+  # under the 15-char kernel interface name limit.
+  wg_iface="mg-wg-$(printf '%s' "$1" | md5sum | head -c7)"
 
   # Routing table ID: the same 7 hex chars interpreted as an integer.
   # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability
@@ -793,11 +793,11 @@ echo "$xml" | grep -q "network-isolation=true" && HAS_NETWORK_ISOLATION=true
 VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
 
 wg_iface_and_table() {
-  # Interface name: "wg-" + first 7 hex chars of MD5(vm_name).
+  # Interface name: "mg-wg-" + first 7 hex chars of MD5(vm_name).
   # 7 chars = 28 bits of hash; collision probability is negligible at any
-  # realistic number of VMs. The "wg-XXXXXXX" form stays well under the
-  # 15-char kernel interface name limit.
-  WG_IFACE="wg-$(printf '%s' "$1" | md5sum | head -c7)"
+  # realistic number of VMs. The "mg-wg-XXXXXXX" form (13 chars) stays well
+  # under the 15-char kernel interface name limit.
+  WG_IFACE="mg-wg-$(printf '%s' "$1" | md5sum | head -c7)"
 
   # Routing table ID: the same 7 hex chars interpreted as an integer.
   # 7 chars = 28 bits = 268,435,456 possible values; 50% collision probability

@@ -656,11 +656,11 @@ VM stops.
 
 ### How it works
 
-The host creates a WireGuard interface (`wg-<hash>`) and a dedicated
+The host creates a WireGuard interface (`mg-wg-<hash>`) and a dedicated
 routing table. An iptables `mangle PREROUTING` rule marks every packet
 arriving from the VM's tap device with the table ID; a policy rule
 (`ip rule`) then diverts those marked packets to the WireGuard table,
-where the only route is `default dev wg-<hash>`. The result: all VM
+where the only route is `default dev mg-wg-<hash>`. The result: all VM
 traffic exits the host via the encrypted WireGuard tunnel, regardless
 of what the VM itself does.
 
@@ -691,7 +691,7 @@ line:
 `migrant.sh status` shows which DNS mode is active:
 
 ```
-Tunnel:   active — wg-a1b2c3d → 198.51.100.1
+Tunnel:   active — mg-wg-a1b2c3d → 198.51.100.1
 DNS:      10.8.0.1 (through tunnel)
 ```
 
