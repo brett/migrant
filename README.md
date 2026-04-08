@@ -247,20 +247,29 @@ Run commands from the project directory containing `Migrantfile`, or set
 `MIGRANT_DIR` to run from anywhere (see [MIGRANT_DIR](#migrant_dir)).
 
 ```bash
+# Setup
 migrant.sh setup              # One-time host setup: configures libvirt networking and installs firewall hooks
+
+# Lifecycle
 migrant.sh up                 # Create the VM if it does not exist, or start it if stopped; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
 migrant.sh halt               # Gracefully shut down the VM
 migrant.sh destroy            # Stop and permanently delete the VM, its disk, and any snapshots
+migrant.sh status             # Show the VM's current state and snapshot availability
 migrant.sh provision          # Run the Ansible playbook (playbook.yml) against the running VM
 migrant.sh snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down afterward
 migrant.sh reset              # Destroy the VM and rebuild it from the last snapshot
-migrant.sh status             # Show the VM's current state and snapshot availability
+
+# Shared folder
 migrant.sh mount              # Mount the shared folder loop image for host-side access; creates the image if it does not exist
 migrant.sh unmount            # Unmount the shared folder loop image
+
+# Access
 migrant.sh ssh [-- cmd...]    # SSH into the VM as the configured user; optionally run a remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
 migrant.sh pubkey             # Generate the managed SSH key if needed and print its public key
+
+# Diagnostics
 migrant.sh storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
 migrant.sh wg                 # Show live WireGuard interface status, including transfer stats and latest handshake; requires sudo
 migrant.sh dominfo            # Show detailed libvirt domain info for the VM

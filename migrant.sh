@@ -30,28 +30,36 @@ usage() {
   cat >&2 <<'EOF'
 Usage: migrant.sh <command> [args]
 
-Commands:
+Setup:
   setup               One-time host setup: configures libvirt networking and
                       installs firewall hooks
+
+Lifecycle:
   up                  Create the VM if it does not exist, or start it if stopped;
                       runs Ansible provisioning (if playbook.yml exists) on first
                       create; waits until the VM is fully ready; connects
                       automatically if AUTOCONNECT is set in the Migrantfile
   halt                Gracefully shut down the VM
   destroy             Stop and permanently delete the VM, its disk, and any snapshots
+  status              Show the VM's current state and snapshot availability
   provision           Run the Ansible playbook (playbook.yml) against the running VM
   snapshot            Shut down the VM and save a snapshot of its disk;
                       VM stays down afterward
   reset               Destroy the VM and rebuild it from the last snapshot
-  status              Show the VM's current state and snapshot availability
+
+Shared folder:
   mount               Mount the shared folder loop image for host-side access;
                       creates the image if it does not exist
   unmount             Unmount the shared folder loop image
+
+Access:
   ssh [-- cmd...]     SSH into the VM as the configured user; optionally run a
                       remote command (e.g. migrant.sh ssh -- sudo cloud-init status)
   console             Open a serial console session (exit with Ctrl+])
   ip                  Print the VM's IP address
   pubkey              Generate the managed SSH key if needed and print its public key
+
+Diagnostics:
   storage             List IMAGES_DIR contents grouped by base images and VMs,
                       with file sizes; works without a Migrantfile
   wg                  Show live WireGuard interface status, including transfer
