@@ -54,6 +54,8 @@ Commands:
   pubkey              Generate the managed SSH key if needed and print its public key
   storage             List IMAGES_DIR contents grouped by base images and VMs,
                       with file sizes; works without a Migrantfile
+  wg                  Show live WireGuard interface status, including transfer
+                      stats and latest handshake; requires sudo
 
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
@@ -1353,6 +1355,7 @@ _migrant() {
     "ip:Print the VM's IP address"
     "pubkey:Generate the managed SSH key if needed and print its public key"
     "storage:List IMAGES_DIR contents grouped by base images and VMs"
+    "wg:Show live WireGuard interface status, including transfer stats and latest handshake"
   )
 
   if (( CURRENT == 2 )); then
@@ -1887,6 +1890,27 @@ cmd_status() {
   fi
 }
 
+cmd_wg() {
+  local wg_iface wg_table
+  wg_iface_and_table "$VM_NAME"
+
+  if [[ ! -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
+    echo "No WireGuard configured for VM '$VM_NAME'." >&2
+    exit 1
+  fi
+
+  if ! ip link show "$wg_iface" &>/dev/null; then
+    echo "WireGuard interface $wg_iface is not up (is the VM running?)." >&2
+    exit 1
+  fi
+
+  if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
+    echo "Warning: PrivateKey in wireguard.conf is invalid — no peer connection possible." >&2
+  fi
+
+  sudo wg show "$wg_iface"
+}
+
 # Print the human-readable disk usage of a single file.
 image_file_size() {
   du -sh "$1" 2>/dev/null | cut -f1 || echo "?"
@@ -2044,6 +2068,7 @@ case "$SUBCOMMAND" in
   reset)        require_config; cmd_reset ;;
   provision)    require_config; cmd_provision ;;
   storage)      cmd_storage ;;
+  wg)           require_config; cmd_wg ;;
   -h|--help|help) usage 0 ;;
   *)              usage ;;
 esac
