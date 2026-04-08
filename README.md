@@ -476,24 +476,24 @@ scripting or for connecting with tools other than SSH.
 $ migrant.sh storage
 Directory: /var/lib/libvirt/images (16.1G)
 Base Images:
-    Arch-Linux-x86_64-cloudimg.qcow2 (519M)
-    debian-13-generic-amd64.qcow2 (648M)
-    ubuntu-25.10-server-cloudimg-amd64.img (785M)
+  Arch-Linux-x86_64-cloudimg.qcow2 (519M)
+  debian-13-generic-amd64.qcow2 (648M)
+  ubuntu-25.10-server-cloudimg-amd64.img (785M)
 VMs:
-    arch-claude (2.4G):
-        Disk:     arch-claude.qcow2 (911M)
-        Seed ISO: arch-claude-seed.iso (372K)
-        Snapshot: arch-claude-snapshot.qcow2 (1.5G)
-    debian-claude (3.8G):
-        Disk:     debian-claude.qcow2 (987M)
-        Seed ISO: debian-claude-seed.iso (372K)
-        Snapshot: debian-claude-snapshot.qcow2 (2.9G)
-    ubuntu-claude (4.1G):
-        Disk:     ubuntu-claude.qcow2 (1.1G)
-        Seed ISO: ubuntu-claude-seed.iso (372K)
-        Snapshot: ubuntu-claude-snapshot.qcow2 (3.1G)
+  arch-claude (2.4G):
+    disk:     arch-claude.qcow2 (911M)
+    seed iso: arch-claude-seed.iso (372K)
+    snapshot: arch-claude-snapshot.qcow2 (1.5G)
+  debian-claude (3.8G):
+    disk:     debian-claude.qcow2 (987M)
+    seed iso: debian-claude-seed.iso (372K)
+    snapshot: debian-claude-snapshot.qcow2 (2.9G)
+  ubuntu-claude (4.1G):
+    disk:     ubuntu-claude.qcow2 (1.1G)
+    seed iso: ubuntu-claude-seed.iso (372K)
+    snapshot: ubuntu-claude-snapshot.qcow2 (3.1G)
 Other:
-    someone-elses-vm.qcow2 (2.0G)
+  someone-elses-vm.qcow2 (2.0G)
 ```
 
 `(destroyed)` means the VM's files are still on disk but the VM no longer
@@ -676,8 +676,10 @@ line:
 `migrant.sh status` shows which DNS mode is active:
 
 ```
-Tunnel:   active — mg-wg-a1b2c3d → 198.51.100.1
-DNS:      10.8.0.1 (through tunnel)
+tunnel:     active
+  iface:    mg-wg-a1b2c3d
+  peer:     198.51.100.1
+  dns:      10.8.0.1
 ```
 
 ### Threat model
