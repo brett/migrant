@@ -938,12 +938,6 @@ wg_setup_rules() {
   iptables -t mangle -A PREROUTING \
     -m physdev --physdev-in "$iface" -j MARK --set-mark "$WG_TABLE"
 
-  # Drop all IPv6 from this VM. The fwmark routing is IPv4-only; without this
-  # rule IPv6 traffic would bypass the tunnel and exit via the host's default
-  # IPv6 path. The libvirt network provides no routable IPv6 to VMs, so this
-  # rule enforces an existing de-facto limitation rather than removing capability.
-  ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
-
   # DNS handling — IPs pre-parsed and normalized at sync time.
   # For each DNS IP:
   #   1. FORWARD ACCEPT punches through the NI RFC1918 REJECT rules so the
@@ -989,8 +983,6 @@ wg_teardown() {
     --set-mark "$WG_TABLE" 2>/dev/null || true
   ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
-
-  ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
 
   local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
   if [[ -f "$wg_dns_file" ]]; then
@@ -1071,6 +1063,12 @@ apply_rules() {
     iptables -I FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
   fi
 
+  # Drop all IPv6 from this VM. The libvirt network provides no routable IPv6
+  # to VMs; this rule makes the de-facto limitation explicit. When WireGuard is
+  # in use, fwmark routing is IPv4-only and without this rule IPv6 traffic would
+  # bypass the tunnel and exit via the host's default IPv6 path.
+  ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
+
   wg_setup_rules "$vm" "$iface"
 
   # Unblock the VM's MAC now that all rules are in place (both NI and WG).
@@ -1102,6 +1100,8 @@ remove_rules() {
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
   fi
+
+  ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
 
   local WG_IFACE WG_TABLE
   wg_iface_and_table "$vm"

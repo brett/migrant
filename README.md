@@ -577,6 +577,9 @@ added that:
   existing connections)
 - Block the VM from reaching RFC 1918 addresses on the local network,
   other than the libvirt subnet itself (192.168.200.0/24)
+- Drop all IPv6 from the VM at the `FORWARD` chain (the libvirt network
+  provides no routable IPv6 to VMs; this makes that de-facto limitation
+  explicit)
 
 The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant.sh setup` to have been run to install the libvirt
@@ -661,8 +664,9 @@ where the only route is `default dev wg-<hash>`. The result: all VM
 traffic exits the host via the encrypted WireGuard tunnel, regardless
 of what the VM itself does.
 
-IPv6 from the VM is dropped at the `FORWARD` chain. The fwmark routing
-is IPv4-only; without this rule IPv6 would bypass the tunnel.
+IPv6 from the VM is dropped at the `FORWARD` chain (as with
+`NETWORK_ISOLATION=true`). The fwmark routing is IPv4-only; without
+this rule IPv6 would bypass the tunnel.
 
 `migrant.sh up` verifies the tunnel is active before returning. If the
 WireGuard interface or routing rule is missing, or the marking rule was
@@ -704,7 +708,7 @@ The VM cannot bypass it:
   port-53 traffic is rewritten.
 - If the tunnel fails to come up, `migrant.sh up` halts the VM rather
   than letting it run un-tunneled.
-- IPv6 is blocked at the FORWARD chain so there is no IPv6 leak path.
+- IPv6 is blocked at the FORWARD chain (shared with the `NETWORK_ISOLATION=true` rule) so there is no IPv6 leak path.
 
 This does not prevent the VM from sending traffic to other hosts on the
 VPN once the tunnel is active. Use `NETWORK_ISOLATION=true` alongside
