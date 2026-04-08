@@ -56,6 +56,7 @@ Commands:
                       with file sizes; works without a Migrantfile
   wg                  Show live WireGuard interface status, including transfer
                       stats and latest handshake; requires sudo
+  dominfo             Show detailed libvirt domain info for the VM
 
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
@@ -1356,6 +1357,7 @@ _migrant() {
     "pubkey:Generate the managed SSH key if needed and print its public key"
     "storage:List IMAGES_DIR contents grouped by base images and VMs"
     "wg:Show live WireGuard interface status, including transfer stats and latest handshake"
+    "dominfo:Show detailed libvirt domain info for the VM"
   )
 
   if (( CURRENT == 2 )); then
@@ -1936,6 +1938,10 @@ cmd_wg() {
   sudo wg show "$wg_iface"
 }
 
+cmd_dominfo() {
+  virsh --connect qemu:///system dominfo "$VM_NAME"
+}
+
 # Print the human-readable disk usage of a single file.
 image_file_size() {
   du -sh "$1" 2>/dev/null | cut -f1 || echo "?"
@@ -2094,6 +2100,7 @@ case "$SUBCOMMAND" in
   provision)    require_config; cmd_provision ;;
   storage)      cmd_storage ;;
   wg)           require_config; cmd_wg ;;
+  dominfo)      require_config; cmd_dominfo ;;
   -h|--help|help) usage 0 ;;
   *)              usage ;;
 esac

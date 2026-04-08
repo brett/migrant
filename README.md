@@ -263,6 +263,7 @@ migrant.sh ip                 # Print the VM's IP address
 migrant.sh pubkey             # Generate the managed SSH key if needed and print its public key
 migrant.sh storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
 migrant.sh wg                 # Show live WireGuard interface status, including transfer stats and latest handshake; requires sudo
+migrant.sh dominfo            # Show detailed libvirt domain info for the VM
 ```
 
 ### Typical workflow
