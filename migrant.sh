@@ -58,6 +58,8 @@ Access:
   console             Open a serial console session (exit with Ctrl+])
   ip                  Print the VM's IP address
   pubkey              Generate the managed SSH key if needed and print its public key
+  tz [zone]           Sync the host timezone to the VM, or set an explicit zone
+                      (e.g. America/New_York); defaults to the host timezone
 
 Diagnostics:
   storage             List IMAGES_DIR contents grouped by base images and VMs,
@@ -1360,6 +1362,7 @@ _migrant() {
     "console:Open a serial console session"
     "ip:Print the VM's IP address"
     "pubkey:Generate the managed SSH key if needed and print its public key"
+    "tz:Sync the host timezone to the VM, or set an explicit zone"
     "storage:List IMAGES_DIR contents grouped by base images and VMs"
     "wg:Show live WireGuard interface status, including transfer stats and latest handshake"
     "dominfo:Show detailed libvirt domain info for the VM"
@@ -1685,6 +1688,34 @@ do_autoconnect() {
 cmd_ip() {
   require_running
   get_vm_ip_or_die
+}
+
+cmd_tz() {
+  require_running
+  local tz="${1:-}"
+  if [[ -z "$tz" ]]; then
+    tz=$(readlink /etc/localtime || true)
+    tz=${tz#/usr/share/zoneinfo/}
+  fi
+  if [[ -z "$tz" ]]; then
+    echo "[ERROR] Could not determine host timezone." >&2
+    exit 1
+  fi
+local user ssh_opts ip
+  resolve_ssh_conn user ssh_opts ip
+  # SC2029: $tz intentionally expands on the client side.
+  # shellcheck disable=SC2029
+  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" test -f "/usr/share/zoneinfo/$tz"; then
+    echo "[ERROR] Unknown timezone: $tz" >&2
+    exit 64
+  fi
+  # shellcheck disable=SC2029
+  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" \
+      sudo ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime; then
+    echo "[ERROR] Failed to set timezone in VM." >&2
+    exit 1
+  fi
+  echo "timezone: $tz"
 }
 
 cmd_ssh() {
@@ -2098,6 +2129,7 @@ case "$SUBCOMMAND" in
   ssh)          require_config; cmd_ssh "${@:2}" ;;
   pubkey)       require_config; cmd_pubkey ;;
   ip)           require_config; cmd_ip ;;
+  tz)           require_config; cmd_tz "${2:-}" ;;
   status)       require_config; cmd_status ;;
   mount)        require_config; cmd_mount ;;
   unmount)      require_config; cmd_unmount ;;

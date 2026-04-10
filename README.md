@@ -253,6 +253,7 @@ migrant.sh ssh [-- cmd...]    # SSH into the VM as the configured user; optional
 migrant.sh console            # Open a serial console session (exit with Ctrl+])
 migrant.sh ip                 # Print the VM's IP address
 migrant.sh pubkey             # Generate the managed SSH key if needed and print its public key
+migrant.sh tz [zone]          # Sync the host timezone to the VM, or set an explicit zone (e.g. America/New_York); defaults to the host timezone
 
 # Diagnostics
 migrant.sh storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
