@@ -56,3 +56,11 @@ NETWORK_ISOLATION=true
 # Optional: automatically connect after 'migrant.sh up' finishes.
 # Unset by default. Set to "ssh" or "console" to enable.
 AUTOCONNECT=ssh
+
+# Lifecycle hooks — executable scripts in hooks/ run at VM state transitions:
+#   hooks/pre-up      before VM starts (can abort)
+#   hooks/post-up     after VM is fully ready
+#   hooks/pre-down    before VM shuts down (can abort halt/snapshot, not destroy)
+#   hooks/post-down   after VM has stopped
+# Hooks fire from every code path that changes VM state, including snapshot and
+# reset. See README.md for environment variables and examples.

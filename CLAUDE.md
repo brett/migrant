@@ -137,6 +137,16 @@ Known parity exceptions:
 - **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for
   `/tmp`; Ubuntu and Arch do not.
 
+## Lifecycle hooks
+
+User hooks (`$VM_DIR/hooks/`) are state-transition-based, not command-based.
+`pre-down`/`post-down` must fire from every code path that stops the VM — not
+just `cmd_halt`. When adding a new code path that shuts down or force-stops a
+VM, use `do_graceful_shutdown()` or fire hooks via `run_hook` directly.
+
+Hooks run as the invoking user, not root. This is by design — same trust
+boundary as the Migrantfile itself.
+
 ## Target platform
 
 Primary target is Arch Linux with the `linux-hardened` kernel. Other Linux

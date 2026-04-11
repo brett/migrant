@@ -114,6 +114,34 @@ require_running() {
   fi
 }
 
+run_hook() {
+  # Execute a user-provided lifecycle hook if it exists and is executable.
+  # $1 = hook name (pre-up, post-up, pre-down, post-down)
+  # $2 = "true" (default) to abort on pre-hook failure, "false" to warn only.
+  #      post-hooks always warn only, regardless of this parameter.
+  local hook_name="$1"
+  local can_abort="${2:-true}"
+  local hook_path="$VM_DIR/hooks/${hook_name}"
+  [[ -x "$hook_path" ]] || return 0
+
+  echo "Running ${hook_name} hook..."
+  local exit_code=0
+  MIGRANT_VM_NAME="$VM_NAME" \
+  MIGRANT_VM_DIR="$VM_DIR" \
+  MIGRANT_HOOK="$hook_name" \
+  MIGRANT_TRIGGER="${_MIGRANT_TRIGGER:-}" \
+  MIGRANT_VM_IP="${_MIGRANT_VM_IP:-}" \
+  "$hook_path" || exit_code=$?
+
+  if (( exit_code != 0 )); then
+    if [[ "$can_abort" == true && "$hook_name" == pre-* ]]; then
+      echo "[ERROR] ${hook_name} hook failed (exit $exit_code). Aborting." >&2
+      exit 1
+    fi
+    echo "[WARNING] ${hook_name} hook failed (exit $exit_code)." >&2
+  fi
+}
+
 check_kvm() {
   if [[ ! -e /dev/kvm ]]; then
     echo "[WARNING] /dev/kvm not found. KVM acceleration is unavailable — check that" >&2
@@ -430,6 +458,8 @@ verify_wireguard_tunnel() {
 }
 
 cmd_up() {
+  _MIGRANT_TRIGGER="${_MIGRANT_TRIGGER:-up}"
+
   if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
     echo "[ERROR] No cloud-init.yml found in $VM_DIR" >&2
     exit 78
@@ -477,19 +507,23 @@ cmd_up() {
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
     sync_wireguard_config
+    run_hook "pre-up"
     virsh start "$VM_NAME"
     verify_shared_folder_mounts
     verify_wireguard_tunnel
     if [[ "${AUTOCONNECT:-}" == "console" ]]; then
+      run_hook "post-up"
       do_autoconnect
       return
     fi
     wait_for_ip
+    _MIGRANT_VM_IP=$(get_vm_ip)
     if vm_has_ssh && [[ "${AUTOCONNECT:-}" != "ssh" ]]; then
       local user ssh_opts ip
       resolve_ssh_conn user ssh_opts ip
       wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
     fi
+    run_hook "post-up"
     do_autoconnect
     return
   fi
@@ -596,6 +630,7 @@ EOF
     && vm_description+=",shared-folder-isolation=false"
 
   sync_wireguard_config
+  run_hook "pre-up"
 
   virt-install \
     --name "$VM_NAME" \
@@ -619,11 +654,13 @@ EOF
   # the VM starts, letting the user watch the boot. Skip wait_for_ip entirely.
   if [[ "${AUTOCONNECT:-}" == "console" ]] \
       && { [[ "$from_snapshot" == true ]] || [[ ! -f "$VM_DIR/playbook.yml" ]]; }; then
+    run_hook "post-up"
     do_autoconnect
     return
   fi
 
   wait_for_ip
+  _MIGRANT_VM_IP=$(get_vm_ip)
 
   if [[ "$from_snapshot" == false ]] && [[ -f "$VM_DIR/playbook.yml" ]]; then
     local user ssh_opts ip
@@ -652,6 +689,7 @@ EOF
     fi
   fi
 
+  run_hook "post-up"
   do_autoconnect
 }
 
@@ -1400,11 +1438,29 @@ MIGRANT_ZSH_EOF
   fi
 }
 
+do_graceful_shutdown() {
+  # Gracefully shut down the VM, firing pre-down and post-down hooks.
+  # $1 = "true" (default) to allow pre-down hook to abort, "false" to warn only.
+  local can_abort="${1:-true}"
+  run_hook "pre-down" "$can_abort"
+  virsh shutdown "$VM_NAME"
+  wait_for_shutdown
+  run_hook "post-down"
+}
+
 teardown_vm() {
   # Forcibly stop, undefine, and delete VM disk files.
   # Pass "keep_snapshot" as $1 to preserve the snapshot image (used by reset).
   local keep_snapshot="${1:-}"
+  local was_running=false
+  if virsh domstate "$VM_NAME" 2>/dev/null | grep -q "^running"; then
+    was_running=true
+    run_hook "pre-down" false
+  fi
   virsh destroy "$VM_NAME" 2>/dev/null || true
+  if [[ "$was_running" == true ]]; then
+    run_hook "post-down"
+  fi
   virsh undefine "$VM_NAME" --remove-all-storage --nvram 2>/dev/null || true
   rm -rf "/etc/migrant/${VM_NAME}"
   if [[ "$keep_snapshot" == "keep_snapshot" ]]; then
@@ -1415,6 +1471,7 @@ teardown_vm() {
 }
 
 cmd_halt() {
+  _MIGRANT_TRIGGER="halt"
   require_vm
   local state
   state=$(virsh domstate "$VM_NAME")
@@ -1422,8 +1479,8 @@ cmd_halt() {
     echo "VM '$VM_NAME' is not running (state: $state)."
     return
   fi
-  virsh shutdown "$VM_NAME"
-  wait_for_shutdown
+  _MIGRANT_VM_IP=$(get_vm_ip)
+  do_graceful_shutdown
   echo "VM '$VM_NAME' has stopped."
 
   # Destroy libvirt networks that are no longer in use.
@@ -1457,10 +1514,12 @@ cmd_halt() {
 }
 
 cmd_destroy() {
+  _MIGRANT_TRIGGER="destroy"
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
     echo "VM '$VM_NAME' does not exist."
     return
   fi
+  _MIGRANT_VM_IP=$(get_vm_ip 2>/dev/null || true)
   teardown_vm
   echo "VM '$VM_NAME' destroyed."
 
@@ -1477,14 +1536,15 @@ cmd_destroy() {
 }
 
 cmd_snapshot() {
+  _MIGRANT_TRIGGER="snapshot"
   require_vm
 
   local state
   state=$(virsh domstate "$VM_NAME")
   if [[ "$state" == "running" ]]; then
+    _MIGRANT_VM_IP=$(get_vm_ip)
     echo "Shutting down '$VM_NAME' for snapshot..."
-    virsh shutdown "$VM_NAME"
-    wait_for_shutdown
+    do_graceful_shutdown
   elif [[ "$state" != "shut off" ]]; then
     echo "[ERROR] VM '$VM_NAME' is in state '$state'. Halt it before snapshotting." >&2
     exit 1
@@ -1501,6 +1561,7 @@ cmd_snapshot() {
 }
 
 cmd_reset() {
+  _MIGRANT_TRIGGER="reset"
   if [[ ! -f "$SNAPSHOT_PATH" ]]; then
     echo "[ERROR] no snapshot found for '$VM_NAME'." >&2
     echo "  Run 'migrant.sh snapshot' to create one." >&2
@@ -1513,6 +1574,7 @@ cmd_reset() {
   # with no network.
   local macs=()
   if virsh dominfo "$VM_NAME" &>/dev/null; then
+    _MIGRANT_VM_IP=$(get_vm_ip)
     while IFS= read -r mac; do
       [[ -n "$mac" ]] && macs+=("$mac")
     done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
