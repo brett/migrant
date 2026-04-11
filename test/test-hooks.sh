@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LIBVIRT_DEFAULT_URI="qemu:///system"
 
 # Integration test for lifecycle hooks.
 # Run from a VM directory that has a working Migrantfile + cloud-init.yml:
