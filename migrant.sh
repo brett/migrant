@@ -89,6 +89,11 @@ require_config() {
   SEED_ISO="$IMAGES_DIR/${VM_NAME}-seed.iso"
   SNAPSHOT_PATH="$IMAGES_DIR/${VM_NAME}-snapshot.qcow2"
 
+  # Default HOST_ACCESS to an empty array if not set in the Migrantfile.
+  if [[ -z "${HOST_ACCESS+x}" ]]; then
+    HOST_ACCESS=()
+  fi
+
   LIBVIRT_NETWORKS=()
   for _nic in "${NETWORKS[@]+"${NETWORKS[@]}"}"; do
     if [[ "$_nic" =~ (^|,)network=([^,]+) ]]; then
@@ -319,15 +324,105 @@ wg_iface_and_table() {
   wg_table=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
 }
 
-sync_wireguard_config() {
-  local wg_src="$VM_DIR/wireguard.conf"
+sync_managed_config() {
+  # Write all behavioral config to /etc/migrant/${VM_NAME}/ for the qemu and
+  # loop hooks to consume. The directory is created only when at least one
+  # feature needs it, and removed when empty.
   local managed_dir="/etc/migrant/${VM_NAME}"
+  local needs_dir=false
 
-  if [[ ! -f "$wg_src" ]]; then
-    # Source absent: remove the managed directory so the hook finds nothing.
+  local has_network_isolation=false
+  [[ "${NETWORK_ISOLATION:-}" == "true" ]] && has_network_isolation=true
+
+  local has_shared_folder_isolation_disabled=false
+  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
+    && has_shared_folder_isolation_disabled=true
+
+  local has_wireguard=false
+  [[ -f "$VM_DIR/wireguard.conf" ]] && has_wireguard=true
+
+  local has_host_access=false
+  (( ${#HOST_ACCESS[@]} > 0 )) && has_host_access=true
+
+  [[ "$has_network_isolation" == true \
+    || "$has_shared_folder_isolation_disabled" == true \
+    || "$has_wireguard" == true \
+    || "$has_host_access" == true ]] && needs_dir=true
+
+  if [[ "$needs_dir" == false ]]; then
     rm -rf "$managed_dir"
     return 0
   fi
+
+  # The subdirectory is owner-only (700): other libvirt group members can create
+  # entries in /etc/migrant/ but cannot read each other's private keys.
+  # The qemu hook runs as root and is unaffected by these permissions.
+  mkdir -p "$managed_dir"
+  chmod 700 "$managed_dir"
+
+  # --- network isolation flag ---
+  if [[ "$has_network_isolation" == true ]]; then
+    touch "$managed_dir/network-isolation"
+  else
+    rm -f "$managed_dir/network-isolation"
+  fi
+
+  # --- shared folder isolation flag ---
+  # Presence of this file means isolation is DISABLED (opt-out).
+  if [[ "$has_shared_folder_isolation_disabled" == true ]]; then
+    touch "$managed_dir/shared-folder-isolation-disabled"
+  else
+    rm -f "$managed_dir/shared-folder-isolation-disabled"
+  fi
+
+  # --- host access rules ---
+  if [[ "$has_host_access" == true ]]; then
+    local rules_content=""
+    for rule in "${HOST_ACCESS[@]}"; do
+      case "$rule" in
+        allow-host-port\ tcp/[0-9]*|allow-host-port\ udp/[0-9]*)
+          rules_content+="${rule}"$'\n'
+          ;;
+        allow-lan-host\ *)
+          local host_ip="${rule#allow-lan-host }"
+          if [[ ! "$host_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  allow-lan-host requires a numeric IPv4 address." >&2
+            exit 65  # EX_DATAERR
+          fi
+          rules_content+="${rule}"$'\n'
+          ;;
+        *)
+          echo "[ERROR] unrecognized HOST_ACCESS directive: $rule" >&2
+          echo "  Valid directives: allow-host-port <proto/port>, allow-lan-host <ip>" >&2
+          exit 65  # EX_DATAERR
+          ;;
+      esac
+    done
+    printf '%s' "$rules_content" > "$managed_dir/host-access"
+  else
+    rm -f "$managed_dir/host-access"
+  fi
+
+  # --- WireGuard ---
+  if [[ "$has_wireguard" == true ]]; then
+    sync_wireguard_files "$managed_dir"
+  else
+    rm -f "$managed_dir"/wireguard-*
+    rm -f "$managed_dir"/wireguard.conf
+  fi
+
+  # Remove the directory if nothing ended up in it (defensive).
+  if [[ -z "$(ls -A "$managed_dir" 2>/dev/null)" ]]; then
+    rmdir "$managed_dir" 2>/dev/null || true
+  fi
+}
+
+sync_wireguard_files() {
+  # Validate and write WireGuard config files to the managed directory.
+  # Called by sync_managed_config when wireguard.conf is present.
+  local managed_dir="$1"
+  local wg_src="$VM_DIR/wireguard.conf"
 
   if ! command -v wg &>/dev/null; then
     echo "[ERROR] wireguard.conf is present but 'wg' (wireguard-tools) is not installed." >&2
@@ -350,12 +445,6 @@ sync_wireguard_config() {
     echo "  Edit wireguard.conf and re-run 'migrant.sh up'." >&2
     exit 65  # EX_DATAERR
   fi
-
-  # The subdirectory is owner-only (700): other libvirt group members can create
-  # entries in /etc/migrant/ but cannot read each other's private keys.
-  # The qemu hook runs as root and is unaffected by these permissions.
-  mkdir -p "$managed_dir"
-  chmod 700 "$managed_dir"
 
   # wireguard.conf — raw copy (contains private key; permissions must be tight)
   cp "$wg_src" "$managed_dir/wireguard.conf"
@@ -506,7 +595,7 @@ cmd_up() {
     check_managed_key_match start
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
-    sync_wireguard_config
+    sync_managed_config
     run_hook "pre-up"
     virsh start "$VM_NAME"
     verify_shared_folder_mounts
@@ -623,13 +712,11 @@ EOF
     extra_args+=(--boot firmware=efi)
   fi
 
+  # Identity only — behavioral flags are in /etc/migrant/${VM_NAME}/ files
+  # synced by sync_managed_config, not in the description tag.
   local vm_description="managed-by=migrant.sh"
-  [[ "${NETWORK_ISOLATION:-}" == "true" ]] \
-    && vm_description+=",network-isolation=true"
-  [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
-    && vm_description+=",shared-folder-isolation=false"
 
-  sync_wireguard_config
+  sync_managed_config
   run_hook "pre-up"
 
   virt-install \
@@ -758,7 +845,7 @@ cmd_setup() {
     (( changes++ )) || true
   fi
 
-  # --- /etc/migrant/ (WireGuard managed config directory) ---
+  # --- /etc/migrant/ (managed config directory) ---
   if [[ ! -d /etc/migrant ]]; then
     sudo mkdir -p /etc/migrant
     sudo chown root:libvirt /etc/migrant
@@ -835,8 +922,14 @@ hook_log "$VM_NAME" "hook start"
 xml=$(cat)
 echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
 
+# Behavioral config is read from managed config files in /etc/migrant/${VM_NAME}/,
+# with a fallback to the description tag for VMs not yet synced (backward compat).
 HAS_NETWORK_ISOLATION=false
-echo "$xml" | grep -q "network-isolation=true" && HAS_NETWORK_ISOLATION=true
+if [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]]; then
+  HAS_NETWORK_ISOLATION=true
+elif echo "$xml" | grep -q "network-isolation=true"; then
+  HAS_NETWORK_ISOLATION=true
+fi
 
 VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
 
@@ -1105,6 +1198,32 @@ apply_rules() {
     # Appended (not inserted) so libvirt's LIBVIRT_INP chain — which accepts
     # DHCP and DNS destined for dnsmasq — runs first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
+
+    # Insert host-access allow rules before the blanket REJECT. These let the
+    # VM reach specific host ports despite network isolation being enabled.
+    local ha_file="/etc/migrant/${vm}/host-access"
+    if [[ -f "$ha_file" ]]; then
+      while IFS= read -r rule; do
+        [[ -z "$rule" ]] && continue
+        case "$rule" in
+          allow-host-port\ *)
+            local spec="${rule#allow-host-port }"
+            local proto="${spec%%/*}"
+            local port="${spec#*/}"
+            iptables -A "$CHAIN" -p "$proto" --dport "$port" \
+              -m conntrack --ctstate NEW -j ACCEPT
+            hook_log "$vm" "host-access: allow-host-port $proto/$port"
+            ;;
+          allow-lan-host\ *)
+            local host_ip="${rule#allow-lan-host }"
+            iptables -I FORWARD -m physdev --physdev-in "$iface" \
+              -d "${host_ip}/32" -j ACCEPT
+            hook_log "$vm" "host-access: allow-lan-host $host_ip"
+            ;;
+        esac
+      done < "$ha_file"
+    fi
+
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
     iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
 
@@ -1147,6 +1266,20 @@ remove_rules() {
     iptables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN" 2>/dev/null || true
     iptables -F "$CHAIN" 2>/dev/null || true
     iptables -X "$CHAIN" 2>/dev/null || true
+
+    # Remove per-host FORWARD ACCEPT rules added by host-access allow-lan-host.
+    local ha_file="/etc/migrant/${vm}/host-access"
+    if [[ -f "$ha_file" ]]; then
+      while IFS= read -r rule; do
+        case "$rule" in
+          allow-lan-host\ *)
+            local host_ip="${rule#allow-lan-host }"
+            iptables -D FORWARD -m physdev --physdev-in "$iface" \
+              -d "${host_ip}/32" -j ACCEPT 2>/dev/null || true
+            ;;
+        esac
+      done < "$ha_file"
+    fi
 
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
@@ -1216,7 +1349,14 @@ local_xml=$(mktemp)
 trap 'rm -f "$local_xml"' EXIT
 cat > "$local_xml"
 grep -q "managed-by=migrant.sh" "$local_xml" || exit 0
-grep -q "shared-folder-isolation=false" "$local_xml" && exit 0
+
+# Check if shared folder isolation is disabled. Managed config file takes
+# precedence; fall back to description tag for VMs not yet synced.
+if [[ -f "/etc/migrant/${VM_NAME}/shared-folder-isolation-disabled" ]]; then
+  exit 0
+elif grep -q "shared-folder-isolation=false" "$local_xml"; then
+  exit 0
+fi
 
 # Extract the source directory for each virtiofs filesystem from the domain XML.
 # python3 is used for robust XML parsing; it is available on all target systems.
@@ -1986,12 +2126,28 @@ cmd_status() {
     printf '%-*s%s\n' "$w" 'tunnel:' 'none'
   fi
 
-  local vm_desc
-  vm_desc=$(virsh desc "$VM_NAME" 2>/dev/null || true)
-  if echo "$vm_desc" | grep -q "network-isolation=true"; then
+  # Managed config file takes precedence; fall back to description tag for
+  # VMs not yet synced.
+  local ni_enabled=false
+  if [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]]; then
+    ni_enabled=true
+  else
+    local vm_desc
+    vm_desc=$(virsh desc "$VM_NAME" 2>/dev/null || true)
+    echo "$vm_desc" | grep -q "network-isolation=true" && ni_enabled=true
+  fi
+  if [[ "$ni_enabled" == true ]]; then
     printf '%-*s%s\n' "$w" 'isolation:' 'enabled'
   else
     printf '%-*s%s\n' "$w" 'isolation:' 'disabled'
+  fi
+
+  local ha_file="/etc/migrant/${VM_NAME}/host-access"
+  if [[ -f "$ha_file" ]]; then
+    printf '%-*s\n' "$w" 'host-access:'
+    while IFS= read -r rule; do
+      [[ -n "$rule" ]] && printf '  %-*s%s\n' "$sw" '-' "$rule"
+    done < "$ha_file"
   fi
 
   if [[ -f "$SNAPSHOT_PATH" ]]; then

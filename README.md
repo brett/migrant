@@ -155,7 +155,7 @@ to match, defines the `migrant` NAT network, creates the images directory with
 group-writable permissions, installs three libvirt hooks (network isolation and
 WireGuard tunnel management, shared folder loop image mount/unmount, and
 `rp_filter` for the `linux-hardened` kernel), creates `/etc/migrant/` for
-WireGuard managed configs, and installs ZSH completions if `$ZSH_SITE_FUNCTIONS`
+managed VM configs, and installs ZSH completions if `$ZSH_SITE_FUNCTIONS`
 is set.
 
 If your user was not already in the `libvirt` group, setup will add it and then
@@ -570,6 +570,38 @@ added that:
 The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant.sh setup` to have been run to install the libvirt
 hook.
+
+### Host access rules
+
+The `HOST_ACCESS` array in a `Migrantfile` declares exceptions to network
+isolation. Each entry is a directive that the libvirt hook translates to
+an iptables rule, applied atomically alongside the isolation rules:
+
+```bash
+HOST_ACCESS=(
+  "allow-host-port tcp/8080"        # VM can reach host:8080
+  "allow-host-port udp/5353"        # VM can reach host:5353/udp
+  "allow-lan-host 192.168.1.50"     # VM can reach a specific LAN host
+)
+```
+
+| Directive | Effect |
+| --------- | ------ |
+| `allow-host-port <proto/port>` | Allow the VM to connect to the specified host port |
+| `allow-lan-host <ip>` | Allow the VM to reach a specific host on the local network |
+
+`allow-host-port` inserts an ACCEPT rule in the per-VM INPUT chain
+before the blanket REJECT. `allow-lan-host` inserts an ACCEPT in the
+FORWARD chain before the RFC 1918 REJECT rules. Both are removed
+automatically when the VM stops.
+
+`HOST_ACCESS` has no effect without `NETWORK_ISOLATION=true` — there is
+nothing to poke holes in when isolation is disabled.
+
+Combined with [lifecycle hooks](#lifecycle-hooks), this enables
+host-side service patterns: a hook starts a systemd service before the
+VM boots, `HOST_ACCESS` opens the port, and a hook stops the service
+when the VM shuts down.
 
 ### Shared folder isolation
 

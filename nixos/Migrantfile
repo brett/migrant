@@ -41,6 +41,14 @@ CLOUD_INIT_WAIT=true
 # Unset by default. Set to "ssh" or "console" to enable.
 AUTOCONNECT=ssh
 
+# Host access rules — exceptions to NETWORK_ISOLATION. Each entry is a
+# directive applied by the libvirt hook alongside the isolation rules.
+# Has no effect without NETWORK_ISOLATION=true.
+#HOST_ACCESS=(
+#  "allow-host-port tcp/8080"        # VM can reach host:8080
+#  "allow-lan-host 192.168.1.50"     # VM can reach a specific LAN host
+#)
+
 # Lifecycle hooks — executable scripts in hooks/ run at VM state transitions:
 #   hooks/pre-up      before VM starts (can abort)
 #   hooks/post-up     after VM is fully ready

@@ -147,6 +147,23 @@ VM, use `do_graceful_shutdown()` or fire hooks via `run_hook` directly.
 Hooks run as the invoking user, not root. This is by design — same trust
 boundary as the Migrantfile itself.
 
+## Managed config pattern
+
+`/etc/migrant/${VM_NAME}/` is the data channel between unprivileged migrant.sh
+and the privileged qemu/loop hooks. `sync_managed_config()` validates and writes
+all behavioral config (network isolation flag, shared folder isolation flag,
+HOST_ACCESS rules, WireGuard files) before the VM starts. The hooks read these
+files at runtime.
+
+The VM description tag carries only identity (`managed-by=migrant.sh`). All
+behavioral config comes from managed config files. The hooks fall back to the
+description tag for VMs created before this pattern was introduced.
+
+When adding a new feature that requires privileged enforcement:
+1. Add the Migrantfile variable and validation to `sync_managed_config()`
+2. Write the validated data to `/etc/migrant/${VM_NAME}/`
+3. Read it in the appropriate hook (`apply_rules`, `remove_rules`, etc.)
+
 ## Target platform
 
 Primary target is Arch Linux with the `linux-hardened` kernel. Other Linux
