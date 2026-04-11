@@ -55,6 +55,12 @@ echo "VM: $VM_NAME"
 echo "Log prefix: $LOG"
 echo ""
 
+# Ensure no VM exists from a previous run.
+if virsh dominfo "$VM_NAME" &>/dev/null; then
+  echo "Cleaning up leftover VM '$VM_NAME'..."
+  "$MIGRANT" destroy 2>/dev/null || true
+fi
+
 # --- test 1: pre-up abort ---
 
 echo "--- test: pre-up abort ---"
@@ -64,13 +70,17 @@ exit 1
 HOOKEOF
 chmod +x "$HOOKS_DIR/pre-up"
 
-if "$MIGRANT" up 2>&1 | grep -q "pre-up hook failed"; then
+abort_output="$LOG.abort"
+"$MIGRANT" up >"$abort_output" 2>&1 || true
+if grep -q "pre-up hook failed" "$abort_output"; then
   pass "pre-up abort prevents VM start"
 else
   fail "pre-up abort did not prevent VM start"
+  cat "$abort_output"
   # Clean up if VM was created despite the abort
   "$MIGRANT" destroy 2>/dev/null || true
 fi
+rm -f "$abort_output"
 
 # Restore the logging hook
 cat > "$HOOKS_DIR/pre-up" <<HOOKEOF

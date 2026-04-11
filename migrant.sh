@@ -1452,13 +1452,13 @@ teardown_vm() {
   # Forcibly stop, undefine, and delete VM disk files.
   # Pass "keep_snapshot" as $1 to preserve the snapshot image (used by reset).
   local keep_snapshot="${1:-}"
-  local was_running=false
-  if virsh domstate "$VM_NAME" 2>/dev/null | grep -q "^running"; then
-    was_running=true
+  local domain_exists=false
+  virsh dominfo "$VM_NAME" &>/dev/null && domain_exists=true
+  if [[ "$domain_exists" == true ]]; then
     run_hook "pre-down" false
   fi
   virsh destroy "$VM_NAME" 2>/dev/null || true
-  if [[ "$was_running" == true ]]; then
+  if [[ "$domain_exists" == true ]]; then
     run_hook "post-down"
   fi
   virsh undefine "$VM_NAME" --remove-all-storage --nvram 2>/dev/null || true
@@ -1574,7 +1574,7 @@ cmd_reset() {
   # with no network.
   local macs=()
   if virsh dominfo "$VM_NAME" &>/dev/null; then
-    _MIGRANT_VM_IP=$(get_vm_ip)
+    _MIGRANT_VM_IP=$(get_vm_ip 2>/dev/null || true)
     while IFS= read -r mac; do
       [[ -n "$mac" ]] && macs+=("$mac")
     done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
