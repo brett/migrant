@@ -1480,7 +1480,7 @@ cmd_halt() {
     return
   fi
   _MIGRANT_VM_IP=$(get_vm_ip)
-  do_graceful_shutdown
+  do_graceful_shutdown "true"
   echo "VM '$VM_NAME' has stopped."
 
   # Destroy libvirt networks that are no longer in use.
@@ -1544,7 +1544,7 @@ cmd_snapshot() {
   if [[ "$state" == "running" ]]; then
     _MIGRANT_VM_IP=$(get_vm_ip)
     echo "Shutting down '$VM_NAME' for snapshot..."
-    do_graceful_shutdown
+    do_graceful_shutdown "true"
   elif [[ "$state" != "shut off" ]]; then
     echo "[ERROR] VM '$VM_NAME' is in state '$state'. Halt it before snapshotting." >&2
     exit 1
