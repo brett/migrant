@@ -1458,15 +1458,15 @@ teardown_vm() {
     run_hook "pre-down" false
   fi
   virsh destroy "$VM_NAME" 2>/dev/null || true
-  if [[ "$domain_exists" == true ]]; then
-    run_hook "post-down"
-  fi
   virsh undefine "$VM_NAME" --remove-all-storage --nvram 2>/dev/null || true
   rm -rf "/etc/migrant/${VM_NAME}"
   if [[ "$keep_snapshot" == "keep_snapshot" ]]; then
     rm -f "$DISK_PATH" "$SEED_ISO"
   else
     rm -f "$DISK_PATH" "$SEED_ISO" "$SNAPSHOT_PATH"
+  fi
+  if [[ "$domain_exists" == true ]]; then
+    run_hook "post-down"
   fi
 }
 
