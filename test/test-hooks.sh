@@ -213,8 +213,9 @@ else
   fail "post-down did not fire on reset"
 fi
 
-# reset calls cmd_up internally — the trigger stays "reset" for down hooks
-# but becomes "up" for the up hooks (via _MIGRANT_TRIGGER default)
+# reset calls cmd_up internally — _MIGRANT_TRIGGER is already "reset" when
+# cmd_up runs, so all four hooks (pre-down, post-down, pre-up, post-up) receive
+# MIGRANT_TRIGGER=reset.
 if [[ -f "$LOG.pre-up" ]]; then
   pass "pre-up fired during reset rebuild"
 else
