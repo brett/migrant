@@ -69,6 +69,7 @@ Diagnostics:
   dominfo             Show detailed libvirt domain info for the VM
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
+
 EOF
   exit "${1:-64}"
 }
