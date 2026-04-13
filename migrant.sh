@@ -2125,6 +2125,14 @@ cmd_status() {
     esac
   fi
 
+  if [[ -n "$state" ]]; then
+    local btime
+    btime=$(stat --format='%W' "$DISK_PATH" 2>/dev/null || true)
+    if [[ -n "$btime" && "$btime" != "0" ]]; then
+      printf '%-*s%s\n' "$w" 'created:' "$(date -d "@$btime" '+%Y-%m-%d %H:%M:%S %Z')"
+    fi
+  fi
+
   local wg_iface wg_table wg_table_hex
   wg_iface_and_table "$VM_NAME"
   wg_table_hex=$(printf '%x' "$wg_table")
