@@ -1242,8 +1242,20 @@ apply_rules() {
     # DHCP and DNS destined for dnsmasq — runs first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
 
-    # Insert host-access allow rules before the blanket REJECT. These let the
-    # VM reach specific host ports despite network isolation being enabled.
+    iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
+    iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+
+    # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
+    # so VMs cannot communicate with each other over the shared bridge).
+    # These are inserted first so that allow-lan-host ACCEPTs, inserted
+    # immediately after, end up above the REJECTs in the chain.
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
+    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
+
+    # Insert host-access allow rules above the RFC1918 REJECTs. allow-lan-host
+    # uses NEW,ESTABLISHED,RELATED because the RFC1918 REJECTs are stateless —
+    # without ESTABLISHED, ongoing connections would be rejected mid-stream.
     local ha_file="/etc/migrant/${vm}/host-access"
     if [[ -f "$ha_file" ]]; then
       while IFS= read -r rule; do
@@ -1260,21 +1272,12 @@ apply_rules() {
           allow-lan-host\ *)
             local host_ip="${rule#allow-lan-host }"
             iptables -I FORWARD -m physdev --physdev-in "$iface" \
-              -d "${host_ip}/32" -j ACCEPT
+              -d "${host_ip}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
             hook_log "$vm" "host-access: allow-lan-host $host_ip"
             ;;
         esac
       done < "$ha_file"
     fi
-
-    iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
-
-    # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
-    # so VMs cannot communicate with each other over the shared bridge)
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
   fi
 
   # Drop all IPv6 from this VM. The libvirt network provides no routable IPv6
