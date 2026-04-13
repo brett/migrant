@@ -900,6 +900,7 @@ cmd_setup() {
   cat > "$expected_qemu_hook" << 'MIGRANT_QEMU_EOF'
 #!/bin/bash
 # Managed by migrant.sh
+set -euo pipefail
 
 VM_NAME="$1"
 OPERATION="$2"
