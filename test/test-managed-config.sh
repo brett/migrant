@@ -80,6 +80,24 @@ else
 fi
 rm -f "$validation_output"
 
+# Test invalid port numbers in allow-host-port
+for invalid_port in 0 65536; do
+  cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+HOST_ACCESS=("allow-host-port tcp/${invalid_port}")
+EOF
+  validation_output="/tmp/migrant-mc-test-$$.validation"
+  "$MIGRANT" up >"$validation_output" 2>&1 || true
+  if grep -q "port number between 1 and 65535" "$validation_output"; then
+    pass "allow-host-port tcp/${invalid_port} rejected"
+  else
+    fail "allow-host-port tcp/${invalid_port} was not rejected"
+    cat "$validation_output"
+    "$MIGRANT" destroy 2>/dev/null || true
+  fi
+  rm -f "$validation_output"
+done
+
 # Test invalid IP in allow-lan-host
 cat > Migrantfile <<EOF
 $(cat Migrantfile.test-backup)
@@ -190,6 +208,14 @@ fi
 
 "$MIGRANT" halt
 
+# Verify the per-VM INPUT chain is removed after halt
+chain="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
+if sudo iptables -L "$chain" -n &>/dev/null; then
+  fail "per-VM INPUT chain still exists after halt"
+else
+  pass "per-VM INPUT chain removed after halt"
+fi
+
 # ============================================================
 # Part 4: HOST_ACCESS with allow-lan-host
 # ============================================================
@@ -230,6 +256,23 @@ if [[ -n "$iface" ]] && sudo iptables -L FORWARD -n --line-numbers 2>/dev/null \
   pass "allow-lan-host ACCEPT is before RFC1918 REJECT in FORWARD"
 else
   fail "allow-lan-host ACCEPT is not before RFC1918 REJECT in FORWARD"
+fi
+
+# Verify the ACCEPT carries the correct conntrack state qualifier.
+if [[ -n "$iface" ]] && sudo iptables -S FORWARD 2>/dev/null \
+    | grep "192.168.1.50/32" | grep -q "ctstate NEW,ESTABLISHED,RELATED"; then
+  pass "allow-lan-host ACCEPT has correct conntrack state"
+else
+  fail "allow-lan-host ACCEPT missing ctstate NEW,ESTABLISHED,RELATED"
+fi
+
+# Check cmd_status shows allow-lan-host
+status_output=$("$MIGRANT" status 2>/dev/null) || true
+if echo "$status_output" | grep -q "allow-lan-host 192.168.1.50"; then
+  pass "cmd_status displays allow-lan-host directive"
+else
+  fail "cmd_status does not show allow-lan-host directive"
+  echo "$status_output"
 fi
 
 "$MIGRANT" halt
