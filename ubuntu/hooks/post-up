@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Example post-up hook: log VM readiness with timestamp.
+# Runs after the VM is fully ready (IP assigned, SSH available, provisioned).
+#
+# Available environment variables:
+#   MIGRANT_VM_NAME   — VM name from the Migrantfile
+#   MIGRANT_VM_DIR    — absolute path to the VM directory
+#   MIGRANT_HOOK      — hook name (post-up)
+#   MIGRANT_TRIGGER   — command that triggered this hook (up)
+#   MIGRANT_VM_IP     — VM IP address
+#
+# All Migrantfile variables (VM_NAME, RAM_MB, NETWORKS, etc.) are also present.
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${MIGRANT_VM_NAME} is ready at ${MIGRANT_VM_IP}"

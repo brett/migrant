@@ -67,7 +67,6 @@ Diagnostics:
   wg                  Show live WireGuard interface status, including transfer
                       stats and latest handshake; requires sudo
   dominfo             Show detailed libvirt domain info for the VM
-
 Each command reads Migrantfile and cloud-init.yml from the current directory,
 or from the directory specified by the MIGRANT_DIR environment variable.
 EOF
@@ -2013,6 +2012,29 @@ cmd_status() {
         printf '  %-*s%s\n' "$sw" 'mount:' 'none'
       fi
     done
+  fi
+
+  local hooks_dir="$VM_DIR/hooks"
+  local hook_names=(pre-up post-up pre-down post-down)
+  local active_hooks=()
+  local warn_hooks=()
+
+  for hook in "${hook_names[@]}"; do
+    local path="$hooks_dir/$hook"
+    if [[ -e "$path" && -x "$path" ]]; then
+      active_hooks+=("$hook")
+    elif [[ -e "$path" ]]; then
+      warn_hooks+=("$hook")
+    fi
+  done
+
+  if (( ${#warn_hooks[@]} > 0 )); then
+    printf '%-*s%s\n' "$w" 'hooks:' "${active_hooks[*]+"${active_hooks[*]}"}"
+    printf '  %-*s%s\n' "$sw" 'note:' "not executable: ${warn_hooks[*]} [WARNING]"
+  elif (( ${#active_hooks[@]} > 0 )); then
+    printf '%-*s%s\n' "$w" 'hooks:' "${active_hooks[*]}"
+  else
+    printf '%-*s%s\n' "$w" 'hooks:' 'none'
   fi
 }
 
