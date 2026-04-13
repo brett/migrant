@@ -219,6 +219,19 @@ else
   fail "iptables FORWARD ACCEPT rule for 192.168.1.50 not found"
 fi
 
+# Verify the ACCEPT comes before the RFC1918 REJECT in FORWARD. This ordering
+# is critical: if the REJECT appears first, the ACCEPT is never evaluated.
+if [[ -n "$iface" ]] && sudo iptables -L FORWARD -n --line-numbers 2>/dev/null \
+    | awk -v iface="$iface" '
+        $0 ~ iface && /192\.168\.1\.50/ && /ACCEPT/ { accept=$1 }
+        $0 ~ iface && /192\.168\.0\.0/ && /REJECT/  { reject=$1 }
+        END { exit (accept != "" && reject != "" && accept+0 < reject+0) ? 0 : 1 }
+      '; then
+  pass "allow-lan-host ACCEPT is before RFC1918 REJECT in FORWARD"
+else
+  fail "allow-lan-host ACCEPT is not before RFC1918 REJECT in FORWARD"
+fi
+
 "$MIGRANT" halt
 
 # Verify allow-lan-host rule was cleaned up on halt
