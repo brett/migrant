@@ -380,7 +380,13 @@ sync_managed_config() {
     local rules_content=""
     for rule in "${HOST_ACCESS[@]}"; do
       case "$rule" in
-        allow-host-port\ tcp/[0-9]*|allow-host-port\ udp/[0-9]*)
+        allow-host-port\ tcp/*|allow-host-port\ udp/*)
+          local port="${rule##*/}"
+          if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  allow-host-port requires a port number between 1 and 65535." >&2
+            exit 65  # EX_DATAERR
+          fi
           rules_content+="${rule}"$'\n'
           ;;
         allow-lan-host\ *)
