@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Example post-down hook: log VM shutdown with timestamp.
+# Runs after the VM has fully stopped. Fires from halt, snapshot, destroy, and reset.
+#
+# Available environment variables:
+#   MIGRANT_VM_NAME   — VM name from the Migrantfile
+#   MIGRANT_VM_DIR    — absolute path to the VM directory
+#   MIGRANT_HOOK      — hook name (post-down)
+#   MIGRANT_TRIGGER   — command that caused shutdown (halt, snapshot, destroy, reset)
+#   MIGRANT_VM_IP     — empty (VM is stopped)
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${MIGRANT_VM_NAME} stopped (trigger: ${MIGRANT_TRIGGER})"
