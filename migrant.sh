@@ -1321,7 +1321,7 @@ remove_rules() {
           allow-lan-host\ *)
             local host_ip="${rule#allow-lan-host }"
             iptables -D FORWARD -m physdev --physdev-in "$iface" \
-              -d "${host_ip}/32" -j ACCEPT 2>/dev/null || true
+              -d "${host_ip}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
             ;;
         esac
       done < "$ha_file"
