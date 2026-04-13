@@ -1050,6 +1050,42 @@ wg_setup_iface() {
   # main table without interference.
   ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 
+  # For each allow-lan-host IP, add a more-specific /32 route in WG_TABLE
+  # pointing at the host's physical interface rather than the WireGuard tunnel.
+  # Without this, marked packets to LAN IPs match only the default route and
+  # exit via the VPN — the FORWARD ACCEPT fires but the destination never
+  # receives them. A /32 always wins over the default in the same table, so
+  # all other traffic still exits through WireGuard unaffected.
+  local ha_file="/etc/migrant/${vm}/host-access"
+  if [[ -f "$ha_file" ]]; then
+    while IFS= read -r rule; do
+      [[ -z "$rule" ]] && continue
+      case "$rule" in
+        allow-lan-host\ *)
+          local host_ip="${rule#allow-lan-host }"
+          local route_info route_dev route_via
+          route_info=$(ip route get "$host_ip" 2>/dev/null | head -1) || true
+          route_dev=$(printf '%s' "$route_info" \
+            | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+          route_via=$(printf '%s' "$route_info" \
+            | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+          if [[ -n "$route_dev" ]]; then
+            if [[ -n "$route_via" ]]; then
+              ip route add "${host_ip}/32" via "$route_via" dev "$route_dev" \
+                table "$WG_TABLE"
+            else
+              ip route add "${host_ip}/32" dev "$route_dev" table "$WG_TABLE"
+            fi
+            hook_log "$vm" "host-access: exclusion route $host_ip via $route_dev"
+          else
+            hook_log "$vm" \
+              "host-access: no route to $host_ip; allow-lan-host may not work"
+          fi
+          ;;
+      esac
+    done < "$ha_file"
+  fi
+
   # Policy rule: divert marked packets to the WireGuard table. This does not
   # require the tap interface and is placed here (prepare) so that
   # verify_wireguard_tunnel can confirm it synchronously after virsh start
