@@ -36,7 +36,6 @@ SHARED_FOLDER_SIZE_GB=10
 # shared folder and prevents host processes from following symlinks the VM
 # planted inside the share to reach files elsewhere on the host. Turn it
 # off only if you trust the VM's workload.
-# (Compare NETWORK_ISOLATION, which defaults to false and must be opted in to.)
 # Changing this after VM creation requires 'migrant.sh destroy && migrant.sh up'.
 #SHARED_FOLDER_ISOLATION=false
 
@@ -46,8 +45,9 @@ SHARED_FOLDER_SIZE_GB=10
 #BOOT_FIRMWARE=uefi
 
 # Block the VM from initiating connections to the host and from reaching other
-# hosts on the local network. Requires 'migrant.sh setup' to have been run.
-NETWORK_ISOLATION=true
+# hosts on the local network. Enabled by default; requires 'migrant.sh setup'
+# to have been run. Set to false to opt out.
+#NETWORK_ISOLATION=false
 
 # Optional: automatically connect after 'migrant.sh up' finishes.
 # Unset by default. Set to "ssh" or "console" to enable.
@@ -55,7 +55,7 @@ AUTOCONNECT=ssh
 
 # Host access rules — exceptions to NETWORK_ISOLATION. Each entry is a
 # directive applied by the libvirt hook alongside the isolation rules.
-# Has no effect without NETWORK_ISOLATION=true.
+# Has no effect when network isolation is disabled (NETWORK_ISOLATION=false).
 #HOST_ACCESS=(
 #  "allow-host-port tcp/8080"        # VM can reach host:8080
 #  "allow-lan-host 192.168.1.50"     # VM can reach a specific LAN host

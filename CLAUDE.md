@@ -12,7 +12,7 @@ the host — do not introduce features that widen the attack surface without
 careful consideration. Key containment properties to preserve:
 
 - KVM hypervisor boundary between guest and host
-- `NETWORK_ISOLATION=true` blocks the VM from reaching the host or LAN
+- Network isolation (on by default) blocks the VM from reaching the host or LAN; set `NETWORK_ISOLATION=false` to opt out
 - The shared folder is the only intentional host↔guest data channel; its scope
   should remain narrow
 - The VM is designed to be destroyed and rebuilt, not patched in place

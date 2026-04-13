@@ -554,9 +554,8 @@ boundary, not from Linux user permissions inside the guest. The guest
 
 ### Network isolation
 
-Setting `NETWORK_ISOLATION=true` in a `Migrantfile` enables additional
-network restrictions for that VM. When the VM starts, iptables rules are
-added that:
+Network isolation is enabled by default for all VMs. Set `NETWORK_ISOLATION=false`
+in a `Migrantfile` to opt out. When active, iptables rules are added that:
 
 - Block the VM from initiating new connections to the host (DNS and DHCP
   responses from the host are still delivered, as those are tracked as
@@ -595,8 +594,8 @@ before the blanket REJECT. `allow-lan-host` inserts an ACCEPT in the
 FORWARD chain before the RFC 1918 REJECT rules. Both are removed
 automatically when the VM stops.
 
-`HOST_ACCESS` has no effect without `NETWORK_ISOLATION=true` — there is
-nothing to poke holes in when isolation is disabled.
+`HOST_ACCESS` has no effect when isolation is disabled (`NETWORK_ISOLATION=false`) —
+there is nothing to poke holes in.
 
 Combined with [lifecycle hooks](#lifecycle-hooks), this enables
 host-side service patterns: a hook starts a systemd service before the
@@ -682,8 +681,8 @@ where the only route is `default dev mg-wg-<hash>`. The result: all VM
 traffic exits the host via the encrypted WireGuard tunnel, regardless
 of what the VM itself does.
 
-IPv6 from the VM is dropped at the `FORWARD` chain (as with
-`NETWORK_ISOLATION=true`). The fwmark routing is IPv4-only; without
+IPv6 from the VM is dropped at the `FORWARD` chain (shared with the
+network isolation rule). The fwmark routing is IPv4-only; without
 this rule IPv6 would bypass the tunnel.
 
 `migrant.sh up` verifies the tunnel is active before returning. If the
@@ -728,13 +727,13 @@ The VM cannot bypass it:
   port-53 traffic is rewritten.
 - If the tunnel fails to come up, `migrant.sh up` halts the VM rather
   than letting it run un-tunneled.
-- IPv6 is blocked at the FORWARD chain (shared with the `NETWORK_ISOLATION=true` rule) so there is no IPv6 leak path.
+- IPv6 is blocked at the FORWARD chain (shared with the network isolation rule) so there is no IPv6 leak path.
 
 This does not prevent the VM from sending traffic to other hosts on the
-VPN once the tunnel is active. Use `NETWORK_ISOLATION=true` alongside
-WireGuard if you also want to restrict which VPN destinations the VM
-can reach (note: `NETWORK_ISOLATION` blocks RFC 1918 ranges, which do
-not apply inside a VPN tunnel).
+VPN once the tunnel is active. Network isolation is enabled by default
+alongside WireGuard, which restricts which VPN destinations the VM can
+reach (note: `NETWORK_ISOLATION` blocks RFC 1918 ranges, which do not
+apply inside a VPN tunnel).
 
 ### Security notes
 

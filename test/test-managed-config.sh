@@ -10,7 +10,7 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 #   - migrant.sh setup has been run (with the updated hooks)
 #   - The base image is cached (or will be downloaded)
 #   - No VM with this name currently exists (the test creates and destroys one)
-#   - NETWORK_ISOLATION=true in the Migrantfile (the example Migrantfiles have this)
+#   - NETWORK_ISOLATION not explicitly set to false in the Migrantfile (default is on)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MIGRANT="$(cd "$SCRIPT_DIR/.." && pwd)/migrant.sh"
@@ -23,8 +23,8 @@ fi
 # shellcheck source=/dev/null
 source Migrantfile
 
-if [[ "${NETWORK_ISOLATION:-}" != "true" ]]; then
-  echo "[FAIL] NETWORK_ISOLATION must be true in the Migrantfile for this test." >&2
+if [[ "${NETWORK_ISOLATION:-true}" == "false" ]]; then
+  echo "[FAIL] NETWORK_ISOLATION must not be disabled in the Migrantfile for this test." >&2
   exit 1
 fi
 
@@ -324,20 +324,20 @@ fi
 
 echo "--- test: managed dir lifecycle ---"
 
-# With only NETWORK_ISOLATION=true, the dir should exist (for the flag file)
+# With NETWORK_ISOLATION on by default, the dir should exist (for the flag file)
 cp Migrantfile.test-backup Migrantfile
 "$MIGRANT" up
 "$MIGRANT" halt
 
 if [[ -d "$MANAGED_DIR" ]]; then
-  pass "managed dir exists when NETWORK_ISOLATION=true"
+  pass "managed dir exists with default NETWORK_ISOLATION"
 else
-  fail "managed dir missing despite NETWORK_ISOLATION=true"
+  fail "managed dir missing with default NETWORK_ISOLATION"
 fi
 
 # Disable NI and restart — if no other features need the dir, it should be removed
 cat > Migrantfile <<EOF
-$(sed 's/^NETWORK_ISOLATION=true/#NETWORK_ISOLATION=true/' Migrantfile.test-backup)
+$(sed 's/^#NETWORK_ISOLATION=false/NETWORK_ISOLATION=false/' Migrantfile.test-backup)
 EOF
 
 "$MIGRANT" up

@@ -332,7 +332,7 @@ sync_managed_config() {
   local needs_dir=false
 
   local has_network_isolation=false
-  [[ "${NETWORK_ISOLATION:-}" == "true" ]] && has_network_isolation=true
+  [[ "${NETWORK_ISOLATION:-true}" != "false" ]] && has_network_isolation=true
 
   local has_shared_folder_isolation_disabled=false
   [[ "${SHARED_FOLDER_ISOLATION:-true}" == "false" ]] \
