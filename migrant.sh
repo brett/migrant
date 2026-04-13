@@ -929,14 +929,9 @@ hook_log "$VM_NAME" "hook start"
 xml=$(cat)
 echo "$xml" | grep -q "managed-by=migrant.sh" || exit 0
 
-# Behavioral config is read from managed config files in /etc/migrant/${VM_NAME}/,
-# with a fallback to the description tag for VMs not yet synced (backward compat).
+# Behavioral config is read from managed config files in /etc/migrant/${VM_NAME}/.
 HAS_NETWORK_ISOLATION=false
-if [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]]; then
-  HAS_NETWORK_ISOLATION=true
-elif echo "$xml" | grep -q "network-isolation=true"; then
-  HAS_NETWORK_ISOLATION=true
-fi
+[[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]] && HAS_NETWORK_ISOLATION=true
 
 VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
 
@@ -1396,13 +1391,8 @@ trap 'rm -f "$local_xml"' EXIT
 cat > "$local_xml"
 grep -q "managed-by=migrant.sh" "$local_xml" || exit 0
 
-# Check if shared folder isolation is disabled. Managed config file takes
-# precedence; fall back to description tag for VMs not yet synced.
-if [[ -f "/etc/migrant/${VM_NAME}/shared-folder-isolation-disabled" ]]; then
-  exit 0
-elif grep -q "shared-folder-isolation=false" "$local_xml"; then
-  exit 0
-fi
+# Check if shared folder isolation is disabled.
+[[ -f "/etc/migrant/${VM_NAME}/shared-folder-isolation-disabled" ]] && exit 0
 
 # Extract the source directory for each virtiofs filesystem from the domain XML.
 # python3 is used for robust XML parsing; it is available on all target systems.
@@ -2172,16 +2162,8 @@ cmd_status() {
     printf '%-*s%s\n' "$w" 'tunnel:' 'none'
   fi
 
-  # Managed config file takes precedence; fall back to description tag for
-  # VMs not yet synced.
   local ni_enabled=false
-  if [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]]; then
-    ni_enabled=true
-  else
-    local vm_desc
-    vm_desc=$(virsh desc "$VM_NAME" 2>/dev/null || true)
-    echo "$vm_desc" | grep -q "network-isolation=true" && ni_enabled=true
-  fi
+  [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]] && ni_enabled=true
   if [[ "$ni_enabled" == true ]]; then
     printf '%-*s%s\n' "$w" 'isolation:' 'enabled'
   else
