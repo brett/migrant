@@ -671,7 +671,7 @@ def _inet_http(ctx: Context) -> Result:
 def _inet_https(ctx: Context) -> Result:
     try:
         with httpx.Client(verify=_ssl_ctx(), timeout=10) as client:
-            resp = client.get("https://example.com")
+            resp = client.get("https://am.i.mullvad.net/")
         return Result("PASS", f"HTTPS {resp.status_code}")
     except Exception as exc:
         return Result("FAIL", str(exc)[:120])
