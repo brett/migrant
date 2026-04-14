@@ -16,10 +16,12 @@ import re
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import traceback as _traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, TypeVar
 
@@ -472,6 +474,14 @@ def _inv_gateway(ctx: Context) -> Result:
     return Result("INFO", ctx.gateway)
 
 
+@test("Inventory", "ARP / neighbor table", expect=None)
+def _inv_arp(ctx: Context) -> Result:
+    out = subprocess.run(["ip", "neigh", "show"], capture_output=True, text=True).stdout
+    entries = [ln for ln in out.splitlines() if ln.strip()]
+    n = len(entries)
+    return Result("INFO", f"{n} neighbor {'entry' if n == 1 else 'entries'}", detail=out.strip() or "(empty)")
+
+
 # ---------------------------------------------------------------------------
 # Tests: 2. DNS
 # ---------------------------------------------------------------------------
@@ -749,6 +759,21 @@ def _inet_mtu(ctx: Context) -> Result:
     return Result("FAIL", f"MTU issue detected: {output[:120]}")
 
 
+@test("Internet", "ICMP echo to 8.8.8.8", expect=None)
+def _inet_icmp(ctx: Context) -> Result:
+    """Dedicated ICMP reachability probe, distinct from the MTU test.
+    REACHABLE indicates ICMP FORWARD is open to the internet — a viable
+    covert channel if other exfiltration paths are blocked.
+    """
+    r = run_tool("ping", ["-c", "1", "-W", "5", "8.8.8.8"], timeout=10)
+    if not r.available:
+        return Result("SKIP", "ping not found")
+    if r.returncode == 0:
+        return Result("INFO", "REACHABLE — ICMP FORWARD open to internet")
+    output = (r.stdout + r.stderr).strip()
+    return Result("INFO", f"BLOCKED — {output[:120]}")
+
+
 # ---------------------------------------------------------------------------
 # Tests: 4. Isolation
 # ---------------------------------------------------------------------------
@@ -831,8 +856,194 @@ def _iso_ipv6_external(ctx: Context) -> Result:
         return Result("FAIL", f"blocked (expected): {exc}")
 
 
+_GATEWAY_SURVEY_PORTS: list[tuple[int, str]] = [
+    (22,   "SSH"),
+    (53,   "DNS"),
+    (80,   "HTTP"),
+    (111,  "rpcbind"),
+    (443,  "HTTPS"),
+    (8080, "HTTP-alt"),
+    (8443, "HTTPS-alt"),
+    (9090, "misc"),
+]
+
+
+@test("Isolation", "Gateway port survey", expect=None)
+def _iso_gateway_ports(ctx: Context) -> Result:
+    """Probe common ports on the libvirt gateway (the host's bridge interface).
+    CONNECTED means the host has a listening service reachable from the VM.
+    REJECTED means traffic reached the host but no service answered.
+    All TIMEOUT indicates the INPUT chain is rejecting or dropping everything.
+    """
+    rows: list[str] = []
+    reachable: list[str] = []
+    for port, name in _GATEWAY_SURVEY_PORTS:
+        outcome = _tcp_probe(ctx.gateway, port, timeout=2.0)
+        rows.append(f"{port:5d} ({name:<12}): {outcome}")
+        if outcome in ("CONNECTED", "REJECTED"):
+            reachable.append(f"{port}/{name}:{outcome}")
+    summary = (
+        f"reachable: {', '.join(reachable)}"
+        if reachable
+        else "no ports reachable (all TIMEOUT — INPUT chain active)"
+    )
+    return Result("INFO", summary, detail="\n".join(rows))
+
+
+def _primary_iface(vm_ips: dict[str, list[str]]) -> str | None:
+    """Return the first non-loopback, non-virtual interface name."""
+    skip_prefixes = ("lo", "wg", "tun", "tap", "virbr", "docker", "veth")
+    for iface in vm_ips:
+        if not any(iface.startswith(p) for p in skip_prefixes):
+            return iface
+    return None
+
+
+@test("Isolation", "IPv6 link-local gateway reachability", expect=None)
+def _iso_ipv6_linklocal(ctx: Context) -> Result:
+    """Probe the host's link-local (fe80::) IPv6 address on the VM's bridge segment.
+    Link-local traffic does not traverse the FORWARD chain — it arrives at the
+    host's INPUT chain.  Reachability here means the host's ip6tables INPUT
+    rules govern exposure, not the FORWARD isolation rules.
+    """
+    iface = _primary_iface(ctx.vm_ips)
+    if not iface:
+        return Result("INFO", "no non-loopback interface found")
+
+    # Ping the all-nodes multicast address to populate the neighbor cache.
+    run_tool("ping", ["-6", "-c", "2", "-W", "2", f"ff02::1%{iface}"], timeout=8)
+
+    neigh_out = subprocess.run(
+        ["ip", "-6", "neigh", "show"], capture_output=True, text=True
+    ).stdout
+    fe80_neighbors: list[str] = []
+    for ln in neigh_out.splitlines():
+        m = re.match(r"^(fe80:[^\s]+)", ln)
+        if m and "FAILED" not in ln:
+            fe80_neighbors.append(m.group(1))
+
+    if not fe80_neighbors:
+        return Result(
+            "INFO",
+            "no fe80 neighbors discovered (neighbor cache empty)",
+            detail=neigh_out.strip() or "(empty)",
+        )
+
+    findings: list[str] = []
+    for addr in fe80_neighbors:
+        try:
+            scope_id = socket.if_nametoindex(iface)
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+                sock.settimeout(3)
+                sock.connect((addr, 22, 0, scope_id))
+            findings.append(f"{addr} :22 CONNECTED")
+        except ConnectionRefusedError:
+            findings.append(f"{addr} :22 REJECTED (host reachable, no SSH listener)")
+        except socket.timeout:
+            findings.append(f"{addr} :22 TIMEOUT")
+        except OSError as exc:
+            findings.append(f"{addr} :22 ERROR:{exc.errno}")
+
+    return Result("INFO", "; ".join(findings), detail=neigh_out.strip())
+
+
 # ---------------------------------------------------------------------------
-# Tests: 5. Host access
+# Tests: 5. Exfiltration paths
+# ---------------------------------------------------------------------------
+
+@test("Exfiltration paths", "DNS over TCP to 8.8.8.8", expect=None)
+def _exfil_dns_tcp(ctx: Context) -> Result:
+    """UDP/53 outbound is DNAT'd by the hook; TCP/53 may follow a different
+    iptables codepath.  If TCP/53 reaches an external resolver unintercepted,
+    DNS tunneling over TCP is viable regardless of the UDP DNAT rule.
+    """
+    r = run_tool("dig", ["+tcp", "+time=7", "cloudflare.com", "@8.8.8.8"], timeout=10)
+    if not r.available:
+        return Result("SKIP", "dig not found")
+    ips: set[str] = set()
+    if "ANSWER SECTION" in r.stdout:
+        answer_block = r.stdout.split("ANSWER SECTION")[1].split(";;")[0]
+        ips = set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", answer_block))
+    if r.returncode != 0 or not ips:
+        status_m = re.search(r"status:\s*(\w+)", r.stdout)
+        status = status_m.group(1) if status_m else (r.stderr.strip()[:80] or f"exit {r.returncode}")
+        return Result("INFO", f"BLOCKED/FAILED — {status}")
+    ad = False
+    if m := re.search(r"flags:([^;]+);", r.stdout):
+        ad = bool(re.search(r'\bad\b', m.group(1)))
+    ad_note = " [ad]" if ad else " [no ad]"
+    return Result(
+        "INFO",
+        f"RESOLVED via TCP/53 — {', '.join(sorted(ips))}{ad_note} "
+        "(confirm whether DNAT rule covers TCP/53)",
+    )
+
+
+@test("Exfiltration paths", "UDP/123 NTP probe", expect=None)
+def _exfil_ntp(ctx: Context) -> Result:
+    """NTP (UDP/123) is commonly permitted and rarely monitored — a viable
+    covert-channel carrier.  Sends a minimal NTP client request to Cloudflare
+    NTP (162.159.200.1) and checks whether a response arrives.
+    """
+    packet = b'\x1b' + b'\x00' * 47  # LI=0, VN=3, Mode=3 (client request)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(5)
+            sock.sendto(packet, ("162.159.200.1", 123))
+            data, addr = sock.recvfrom(1024)
+        if len(data) >= 48:
+            tx_secs = struct.unpack("!I", data[40:44])[0]
+            dt = datetime.fromtimestamp(tx_secs - 2208988800, tz=timezone.utc)
+            return Result(
+                "INFO",
+                f"REACHABLE — server time {dt.isoformat()} "
+                "(UDP/123 is an open exfiltration path)",
+            )
+        return Result(
+            "INFO", f"REACHABLE — short response ({len(data)} bytes) from {addr[0]}"
+        )
+    except socket.timeout:
+        return Result("INFO", "TIMEOUT — UDP/123 appears blocked or filtered")
+    except OSError as exc:
+        return Result("INFO", f"BLOCKED — {exc}")
+
+
+_EXFIL_TCP_PORTS: list[tuple[int, str]] = [
+    (22,   "SSH"),
+    (25,   "SMTP"),
+    (465,  "SMTPS"),
+    (587,  "submission"),
+    (853,  "DoT"),
+    (8080, "HTTP-alt"),
+    (8443, "HTTPS-alt"),
+    (9418, "git"),
+]
+
+
+@test("Exfiltration paths", "Outbound TCP port survey", expect=None)
+def _exfil_tcp_survey(ctx: Context) -> Result:
+    """Probe non-standard outbound TCP ports against 1.1.1.1 (stable, well-known target).
+    CONNECTED or REJECTED both mean traffic reached 1.1.1.1 — the port is unblocked
+    at FORWARD (REJECTED means no service listens at that port on 1.1.1.1).
+    TIMEOUT indicates a DROP rule is in the path.
+    HTTP (80) and HTTPS (443) are covered by the Internet section.
+    """
+    rows: list[str] = []
+    unblocked: list[str] = []
+    for port, name in _EXFIL_TCP_PORTS:
+        outcome = _tcp_probe("1.1.1.1", port, timeout=3.0)
+        rows.append(f"{port:5d} ({name:<12}): {outcome}")
+        if outcome in ("CONNECTED", "REJECTED"):
+            unblocked.append(f"{port}/{name}")
+    if unblocked:
+        summary = f"unblocked (reached 1.1.1.1): {', '.join(unblocked)}"
+    else:
+        summary = "all TIMEOUT — outbound TCP ports appear fully blocked"
+    return Result("INFO", summary, detail="\n".join(rows))
+
+
+# ---------------------------------------------------------------------------
+# Tests: 6. Host access
 # ---------------------------------------------------------------------------
 
 @test("Host access", "Connect to host port", expect="PASS")
@@ -864,7 +1075,7 @@ def _host_port(ctx: Context) -> Result:
 
 
 # ---------------------------------------------------------------------------
-# Tests: 6. LAN and peer
+# Tests: 7. LAN and peer
 # ---------------------------------------------------------------------------
 
 @test("LAN / peer", "Ping LAN host", expect="PASS")
