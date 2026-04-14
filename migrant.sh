@@ -775,6 +775,11 @@ EOF
     cmd_provision
     echo "VM '$VM_NAME' is ready." >&2
   elif [[ "$from_snapshot" == false ]]; then
+    if vm_has_ssh; then
+      local user ssh_opts ip
+      resolve_ssh_conn user ssh_opts ip
+      wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
+    fi
     if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
       echo "[NOTE] cloud-init is still provisioning in the background." >&2
       echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
