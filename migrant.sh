@@ -1237,6 +1237,9 @@ apply_rules() {
     # DHCP and DNS destined for dnsmasq — runs first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
 
+    # ICMP must be blocked explicitly: --ctstate NEW does not reliably match ICMP
+    # echo requests when conntrack classifies them as UNTRACKED on this kernel.
+    iptables -A "$CHAIN" -p icmp -j REJECT
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
     iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
 
