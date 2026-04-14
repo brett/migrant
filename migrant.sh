@@ -1233,12 +1233,21 @@ apply_rules() {
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
     # Per-VM INPUT chain: block new connections from VM to host.
-    # Appended (not inserted) so libvirt's LIBVIRT_INP chain — which accepts
-    # DHCP and DNS destined for dnsmasq — runs first.
+    # Must be after libvirt's LIBVIRT_INP chain (which accepts DHCP and DNS
+    # destined for dnsmasq) but before any host-firewall REJECT/DROP rules
+    # that would catch bridged traffic first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
 
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    local inp_pos
+    inp_pos=$(iptables -L INPUT --line-numbers -n \
+              | awk '/LIBVIRT_INP/{print $1; exit}')
+    if [[ -n "$inp_pos" ]]; then
+      iptables -I INPUT "$((inp_pos + 1))" \
+        -m physdev --physdev-in "$iface" -j "$CHAIN"
+    else
+      iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    fi
 
     # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
     # so VMs cannot communicate with each other over the shared bridge).
@@ -1260,7 +1269,7 @@ apply_rules() {
             local spec="${rule#allow-host-port }"
             local proto="${spec%%/*}"
             local port="${spec#*/}"
-            iptables -A "$CHAIN" -p "$proto" --dport "$port" \
+            iptables -I "$CHAIN" -p "$proto" --dport "$port" \
               -m conntrack --ctstate NEW -j ACCEPT
             hook_log "$vm" "host-access: allow-host-port $proto/$port"
             ;;
