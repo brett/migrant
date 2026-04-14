@@ -1518,13 +1518,7 @@ MIGRANT_NETWORK_EOF
 
   # --- migrant network ---
   if virsh net-info migrant &>/dev/null; then
-    if virsh net-info migrant | grep -q "Autostart:.*yes"; then
-      virsh net-autostart migrant --disable
-      printf '%-*s%s\n' "$kw" "migrant network:" "autostart disabled [changed]"
-      (( changes++ )) || true
-    else
-      printf '%-*s%s\n' "$kw" "migrant network:" "ok"
-    fi
+    printf '%-*s%s\n' "$kw" "migrant network:" "ok"
   else
     cat > "$net_xml" << 'NET_EOF'
 <network>
