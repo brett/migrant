@@ -729,8 +729,12 @@ def _inet_public_ip(ctx: Context) -> Result:
 
 @test("Internet", "Traceroute to 8.8.8.8 (first 5 hops)", expect=None)
 def _inet_traceroute(ctx: Context) -> Result:
-    r = run_tool("traceroute", ["-4", "-m", "5", "-w", "2", "8.8.8.8"], timeout=40)
-    if not r.available:
+    # traceroute and tracepath have incompatible flags; try each with its own args.
+    if shutil.which("traceroute"):
+        r = run_tool("traceroute", ["-4", "-m", "5", "-w", "2", "8.8.8.8"], timeout=40)
+    elif shutil.which("tracepath"):
+        r = run_tool("tracepath", ["-4", "-m", "5", "8.8.8.8"], timeout=40)
+    else:
         return Result("SKIP", "neither traceroute nor tracepath found")
     return Result("INFO", "(see detail)", detail=r.stdout.strip() or r.stderr.strip())
 
