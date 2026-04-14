@@ -1237,11 +1237,15 @@ apply_rules() {
     # DHCP and DNS destined for dnsmasq — runs first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
 
-    # ICMP must be blocked explicitly: --ctstate NEW does not reliably match ICMP
-    # echo requests when conntrack classifies them as UNTRACKED on this kernel.
-    iptables -A "$CHAIN" -p icmp -j REJECT
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
     iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+
+    # ICMP must be blocked with a direct INSERT, not inside the per-VM chain.
+    # libvirt's LIBVIRT_INP chain runs before the per-VM chain (which is appended)
+    # and unconditionally ACCEPTs ICMP for its bridge — so any ICMP rule inside
+    # the per-VM chain is never reached.  Inserting at the top of INPUT ensures
+    # this rule is evaluated before LIBVIRT_INP.
+    iptables -I INPUT -m physdev --physdev-in "$iface" -p icmp -j REJECT
 
     # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
     # so VMs cannot communicate with each other over the shared bridge).
@@ -1307,6 +1311,7 @@ remove_rules() {
   [[ -z "$iface" ]] && return 0
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    iptables -D INPUT -m physdev --physdev-in "$iface" -p icmp -j REJECT 2>/dev/null || true
     iptables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN" 2>/dev/null || true
     iptables -F "$CHAIN" 2>/dev/null || true
     iptables -X "$CHAIN" 2>/dev/null || true
