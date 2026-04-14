@@ -1,0 +1,30 @@
+# Test: network isolation disabled (NETWORK_ISOLATION=false)
+# Verifies that with isolation off, the VM can reach the host/gateway freely.
+
+# VM identity
+VM_NAME="test-no-isolation"
+OS_VARIANT="archlinux"
+
+# Resources
+RAM_MB=2048
+VCPUS=2
+DISK_GB=10
+
+# Base image
+IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+
+# Shared folders
+SHARED_FOLDERS=(
+  "workspace:workspace"
+)
+
+# Network
+NETWORKS=(
+  "network=migrant"
+)
+
+# Shared folder loop image size
+SHARED_FOLDER_SIZE_GB=5
+
+# Disable network isolation — VM should have unrestricted network access
+NETWORK_ISOLATION=false
