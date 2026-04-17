@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Detect default router for the lan-ip check
-router=$(ip route | awk '/default/{print $3; exit}')
+router=$(ip route show default | awk '{print $3; exit}')
 
 # Run the check from inside the VM with both flags
 migrant.sh ssh -- "uv run ~/netcheck.py --no-interactive --host-port tcp/9999 --lan-ip $router"

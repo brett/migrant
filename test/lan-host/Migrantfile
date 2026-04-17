@@ -16,7 +16,7 @@ NETWORKS=(
 )
 
 # Host access rules — allow the VM to reach the default router
-DEFAULT_ROUTER=$(ip route | awk '/default/{print $3; exit}')
+DEFAULT_ROUTER=$(ip route show default | awk '{print $3; exit}')
 HOST_ACCESS=(
   "allow-lan-host $DEFAULT_ROUTER"
 )
