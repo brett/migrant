@@ -7,8 +7,7 @@ users:
     lock_passwd: false
     plain_text_passwd: "migrant"
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1AATI6dk16HSURV2WjhjYaDhQc9+7hHb/nyZ77JOS8 migrant
-#      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
 
 package_update: true
 packages:
