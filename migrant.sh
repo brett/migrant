@@ -254,6 +254,20 @@ wait_for_ssh() {
   done
 }
 
+wait_for_cloud_init() {
+  local user="$1" ip="$2"
+  shift 2
+  local ssh_opts=("$@")
+  echo "Waiting for cloud-init to finish..." >&2
+  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
+    echo "" >&2
+    echo "[ERROR] cloud-init failed on '$VM_NAME'." >&2
+    echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
+    exit 70
+  fi
+  echo "cloud-init done." >&2
+}
+
 verify_shared_folder_mounts() {
   shared_folder_isolation_enabled || return 0
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
@@ -762,14 +776,7 @@ EOF
     wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
 
     if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
-      echo "Waiting for cloud-init to finish..." >&2
-      if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
-        echo "" >&2
-        echo "[ERROR] cloud-init failed on '$VM_NAME'." >&2
-        echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
-        exit 70
-      fi
-      echo "cloud-init done." >&2
+      wait_for_cloud_init "$user" "$ip" "${ssh_opts[@]}"
     fi
 
     cmd_provision
@@ -779,8 +786,10 @@ EOF
       local user ssh_opts ip
       resolve_ssh_conn user ssh_opts ip
       wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
-    fi
-    if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+      if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+        wait_for_cloud_init "$user" "$ip" "${ssh_opts[@]}"
+      fi
+    elif [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
       echo "[NOTE] cloud-init is still provisioning in the background." >&2
       echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
       echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
