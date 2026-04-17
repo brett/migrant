@@ -648,7 +648,18 @@ cmd_up() {
     # source may have been rebuilt. Remote images are cached.
     if [[ ! -f "$base_image_path" ]] || [[ "$IMAGE_URL" == file://* ]]; then
       echo "Copying base image..."
-      if ! curl --fail -L -o "$base_image_path" "$IMAGE_URL"; then
+      if [[ "$IMAGE_URL" == file://* ]]; then
+        # Local file — use install instead of curl. Nix store files are
+        # read-only (444); curl can't overwrite a read-only destination,
+        # and cp preserves the read-only permissions. install -m sets
+        # writable permissions so future re-copies succeed.
+        local source_path="${IMAGE_URL#file://}"
+        if ! install -m 644 "$source_path" "$base_image_path"; then
+          echo "[ERROR] Failed to copy local base image. Check IMAGE_URL in Migrantfile." >&2
+          rm -f "$base_image_path"
+          exit 74
+        fi
+      elif ! curl --fail -L -o "$base_image_path" "$IMAGE_URL"; then
         echo "[ERROR] Failed to fetch base image. Check IMAGE_URL in Migrantfile." >&2
         rm -f "$base_image_path"
         exit 74
