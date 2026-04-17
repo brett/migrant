@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Wait for cloud-init to finish
-migrant.sh ssh -- 'sudo cloud-init status --wait'
-
-# Copy netcheck.py into workspace
-cp "${SCRIPT_DIR}/../../tools/netcheck.py" "${SCRIPT_DIR}/workspace/netcheck.py"
-
 # Run the UDP host-port check inside the VM
-migrant.sh ssh -- 'uv run ~/workspace/netcheck.py --no-interactive --host-port udp/9999'
-
-# Clean up
-rm -f "${SCRIPT_DIR}/workspace/netcheck.py"
+migrant.sh ssh -- 'uv run ~/netcheck.py --no-interactive --host-port udp/9999'

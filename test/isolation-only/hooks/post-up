@@ -1,21 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_DIR="$(dirname "$SCRIPT_DIR")"
-TOOLS_DIR="$(cd "$CONFIG_DIR/../../tools" && pwd)"
-
-# Wait for cloud-init to finish
-migrant.sh ssh -- 'sudo cloud-init status --wait'
-
-# Copy netcheck.py into the workspace so the VM can reach it
-cp "$TOOLS_DIR/netcheck.py" "$CONFIG_DIR/workspace/netcheck.py"
-
 # Run netcheck in isolation-only mode (no --host-port, no --lan-ip)
-migrant.sh ssh -- 'uv run ~/workspace/netcheck.py --no-interactive'
-
-# Clean up
-rm -f "$CONFIG_DIR/workspace/netcheck.py"
+migrant.sh ssh -- 'uv run ~/netcheck.py --no-interactive'
 
 # Additional manual check: verify the VM cannot reach the gateway on port 80.
 # In pure isolation mode this connection MUST fail — a successful connect

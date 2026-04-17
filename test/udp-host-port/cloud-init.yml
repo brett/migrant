@@ -13,8 +13,3 @@ package_update: true
 packages:
   - python3
   - uv
-
-runcmd:
-  - mkdir -p /home/migrant/workspace
-  - echo "workspace /home/migrant/workspace virtiofs defaults 0 0" >> /etc/fstab
-  - mount /home/migrant/workspace

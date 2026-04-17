@@ -45,13 +45,19 @@ Configs that start a host-side service use this hook layout:
 | Hook | Purpose |
 | ---- | ------- |
 | `pre-up` | Start a listener on the host before the VM boots |
-| `post-up` | Wait for cloud-init, copy netcheck.py into the VM, run verification |
-| `pre-down` | Kill the listener before the VM stops (so the qemu hook can unmount the workspace cleanly) |
+| `post-up` | Run netcheck.py inside the VM and verify the result |
+| `pre-down` | Kill the listener before the VM stops |
 
 Configs without a host-side service (`lan-host/`, `isolation-only/`,
 `no-isolation/`) only have a `post-up` hook.
 
+### File delivery via Ansible
+
+Each config's `playbook.yml` copies `tools/netcheck.py` into the VM
+home directory. Migrant.sh runs the playbook automatically once SSH
+and cloud-init are ready, so the post-up hook can assume `~/netcheck.py`
+exists and just runs it.
+
 ### Shared cloud-init
 
-All configs use a copy of `test/cloud-init.yml` (Arch Linux, python3,
-uv, shared folder mount).
+All configs use a copy of `test/cloud-init.yml` (Arch Linux, python3, uv).

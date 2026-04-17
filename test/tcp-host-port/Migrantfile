@@ -10,18 +10,10 @@ DISK_GB=10
 # Base image
 IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 
-# Shared folders
-SHARED_FOLDERS=(
-  "workspace:workspace"
-)
-
 # Network
 NETWORKS=(
   "network=migrant"
 )
-
-# Shared folder loop image size
-SHARED_FOLDER_SIZE_GB=5
 
 # Host access rules
 HOST_ACCESS=(
