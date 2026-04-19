@@ -1,0 +1,14 @@
+---
+# Template playbook for VM test configs. Each test/<config>/playbook.yml
+# is a copy of this file. Migrant.sh runs the playbook automatically after
+# SSH and cloud-init are ready, so the post-up hook can assume netcheck.py
+# is already in place.
+- name: Stage netcheck.py for VM-side connectivity tests
+  hosts: all
+  become: false
+  tasks:
+    - name: Copy netcheck.py to VM home
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../tools/netcheck.py"
+        dest: /home/migrant/netcheck.py
+        mode: "0755"

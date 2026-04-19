@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PIDFILE="${MIGRANT_VM_DIR}/.listener.pid"
+
+# Clean up any stale listener
+if [[ -f "$PIDFILE" ]]; then
+  pid=$(<"$PIDFILE")
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PIDFILE"
+fi
+
+# Start a TCP listener on port 9999 that echoes "hello from host"
+python3 -c "
+import socketserver
+class H(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.wfile.write(b'hello from host\n')
+socketserver.TCPServer(('', 9999), H).serve_forever()
+" &
+
+echo $! > "$PIDFILE"

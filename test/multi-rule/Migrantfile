@@ -1,0 +1,23 @@
+# VM identity
+VM_NAME="test-multi-rule"
+OS_VARIANT="archlinux"
+
+# Resources
+RAM_MB=2048
+VCPUS=2
+DISK_GB=10
+
+# Base image
+IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+
+# Network
+NETWORKS=(
+  "network=migrant"
+)
+
+# Host access rules — multiple rules combined
+DEFAULT_ROUTER=$(ip route show default | awk '{print $3; exit}')
+HOST_ACCESS=(
+  "allow-host-port tcp/9999"
+  "allow-lan-host $DEFAULT_ROUTER"
+)

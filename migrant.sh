@@ -254,6 +254,20 @@ wait_for_ssh() {
   done
 }
 
+wait_for_cloud_init() {
+  local user="$1" ip="$2"
+  shift 2
+  local ssh_opts=("$@")
+  echo "Waiting for cloud-init to finish..." >&2
+  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
+    echo "" >&2
+    echo "[ERROR] cloud-init failed on '$VM_NAME'." >&2
+    echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
+    exit 70
+  fi
+  echo "cloud-init done." >&2
+}
+
 verify_shared_folder_mounts() {
   shared_folder_isolation_enabled || return 0
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
@@ -773,20 +787,20 @@ EOF
     wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
 
     if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
-      echo "Waiting for cloud-init to finish..." >&2
-      if ! ssh "${ssh_opts[@]}" "${user}@${ip}" sudo cloud-init status --wait; then
-        echo "" >&2
-        echo "[ERROR] cloud-init failed on '$VM_NAME'." >&2
-        echo "  Run 'migrant.sh ssh -- sudo cloud-init status' for details." >&2
-        exit 70
-      fi
-      echo "cloud-init done." >&2
+      wait_for_cloud_init "$user" "$ip" "${ssh_opts[@]}"
     fi
 
     cmd_provision
     echo "VM '$VM_NAME' is ready." >&2
   elif [[ "$from_snapshot" == false ]]; then
-    if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+    if vm_has_ssh; then
+      local user ssh_opts ip
+      resolve_ssh_conn user ssh_opts ip
+      wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
+      if [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
+        wait_for_cloud_init "$user" "$ip" "${ssh_opts[@]}"
+      fi
+    elif [[ "${CLOUD_INIT_WAIT:-true}" == true ]]; then
       echo "[NOTE] cloud-init is still provisioning in the background." >&2
       echo "  Monitor progress : migrant.sh ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
       echo "  Wait for finish  : migrant.sh ssh -- sudo cloud-init status --wait" >&2
@@ -1244,12 +1258,21 @@ apply_rules() {
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
     # Per-VM INPUT chain: block new connections from VM to host.
-    # Appended (not inserted) so libvirt's LIBVIRT_INP chain — which accepts
-    # DHCP and DNS destined for dnsmasq — runs first.
+    # Must be after libvirt's LIBVIRT_INP chain (which accepts DHCP and DNS
+    # destined for dnsmasq) but before any host-firewall REJECT/DROP rules
+    # that would catch bridged traffic first.
     iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
 
     iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    local inp_pos
+    inp_pos=$(iptables -L INPUT --line-numbers -n \
+              | awk '/LIBVIRT_INP/{print $1; exit}')
+    if [[ -n "$inp_pos" ]]; then
+      iptables -I INPUT "$((inp_pos + 1))" \
+        -m physdev --physdev-in "$iface" -j "$CHAIN"
+    else
+      iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    fi
 
     # ICMP must be blocked with a direct INSERT, not inside the per-VM chain.
     # libvirt's LIBVIRT_INP chain runs before the per-VM chain (which is appended)
@@ -1278,7 +1301,7 @@ apply_rules() {
             local spec="${rule#allow-host-port }"
             local proto="${spec%%/*}"
             local port="${spec#*/}"
-            iptables -A "$CHAIN" -p "$proto" --dport "$port" \
+            iptables -I "$CHAIN" -p "$proto" --dport "$port" \
               -m conntrack --ctstate NEW -j ACCEPT
             hook_log "$vm" "host-access: allow-host-port $proto/$port"
             ;;

@@ -1,0 +1,21 @@
+# VM identity
+VM_NAME="test-udp-host-port"
+OS_VARIANT="archlinux"
+
+# Resources
+RAM_MB=2048
+VCPUS=2
+DISK_GB=10
+
+# Base image
+IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+
+# Network
+NETWORKS=(
+  "network=migrant"
+)
+
+# Host access — allow VM to reach host UDP port 9999
+HOST_ACCESS=(
+  "allow-host-port udp/9999"
+)
