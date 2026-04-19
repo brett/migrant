@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PIDFILE="${MIGRANT_VM_DIR}/.listener.pid"
+
+# Clean up stale listener
+if [[ -f "$PIDFILE" ]]; then
+  old_pid=$(cat "$PIDFILE")
+  if kill -0 "$old_pid" 2>/dev/null; then
+    kill "$old_pid" 2>/dev/null || true
+    wait "$old_pid" 2>/dev/null || true
+  fi
+  rm -f "$PIDFILE"
+fi
+
+# Start a python3 UDP listener on port 9999
+python3 -c "
+import socketserver
+class H(socketserver.BaseRequestHandler):
+    def handle(self):
+        pass
+socketserver.UDPServer(('', 9999), H).serve_forever()
+" &
+
+echo $! > "$PIDFILE"

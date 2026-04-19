@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run the UDP host-port check inside the VM
+migrant.sh ssh -- 'uv run ~/netcheck.py --no-interactive --host-port udp/9999'
