@@ -1,5 +1,5 @@
 ---
-- name: Provision Arch VM as Claude Code agent
+- name: Provision Arch VM as a coding agent
   hosts: all
   become: true
 
@@ -20,14 +20,6 @@
         state: present
         update_cache: true
         extra_args: --needed
-
-    - name: Configure shell environment system-wide
-      ansible.builtin.copy:
-        content: |
-          export PATH="$HOME/.local/bin:$PATH"
-          [[ -f "$HOME/.bash_aliases" ]] && source "$HOME/.bash_aliases"
-        dest: /etc/profile.d/migrant.sh
-        mode: "0644"
 
     - name: Clone yay-bin from AUR
       ansible.builtin.git:
@@ -126,6 +118,30 @@
         creates: /usr/local/bin/uv
       environment:
         UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Download opencode installer
+      ansible.builtin.get_url:
+        url: https://opencode.ai/install
+        dest: /tmp/opencode-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install opencode
+      ansible.builtin.command:
+        cmd: /tmp/opencode-install.sh --no-modify-path
+        creates: /home/migrant/.opencode/bin/opencode
+      become: true
+      become_user: migrant
+      environment:
+        HOME: /home/migrant
+
+    - name: Configure shell environment system-wide
+      ansible.builtin.copy:
+        content: |
+          export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+          [[ -f "$HOME/.bash_aliases" ]] && source "$HOME/.bash_aliases"
+        dest: /etc/profile.d/migrant.sh
+        mode: "0644"
 
     - name: Copy bash aliases to VM
       ansible.builtin.copy:

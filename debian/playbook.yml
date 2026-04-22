@@ -1,5 +1,5 @@
 ---
-- name: Provision Debian VM as Claude Code agent
+- name: Provision Debian VM as a coding agent
   hosts: all
   become: true
 
@@ -17,14 +17,6 @@
           - dnsutils
         state: present
         update_cache: true
-
-    - name: Add ~/.local/bin to PATH system-wide
-      ansible.builtin.lineinfile:
-        path: /etc/profile.d/local-bin.sh
-        line: 'export PATH="$HOME/.local/bin:$PATH"'
-        regexp: '^export PATH=.*\.local/bin'
-        create: true
-        mode: "0644"
 
     # Debian 13 mounts /tmp as tmpfs, so large writes during installation (e.g.
     # the Claude Code installer) consume RAM rather than disk and trigger OOM.
@@ -114,6 +106,29 @@
         creates: /usr/local/bin/uv
       environment:
         UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Download opencode installer
+      ansible.builtin.get_url:
+        url: https://opencode.ai/install
+        dest: /tmp/opencode-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install opencode
+      ansible.builtin.command:
+        cmd: /tmp/opencode-install.sh --no-modify-path
+        creates: /home/migrant/.opencode/bin/opencode
+      become: true
+      become_user: migrant
+      environment:
+        HOME: /home/migrant
+
+    - name: Configure shell environment system-wide
+      ansible.builtin.copy:
+        content: |
+          export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+        dest: /etc/profile.d/migrant.sh
+        mode: "0644"
 
     - name: Copy bash aliases to VM
       ansible.builtin.copy:
