@@ -750,6 +750,16 @@ EOF
   sync_managed_config
   run_hook "pre-up"
 
+  # Let the pre-up hook contribute args to virt-install via a file convention.
+  # One arg per line; blank lines ignored. File is consumed (deleted) on read.
+  local extra_args_file="$VM_DIR/.virt-install-extra-args"
+  if [[ -f "$extra_args_file" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && extra_args+=("$line")
+    done < "$extra_args_file"
+    rm -f "$extra_args_file"
+  fi
+
   virt-install \
     --name "$VM_NAME" \
     --description "$vm_description" \
