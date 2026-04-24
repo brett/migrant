@@ -147,6 +147,22 @@ VM, use `do_graceful_shutdown()` or fire hooks via `run_hook` directly.
 Hooks run as the invoking user, not root. This is by design — same trust
 boundary as the Migrantfile itself.
 
+### Contributing to virt-install from a pre-up hook
+
+On the first-create path only, `cmd_up` reads `$VM_DIR/.virt-install-extra-args`
+after the `pre-up` hook fires. Each non-empty line is appended to the
+`virt-install` argv, and the file is deleted on read. This lets a pre-up hook
+attach devices (disks, filesystems, network entries) without migrant.sh needing
+to know about the specific feature. Example contents:
+
+    --disk
+    path=/path/to/extra.img,bus=virtio,readonly=on
+
+The file is not read on the start-existing path (existing domains keep whatever
+they were created with). Plugins that need per-boot setup (e.g. (re)generating
+an image file) should do that work unconditionally in pre-up; the args file is
+only for influencing the initial virt-install.
+
 ## Managed config pattern
 
 `/etc/migrant/${VM_NAME}/` is the data channel between unprivileged migrant.sh

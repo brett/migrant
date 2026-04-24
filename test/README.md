@@ -13,6 +13,9 @@ Run from any VM directory (e.g. `cd arch && ../test/test-hooks.sh`):
   variables
 - **test-managed-config.sh** — managed config files, HOST_ACCESS
   validation, iptables rule creation and cleanup
+- **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
+  pre-up hook contributes args to virt-install on first create, file is
+  consumed on read, absent file is a no-op
 
 ---
 
