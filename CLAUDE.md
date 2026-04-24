@@ -77,65 +77,40 @@ errors with no sharper category (e.g. VM not running, VM not created).
 
 ## Provisioning architecture
 
-`cloud-init.yml` is required; `playbook.yml` is optional. cloud-init runs
-before SSH is available and cannot be re-run without a full `destroy` + `up`.
-Ansible runs after SSH is up and can be re-run at any time. Prefer Ansible for
-anything that doesn't need to happen before SSH.
+cloud-init runs before SSH and cannot be re-run without `destroy` + `up`. Ansible
+runs after SSH and can be re-run any time. Prefer Ansible for anything that doesn't
+need to happen before SSH.
 
 ## SSH is optional
 
-A user may not define `ssh_authorized_keys` in `cloud-init.yml`. New features
-should work without SSH where possible — `vm_has_ssh()` can be used to check.
-When SSH is genuinely required (as with Ansible provisioning), document that
-clearly and fail with a helpful error rather than silently misbehaving.
+Not all VMs define `ssh_authorized_keys`. Use `vm_has_ssh()` to check; new features
+should work without SSH where possible. When SSH is required, fail with a clear error.
 
 ## Migrantfile is sourced as bash
 
-`require_config` sources the Migrantfile directly into the script's shell
-process. This gives users full bash — variables, functions, conditionals — but
-also means the Migrantfile runs as the invoking user with no sandboxing. Do not
-add features that encourage putting untrusted content in a Migrantfile.
+`require_config` sources the Migrantfile into the script's process — full bash, but
+no sandboxing. Do not add features that encourage untrusted content in a Migrantfile.
 
 ## libvirt hook gotcha: never call virsh from within a hook
 
-libvirtd holds a per-domain lock when invoking hooks. Calling `virsh` against
-that domain from inside a hook will deadlock — the hook waits for libvirtd,
-which waits for the hook. The hook reads the domain XML from stdin (`xml=$(cat)`);
-libvirt pipes it for every operation. Do not read from `/etc/libvirt/qemu/{name}.xml`
-— that file may not exist during initial `virt-install` and reading it was the
-source of a previous bug. Any future hook code must read from stdin.
+Calling `virsh` against a domain from its own hook deadlocks (libvirtd holds the
+per-domain lock). Always read domain XML from stdin (`xml=$(cat)`) — the persistent
+file at `/etc/libvirt/qemu/{name}.xml` may not exist during `virt-install`.
 
 ## iptables in the hook: always use physdev, never -i
 
-VM traffic arrives on the bridge device (`virbr-migrant`), not the tap port
-(`vnet0`, `vnet6`, etc.). In every iptables chain — PREROUTING, FORWARD,
-INPUT — the kernel reports `iif=virbr-migrant` for bridged packets. Using
-`-i vnetN` never matches. Every rule targeting a specific VM's tap must use
-`-m physdev --physdev-in vnetN` instead. This applies to all tables (filter,
-mangle, nat) and ip6tables.
-
-## How VMs are identified
-
-- libvirt domains are tagged with `--description "managed-by=migrant.sh"` at
-  `virt-install` time; use `virsh desc <name>` to check
-- VM files follow a strict naming convention in `IMAGES_DIR`
-  (`/var/lib/libvirt/images/`):
-  - `{name}.qcow2` — VM disk
-  - `{name}-seed.iso` — cloud-init seed ISO
-  - `{name}-snapshot.qcow2` — snapshot
+Bridged VM traffic arrives on `virbr-migrant`, not the tap port, so `-i vnetN` never
+matches. Use `-m physdev --physdev-in vnetN` for every rule targeting a specific VM's
+tap, across all tables and ip6tables.
 
 ## Example VM sync
 
-The `arch/`, `ubuntu/`, and `debian/` directories are sibling examples and should
-be kept in parity. When updating one — adding a package, changing a bash alias,
-adjusting a masking rationale — apply the equivalent change to all three.
-Distro-specific differences (package manager, systemd unit names) are expected;
+Keep `arch/`, `ubuntu/`, and `debian/` in parity — apply equivalent changes to all
+three. Distro-specific differences (package manager, unit names) are expected;
 structural or behavioural divergence is not.
 
 Known parity exceptions:
-
-- **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for
-  `/tmp`; Ubuntu and Arch do not.
+- **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for `/tmp`; Ubuntu and Arch do not.
 
 ## Lifecycle hooks
 
@@ -150,18 +125,10 @@ boundary as the Migrantfile itself.
 ### Contributing to virt-install from a pre-up hook
 
 On the first-create path only, `cmd_up` reads `$VM_DIR/.virt-install-extra-args`
-after the `pre-up` hook fires. Each non-empty line is appended to the
-`virt-install` argv, and the file is deleted on read. This lets a pre-up hook
-attach devices (disks, filesystems, network entries) without migrant.sh needing
-to know about the specific feature. Example contents:
-
-    --disk
-    path=/path/to/extra.img,bus=virtio,readonly=on
-
-The file is not read on the start-existing path (existing domains keep whatever
-they were created with). Plugins that need per-boot setup (e.g. (re)generating
-an image file) should do that work unconditionally in pre-up; the args file is
-only for influencing the initial virt-install.
+after `pre-up` fires — one arg per line, appended to `virt-install` argv, then
+deleted. Not read on the start-existing path. Hooks that need per-boot setup should
+do that work unconditionally in `pre-up`; the args file is only for initial
+`virt-install`.
 
 ## Managed config pattern
 
