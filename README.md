@@ -243,6 +243,7 @@ migrant status             # Show the VM's current state and snapshot availabili
 migrant provision          # Run the Ansible playbook (playbook.yml) against the running VM
 migrant snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down afterward
 migrant reset              # Destroy the VM and rebuild it from the last snapshot
+migrant resize             # Grow the VM's disk to match DISK_GB in the Migrantfile; requires the VM to be running
 
 # Shared folder
 migrant mount              # Mount the shared folder loop image for host-side access; creates the image if it does not exist
@@ -824,7 +825,7 @@ Each hook receives these variables in its environment:
 | `MIGRANT_VM_NAME` | VM name from the Migrantfile                                      |
 | `MIGRANT_VM_DIR`  | Absolute path to the VM directory                                 |
 | `MIGRANT_HOOK`    | Hook name (`pre-up`, `post-up`, `pre-down`, `post-down`)          |
-| `MIGRANT_TRIGGER` | Command that caused this hook (`up`, `halt`, `snapshot`, `destroy`, `reset`) |
+| `MIGRANT_TRIGGER` | Command that caused this hook (`up`, `halt`, `snapshot`, `destroy`, `reset`, `resize`) |
 | `MIGRANT_VM_IP`   | VM IP address (set when available; empty for `pre-up` and console-only `post-up`) |
 
 All `Migrantfile` variables (`VM_NAME`, `RAM_MB`, `NETWORKS`, etc.) are
