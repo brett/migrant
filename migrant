@@ -58,7 +58,8 @@ Access:
   tunnel [PORT...]    Open SSH local-forwards from host to VM. Without args,
                       uses TUNNEL_PORTS from Migrantfile.
   console             Open a serial console session (exit with Ctrl+])
-  ip                  Print the VM's IP address
+  ip [-6]             Print the VM's IPv4 address (what SSH uses). With -6,
+                      print the IPv6 (ULA) address when NETWORK_IPV6=nat is set
   pubkey              Generate the managed SSH key if needed and print its public key
   tz [zone]           Sync the host timezone to the VM, or set an explicit zone
                       (e.g. America/New_York); defaults to the host timezone
@@ -158,6 +159,15 @@ check_kvm() {
 
 get_vm_ip() {
   virsh domifaddr "$VM_NAME" | awk '/ipv4/ { split($4, a, "/"); print a[1]; exit }'
+}
+
+# Best-effort global IPv6 (ULA) address, for NETWORK_IPV6=nat VMs. Reads the
+# DHCPv6 lease via domifaddr and filters to the migrant ULA prefix (skipping
+# link-local). May be empty if the guest configured a SLAAC-only address, which
+# does not appear in the lease table. SSH and get_vm_ip stay on IPv4.
+get_vm_ip6() {
+  virsh domifaddr "$VM_NAME" 2>/dev/null \
+    | awk '$3 == "ipv6" && $4 ~ /^fdca:6d16:2b1a:/ { split($4, a, "/"); print a[1]; exit }'
 }
 
 get_vm_ip_or_die() {
@@ -364,9 +374,30 @@ sync_managed_config() {
   local has_host_access=false
   (( ${#HOST_ACCESS[@]} > 0 )) && has_host_access=true
 
+  local has_network_ipv6=false
+  case "${NETWORK_IPV6:-off}" in
+    nat) has_network_ipv6=true ;;
+    off) ;;
+    *)
+      echo "[ERROR] invalid NETWORK_IPV6: ${NETWORK_IPV6} (expected 'nat' or 'off')." >&2
+      exit 65  # EX_DATAERR
+      ;;
+  esac
+
+  # NAT66 IPv6 egress is not routed through the WireGuard tunnel (fwmark policy
+  # routing is IPv4-only), so allowing it alongside WireGuard would leak the
+  # VM's IPv6 traffic outside the VPN. Refuse the combination.
+  if [[ "$has_network_ipv6" == true && "$has_wireguard" == true ]]; then
+    echo "[ERROR] NETWORK_IPV6=nat is incompatible with WireGuard." >&2
+    echo "  IPv6 egress would bypass the tunnel (fwmark routing is IPv4-only)." >&2
+    echo "  Remove wireguard.conf or unset NETWORK_IPV6." >&2
+    exit 65  # EX_DATAERR
+  fi
+
   [[ "$has_network_isolation" == true \
     || "$has_shared_folder_isolation_disabled" == true \
     || "$has_wireguard" == true \
+    || "$has_network_ipv6" == true \
     || "$has_host_access" == true ]] && needs_dir=true
 
   if [[ "$needs_dir" == false ]]; then
@@ -385,6 +416,13 @@ sync_managed_config() {
     touch "$managed_dir/network-isolation"
   else
     rm -f "$managed_dir/network-isolation"
+  fi
+
+  # --- IPv6 (NAT66) flag ---
+  if [[ "$has_network_ipv6" == true ]]; then
+    touch "$managed_dir/network-ipv6"
+  else
+    rm -f "$managed_dir/network-ipv6"
   fi
 
   # --- shared folder isolation flag ---
@@ -974,6 +1012,9 @@ echo "$xml" | grep -q "managed-by=migrant" || exit 0
 HAS_NETWORK_ISOLATION=false
 [[ -f "/etc/migrant/${VM_NAME}/network-isolation" ]] && HAS_NETWORK_ISOLATION=true
 
+HAS_NETWORK_IPV6=false
+[[ -f "/etc/migrant/${VM_NAME}/network-ipv6" ]] && HAS_NETWORK_IPV6=true
+
 VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
 
 wg_iface_and_table() {
@@ -1338,11 +1379,42 @@ apply_rules() {
     fi
   fi
 
-  # Drop all IPv6 from this VM. The libvirt network provides no routable IPv6
-  # to VMs; this rule makes the de-facto limitation explicit. When WireGuard is
-  # in use, fwmark routing is IPv4-only and without this rule IPv6 traffic would
-  # bypass the tunnel and exit via the host's default IPv6 path.
-  ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
+  # IPv6 egress policy for this VM.
+  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    # Opt-in NAT66 (NETWORK_IPV6=nat): masquerade the VM's ULA to the host's
+    # IPv6 uplink so it can reach IPv6-only endpoints, mirroring the IPv4 NAT.
+    # Requires the host to have working IPv6 egress. The ULA MUST match the
+    # <ip family="ipv6"> block in the migrant network XML. The MASQUERADE matches
+    # the whole /64 (shared by all IPv6 VMs) and is left in place on teardown;
+    # the -C guard keeps re-adding it idempotent.
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    ip6tables -t nat -C POSTROUTING -s fdca:6d16:2b1a::/64 ! -o virbr-migrant -j MASQUERADE 2>/dev/null \
+      || ip6tables -t nat -A POSTROUTING -s fdca:6d16:2b1a::/64 ! -o virbr-migrant -j MASQUERADE
+    # Permit ICMPv6 on the migrant bridge. The VM's on-link gateway is our ULA
+    # (fdca:6d16:2b1a::1), so neighbor discovery between host and guest uses
+    # ULA (global-scope) source addresses, not link-local. A host INPUT firewall
+    # that only accepts ICMPv6 from fe80::/10 (a very common default) REJECTs
+    # those NS/NA — the host then can't resolve the guest's ULA, so NAT66 reply
+    # traffic dies with "address unreachable" while egress (forwarded, never
+    # INPUT) still works. This mirrors the rule libvirt adds for its own managed
+    # IPv6 networks; migrant hand-rolls NAT66, so libvirt never adds it. Inserted
+    # ahead of the host's REJECTs, shared across IPv6 VMs, left in place on
+    # teardown like the MASQUERADE; the -C guard keeps re-adding it idempotent.
+    ip6tables -C INPUT -i virbr-migrant -p ipv6-icmp -j ACCEPT 2>/dev/null \
+      || ip6tables -I INPUT -i virbr-migrant -p ipv6-icmp -j ACCEPT
+    if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+      # Mirror the IPv4 RFC1918 REJECTs for IPv6: block the VM from reaching the
+      # host and other VMs/LAN (all ULA incl. our own subnet, and link-local),
+      # while letting global-scope internet traffic fall through.
+      ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
+      ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
+    fi
+  else
+    # Default: the migrant network provides no routable IPv6 to VMs, so drop it.
+    # This also stops IPv6 from bypassing NAT/WireGuard via the host's default
+    # IPv6 path (WireGuard fwmark policy routing is IPv4-only).
+    ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
+  fi
 
   wg_setup_rules "$vm" "$iface"
 
@@ -1399,7 +1471,14 @@ remove_rules() {
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
   fi
 
-  ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
+  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT 2>/dev/null || true
+    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT 2>/dev/null || true
+    # NAT66 MASQUERADE and the bridge ICMPv6 accept are shared across IPv6 VMs
+    # — intentionally left in place.
+  else
+    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
+  fi
 
   local WG_IFACE WG_TABLE
   wg_iface_and_table "$vm"
@@ -1595,6 +1674,19 @@ MIGRANT_NETWORK_EOF
       <range start="192.168.200.2" end="192.168.200.254"/>
     </dhcp>
   </ip>
+  <!-- Optional IPv6 (NAT66). The guest always receives this ULA, but egress is
+       gated per-VM by the qemu hook: NETWORK_IPV6=nat opts a VM in, otherwise
+       its IPv6 is dropped at FORWARD. The ULA global-id is arbitrary and
+       local-only (RFC 4193) — change it only if it collides with another
+       network on your host. It MUST match the ip6tables rules in apply_rules().
+       Existing installs won't gain this subnet until the network is recreated,
+       which restarts the shared bridge — shut down every VM on the migrant
+       network first (see the README "IPv6 (NAT66)" section for the sequence). -->
+  <ip family="ipv6" address="fdca:6d16:2b1a::1" prefix="64">
+    <dhcp>
+      <range start="fdca:6d16:2b1a::2" end="fdca:6d16:2b1a::ffff"/>
+    </dhcp>
+  </ip>
 </network>
 NET_EOF
     virsh net-define "$net_xml"
@@ -1641,7 +1733,7 @@ _migrant() {
     "ssh:SSH into the VM; optionally run a remote command"
     "tunnel:Open SSH local-forwards from host to VM"
     "console:Open a serial console session"
-    "ip:Print the VM's IP address"
+    "ip:Print the VM's IPv4 address, or (-6) its IPv6 address"
     "pubkey:Generate the managed SSH key if needed and print its public key"
     "tz:Sync the host timezone to the VM, or set an explicit zone"
     "storage:List IMAGES_DIR contents grouped by base images and VMs"
@@ -1992,6 +2084,20 @@ do_autoconnect() {
 
 cmd_ip() {
   require_running
+  if [[ "${1:-}" == "-6" || "${1:-}" == "--ipv6" ]]; then
+    if [[ "${NETWORK_IPV6:-off}" != "nat" ]]; then
+      echo "[ERROR] '$VM_NAME' does not have NETWORK_IPV6=nat set." >&2
+      exit 1
+    fi
+    local ip6
+    ip6=$(get_vm_ip6)
+    if [[ -z "$ip6" ]]; then
+      echo "No IPv6 address found for '$VM_NAME' (the guest may still be configuring, or took a SLAAC-only address not in the lease table)." >&2
+      exit 1
+    fi
+    echo "$ip6"
+    return
+  fi
   get_vm_ip_or_die
 }
 
@@ -2215,6 +2321,11 @@ cmd_status() {
           printf '%-*s%s\n' "$w" 'ip:' "$ip"
         else
           printf '%-*s%s\n' "$w" 'ip:' 'pending [WARNING]'
+        fi
+        if [[ "${NETWORK_IPV6:-off}" == "nat" ]]; then
+          local ip6
+          ip6=$(get_vm_ip6)
+          printf '%-*s%s\n' "$w" 'ipv6:' "${ip6:-pending}"
         fi
         ;;
       shut\ off)
