@@ -46,6 +46,8 @@ Lifecycle:
   snapshot            Shut down the VM and save a snapshot of its disk;
                       VM stays down afterward
   reset               Destroy the VM and rebuild it from the last snapshot
+  resize              Grow the VM's disk to match DISK_GB in the Migrantfile;
+                      requires the VM to be running
 
 Shared folder:
   mount               Mount the shared folder loop image for host-side access;
@@ -1635,6 +1637,7 @@ _migrant() {
     "provision:Run the Ansible playbook against the running VM"
     "snapshot:Shut down the VM and save a snapshot of its disk"
     "reset:Destroy the VM and rebuild it from the last snapshot"
+    "resize:Grow the VM's disk to match DISK_GB in the Migrantfile"
     "status:Show the VM's current state and snapshot availability"
     "mount:Mount the shared folder loop image for host-side access"
     "unmount:Unmount the shared folder loop image"
@@ -1829,6 +1832,97 @@ cmd_reset() {
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
   _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
+}
+
+cmd_resize() {
+  _MIGRANT_TRIGGER="resize"
+  if [[ -z "${DISK_GB:-}" ]]; then
+    echo "[ERROR] 'DISK_GB' is not set in Migrantfile" >&2
+    exit 78
+  fi
+  # The in-guest partition/filesystem grow runs live over SSH: cloud-init is
+  # disabled after first boot (see playbook.yml), so growpart cannot run on a
+  # reboot to do it for us. That means the VM must be up and reachable.
+  require_running
+  if ! vm_has_ssh; then
+    echo "[ERROR] resize needs SSH to grow the in-guest filesystem, but" >&2
+    echo "  cloud-init.yml defines no ssh_authorized_keys." >&2
+    exit 78
+  fi
+
+  local target_bytes=$(( DISK_GB * 1024 * 1024 * 1024 ))
+  local current_bytes
+  # Read the current virtual size through libvirtd, not by opening the image
+  # file: lifecycle commands run unprivileged and cannot read the
+  # libvirt-qemu-owned image under /var/lib/libvirt/images.
+  current_bytes=$(virsh domblkinfo "$VM_NAME" "$DISK_PATH" 2>/dev/null \
+      | awk '/^Capacity:/ { print $2 }' || true)
+  if [[ -z "$current_bytes" ]]; then
+    echo "[ERROR] could not read virtual size of '$DISK_PATH'." >&2
+    exit 1
+  fi
+
+  if (( target_bytes < current_bytes )); then
+    local current_gb=$(( current_bytes / 1024 / 1024 / 1024 ))
+    echo "[ERROR] shrinking is not supported (current: ${current_gb}G, requested: ${DISK_GB}G)." >&2
+    echo "  Run 'migrant destroy && migrant up' to rebuild at the smaller size." >&2
+    exit 78
+  fi
+
+  # Grow the block device live; virtio surfaces the new capacity to the guest
+  # without a reboot. If the image is already the target size (e.g. a previous
+  # resize grew the disk but the guest filesystem never caught up), skip this
+  # and fall through to the in-guest grow, which doubles as a recovery path.
+  if (( target_bytes == current_bytes )); then
+    echo "Disk image already at ${DISK_GB}G; growing the in-guest filesystem to match..."
+  else
+    echo "Growing '$VM_NAME' disk to ${DISK_GB}G..."
+    virsh blockresize "$VM_NAME" "$DISK_PATH" "${DISK_GB}G"
+  fi
+
+  local user ssh_opts ip
+  resolve_ssh_conn user ssh_opts ip
+  echo "Growing the in-guest partition and filesystem..."
+  # The script runs as root via 'sudo bash -s' (the migrant user has NOPASSWD
+  # sudo). It derives the root device, partition number, and filesystem type
+  # from the live system rather than assuming a layout or ext-family fs.
+  ssh "${ssh_opts[@]}" "${user}@${ip}" 'sudo bash -s' <<'REMOTE'
+set -euo pipefail
+src=$(findmnt -nro SOURCE /)
+fstype=$(findmnt -nro FSTYPE /)
+name=${src#/dev/}
+disk=$(lsblk -nro PKNAME "$src")
+partn=$(cat "/sys/class/block/${name}/partition")
+
+if ! command -v growpart >/dev/null 2>&1; then
+  echo "[ERROR] 'growpart' not found in the guest." >&2
+  echo "  Install it (Arch: pacman -S cloud-guest-utils;" >&2
+  echo "  Debian/Ubuntu: apt install cloud-guest-utils) and re-run 'migrant resize'." >&2
+  exit 1
+fi
+
+# growpart exits non-zero when there is nothing to grow; treat NOCHANGE as
+# success so an already-grown partition (or a re-run) is not an error.
+out=$(growpart "/dev/${disk}" "${partn}" 2>&1) || true
+echo "$out"
+if [[ "$out" != *CHANGED* && "$out" != *NOCHANGE* ]]; then
+  echo "[ERROR] growpart failed to grow /dev/${disk} partition ${partn}." >&2
+  exit 1
+fi
+
+case "$fstype" in
+  btrfs)          btrfs filesystem resize max / ;;
+  xfs)            xfs_growfs / ;;
+  ext2|ext3|ext4) resize2fs "$src" ;;
+  *)
+    echo "[ERROR] don't know how to grow a '$fstype' filesystem; grow it manually." >&2
+    exit 1
+    ;;
+esac
+
+df -h /
+REMOTE
+  echo "Disk resized to ${DISK_GB}G."
 }
 
 vm_has_ssh() {
@@ -2524,6 +2618,7 @@ case "$SUBCOMMAND" in
   unmount)      require_config; cmd_unmount ;;
   snapshot)     require_config; cmd_snapshot ;;
   reset)        require_config; cmd_reset ;;
+  resize)       require_config; cmd_resize ;;
   provision)    require_config; cmd_provision ;;
   storage)      cmd_storage ;;
   wg)           require_config; cmd_wg ;;
