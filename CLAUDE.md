@@ -110,13 +110,12 @@ Keep `arch/`, `ubuntu/`, and `debian/` in parity — apply equivalent changes to
 three. Distro-specific differences (package manager, unit names) are expected;
 structural or behavioural divergence is not.
 
-`ipv6/` is a special-purpose NAT66 verification VM derived from `arch/` (same base
-image and cloud-init), not a distro variant: it sets `NETWORK_IPV6=nat`, uses a
-minimal test-only playbook (just uv + staging `netcheck.py`, no agent tooling),
-and carries a host-isolation test harness (pre-up/pre-down manage a host IPv6
-listener; post-up runs `netcheck.py --ipv6-nat`). It is not part of the
-arch/ubuntu/debian parity set — do not mirror its hooks, playbook, or NAT66
-setting into them.
+`test/ipv6-nat/` is a NAT66 verification config, not an example VM. Like the
+other `test/` configs it uses `test/cloud-init.yml` and a one-task netcheck
+playbook; it sets `NETWORK_IPV6=nat` and its hooks run a host-side IPv6 listener
+that `netcheck.py --ipv6-nat` must not be able to reach. It is not part of the
+arch/ubuntu/debian parity set — do not mirror its hooks or NAT66 setting into
+them.
 
 Known parity exceptions:
 - **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for `/tmp`; Ubuntu and Arch do not.
