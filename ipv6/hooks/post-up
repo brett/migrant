@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Verify the NAT66 VM: IPv6 egress should work, and the host must stay unreachable
+# over IPv6 (the pre-up listener on tcp/19999 is the bait). netcheck exits non-zero
+# if any expectation is unmet, which fails the hook and the 'up'.
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${MIGRANT_VM_NAME} ready at ${MIGRANT_VM_IP}; running netcheck"
+migrant ssh -- 'uv run ~/netcheck.py --no-interactive --ipv6-nat --ipv6-host-port tcp/19999'

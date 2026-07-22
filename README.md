@@ -595,8 +595,11 @@ Requirements and caveats:
 - **The host firewall must permit ICMPv6 on the `virbr-migrant` bridge.**
   Neighbor discovery to the VM's ULA gateway is global-scoped, so a firewall
   that accepts ICMPv6 only from `fe80::/10` (a common default) breaks NAT66
-  *reply* traffic while egress still works. The qemu hook adds an INPUT accept
-  for this; keep it in place if you manage the host firewall out-of-band.
+  *reply* traffic while egress still works. The qemu hook adds a per-VM INPUT
+  accept for exactly the needed ICMPv6 (neighbor discovery, router
+  solicit/advert, and PMTUD errors) — echo and everything else stay blocked, so
+  the guest cannot ping or otherwise reach the host over IPv6. Keep this rule in
+  place if you manage the host firewall out-of-band.
 - **Incompatible with WireGuard.** IPv6 is not routed through the tunnel
   (fwmark policy routing is IPv4-only), so `migrant up` refuses to start a VM
   that sets both `NETWORK_IPV6=nat` and a `wireguard.conf`.

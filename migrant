@@ -986,6 +986,9 @@ OPERATION="$2"
 # iptables chain names are limited to 29 characters; hash the VM name so
 # the chain name stays within that limit regardless of VM name length.
 CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
+# Separate ip6tables chain for the NAT66 per-VM INPUT reject (see apply_rules).
+# Distinct prefix so the v4 and v6 per-VM chains never collide.
+CHAIN6="MIGRANT6_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 
 # All stderr goes to a persistent log file. libvirtd does not reliably forward
 # hook stderr to the journal, so this is the only reliable debug channel.
@@ -1282,13 +1285,59 @@ wg_teardown() {
   hook_log "$vm" "WireGuard torn down: $WG_IFACE"
 }
 
+# The ULA MASQUERADE (matches the whole /64) and IPv6 forwarding are host-global,
+# shared by every NAT66 VM and can't be scoped to a tap. Reference-count their
+# users via sentinel files so they are added on the first VM and reverted on the
+# last — otherwise they outlive the sandbox and leave the host more permissive.
+NAT66_ULA="fdca:6d16:2b1a::/64"
+NAT66_REFDIR="/run/migrant/nat66"
+
+nat66_shared_setup() {
+  local vm="$1"
+  mkdir -p "$NAT66_REFDIR"
+
+  # Save the host's prior forwarding value once so the last teardown restores it
+  # exactly, rather than blindly zeroing a host that legitimately forwards IPv6.
+  if [[ ! -f "$NAT66_REFDIR/.fwd-prev" ]]; then
+    sysctl -n net.ipv6.conf.all.forwarding > "$NAT66_REFDIR/.fwd-prev" 2>/dev/null \
+      || echo 0 > "$NAT66_REFDIR/.fwd-prev"
+  fi
+  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+
+  # -C guard keeps the shared MASQUERADE idempotent across VMs.
+  ip6tables -t nat -C POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null \
+    || ip6tables -t nat -A POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE
+
+  touch "$NAT66_REFDIR/$vm"
+}
+
+nat66_shared_teardown() {
+  local vm="$1"
+  rm -f "$NAT66_REFDIR/$vm"
+
+  # Revert only once no NAT66 VM remains (sentinels are VM names; .fwd-prev is a
+  # dotfile, excluded here).
+  local remaining
+  remaining=$(find "$NAT66_REFDIR" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | head -1) || true
+  [[ -n "$remaining" ]] && return 0
+
+  ip6tables -t nat -D POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null || true
+  local prev
+  prev=$(cat "$NAT66_REFDIR/.fwd-prev" 2>/dev/null) || prev=0
+  sysctl -w "net.ipv6.conf.all.forwarding=${prev:-0}" >/dev/null 2>&1 || true
+  rm -f "$NAT66_REFDIR/.fwd-prev"
+}
+
 apply_rules() {
   local vm="$1"
   hook_log "$vm" "apply_rules: enter"
 
-  # No work needed if this VM uses neither network isolation nor WireGuard.
+  # No work needed if this VM uses no network isolation, WireGuard, nor NAT66
+  # (NAT66 needs its masquerade even when isolation is off — egress still routes
+  # through the hook, not libvirt's IPv4-only NAT).
   [[ "$HAS_NETWORK_ISOLATION" == true ]] \
     || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
+    || [[ "${HAS_NETWORK_IPV6:-false}" == true ]] \
     || return 0
 
   # Locate the tap interface for this VM without calling virsh.
@@ -1381,33 +1430,49 @@ apply_rules() {
 
   # IPv6 egress policy for this VM.
   if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
-    # Opt-in NAT66 (NETWORK_IPV6=nat): masquerade the VM's ULA to the host's
-    # IPv6 uplink so it can reach IPv6-only endpoints, mirroring the IPv4 NAT.
-    # Requires the host to have working IPv6 egress. The ULA MUST match the
-    # <ip family="ipv6"> block in the migrant network XML. The MASQUERADE matches
-    # the whole /64 (shared by all IPv6 VMs) and is left in place on teardown;
-    # the -C guard keeps re-adding it idempotent.
-    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
-    ip6tables -t nat -C POSTROUTING -s fdca:6d16:2b1a::/64 ! -o virbr-migrant -j MASQUERADE 2>/dev/null \
-      || ip6tables -t nat -A POSTROUTING -s fdca:6d16:2b1a::/64 ! -o virbr-migrant -j MASQUERADE
-    # Permit ICMPv6 on the migrant bridge. The VM's on-link gateway is our ULA
-    # (fdca:6d16:2b1a::1), so neighbor discovery between host and guest uses
-    # ULA (global-scope) source addresses, not link-local. A host INPUT firewall
-    # that only accepts ICMPv6 from fe80::/10 (a very common default) REJECTs
-    # those NS/NA — the host then can't resolve the guest's ULA, so NAT66 reply
-    # traffic dies with "address unreachable" while egress (forwarded, never
-    # INPUT) still works. This mirrors the rule libvirt adds for its own managed
-    # IPv6 networks; migrant hand-rolls NAT66, so libvirt never adds it. Inserted
-    # ahead of the host's REJECTs, shared across IPv6 VMs, left in place on
-    # teardown like the MASQUERADE; the -C guard keeps re-adding it idempotent.
-    ip6tables -C INPUT -i virbr-migrant -p ipv6-icmp -j ACCEPT 2>/dev/null \
-      || ip6tables -I INPUT -i virbr-migrant -p ipv6-icmp -j ACCEPT
+    # Opt-in NAT66 (NETWORK_IPV6=nat): give the VM IPv6 egress via the host's
+    # uplink, mirroring the IPv4 NAT. Requires the host to have working IPv6.
+    # The ULA MUST match the <ip family="ipv6"> block in the migrant network XML.
+    nat66_shared_setup "$vm"
+
+    # ICMPv6 policy, decided at the top of INPUT. libvirt's LIBVIRT_INP accepts
+    # ICMPv6 wholesale (as it does ICMP for v4), so — like the IPv4 ICMP reject —
+    # it must be settled above LIBVIRT_INP, not in the per-VM CHAIN6 below (which
+    # LIBVIRT_INP pre-empts). Accept only what the VM needs on-link: neighbor
+    # discovery (133-136, using ULA not link-local source here) and PMTUD/error
+    # types (1-4); reject the rest — notably echo, matching the IPv4 side that
+    # rejects ping to the host. Insert the catch-all reject first so the type
+    # ACCEPTs, inserted after, stack above it. Per-tap physdev, so nothing leaks
+    # bridge-wide.
+    ip6tables -C INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT 2>/dev/null \
+      || ip6tables -I INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT
+    local icmp6_type
+    for icmp6_type in 133 134 135 136 1 2 3 4; do
+      ip6tables -C INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT 2>/dev/null \
+        || ip6tables -I INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT
+    done
+
     if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-      # Mirror the IPv4 RFC1918 REJECTs for IPv6: block the VM from reaching the
-      # host and other VMs/LAN (all ULA incl. our own subnet, and link-local),
-      # while letting global-scope internet traffic fall through.
+      # Mirror the IPv4 RFC1918 REJECTs: block the VM from other VMs/LAN (all ULA
+      # incl. our subnet, and link-local) in FORWARD; internet falls through.
       ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
       ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
+
+      # Block guest->host: the host's on-link ULA is locally delivered, so it hits
+      # INPUT and never the FORWARD rejects above — without this NAT66 leaves every
+      # host IPv6 service reachable, unlike IPv4. Mirrors the IPv4 per-VM CHAIN:
+      # reject NEW, after LIBVIRT_INP so DHCPv6/DNS to dnsmasq still work.
+      ip6tables -N "$CHAIN6" 2>/dev/null || ip6tables -F "$CHAIN6"
+      ip6tables -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
+      local inp6_pos
+      inp6_pos=$(ip6tables -L INPUT --line-numbers -n \
+                 | awk '/LIBVIRT_INP/{print $1; exit}') || true
+      if [[ -n "$inp6_pos" ]]; then
+        ip6tables -I INPUT "$((inp6_pos + 1))" \
+          -m physdev --physdev-in "$iface" -j "$CHAIN6"
+      else
+        ip6tables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
+      fi
     fi
   else
     # Default: the migrant network provides no routable IPv6 to VMs, so drop it.
@@ -1474,8 +1539,20 @@ remove_rules() {
   if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
     ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT 2>/dev/null || true
     ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT 2>/dev/null || true
-    # NAT66 MASQUERADE and the bridge ICMPv6 accept are shared across IPv6 VMs
-    # — intentionally left in place.
+
+    local icmp6_type
+    for icmp6_type in 133 134 135 136 1 2 3 4; do
+      ip6tables -D INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT 2>/dev/null || true
+    done
+    ip6tables -D INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT 2>/dev/null || true
+
+    ip6tables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6" 2>/dev/null || true
+    ip6tables -F "$CHAIN6" 2>/dev/null || true
+    ip6tables -X "$CHAIN6" 2>/dev/null || true
+
+    # Drop the shared MASQUERADE and restore forwarding once the last NAT66 VM is
+    # gone (the per-VM rules above are always removed).
+    nat66_shared_teardown "$vm"
   else
     ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
   fi

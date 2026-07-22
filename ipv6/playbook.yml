@@ -1,0 +1,35 @@
+---
+# Minimal provisioning for the NAT66 verification VM. This is a test fixture, not
+# a coding-agent VM, so it deliberately skips arch/'s heavy tooling (base-devel,
+# yay/AUR, claude, opencode) — that install is slow and depends on the Arch
+# mirrors, which adds failure modes irrelevant to a firewall test. All it needs is
+# uv (to run the probe) and the probe itself; ping ships in the base cloud image
+# and netcheck skips any other optional tool that is absent.
+- name: Provision the NAT66 verification VM
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Download uv installer
+      ansible.builtin.get_url:
+        url: https://astral.sh/uv/install.sh
+        dest: /tmp/uv-install.sh
+        mode: "0755"
+        force: false
+
+    - name: Install uv
+      ansible.builtin.command:
+        cmd: /tmp/uv-install.sh
+        creates: /usr/local/bin/uv
+      environment:
+        UV_INSTALL_DIR: /usr/local/bin
+
+    # Stage the connectivity probe so the post-up hook can verify NAT66 egress
+    # works and the host stays unreachable over IPv6.
+    - name: Copy netcheck.py to VM home
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../tools/netcheck.py"
+        dest: /home/migrant/netcheck.py
+        mode: "0755"
+      become: true
+      become_user: migrant
