@@ -53,6 +53,14 @@ BOOT_FIRMWARE=uefi
 # to have been run. Set to false to opt out.
 #NETWORK_ISOLATION=false
 
+# IPv6 egress policy. 'off' (the default) gives the VM no IPv6 egress. Set to
+# 'nat' to route the VM's IPv6 via NAT66: the guest gets a ULA and the host
+# masquerades it to its own IPv6 uplink. 'nat' requires the host to have working
+# IPv6, and is refused alongside a wireguard.conf (IPv6 would bypass the tunnel).
+# Existing installs must recreate the migrant network to use 'nat' — see the
+# README "IPv6 (NAT66)" section.
+NETWORK_IPV6=off
+
 # Optional: automatically connect after 'migrant up' finishes.
 # Unset by default. Set to "ssh" or "console" to enable.
 AUTOCONNECT=ssh

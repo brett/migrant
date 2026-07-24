@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Host port, e.g. tcp/9999 (skips interactive prompt)")
     p.add_argument("--peer-ip", metavar="IP",
                    help="Another migrant VM IP to probe (skips interactive prompt)")
+    p.add_argument("--ipv6-nat", action="store_true",
+                   help="VM has NETWORK_IPV6=nat: expect IPv6 egress to work, and "
+                        "verify the host and LAN are still blocked over IPv6")
+    p.add_argument("--ipv6-host-port", metavar="SPEC",
+                   help="Host port with a known IPv6 listener the VM must NOT be "
+                        "able to reach, e.g. tcp/19999 (host-isolation check)")
     p.add_argument("--no-interactive", action="store_true",
                    help="Skip all interactive prompts; run only automatic tests")
     p.add_argument("--check-tools", action="store_true",
@@ -651,6 +657,50 @@ def _tcp_probe(host: str, port: int, timeout: float = 3.0) -> str:
         return f"ERROR:{exc.errno}"
 
 
+def _tcp_probe6(host: str, port: int, timeout: float = 3.0) -> str:
+    """AF_INET6 counterpart of _tcp_probe. A firewall REJECT surfaces as an
+    ICMPv6 admin-prohibited error (ERROR:13 / NOROUTE), a DROP as TIMEOUT; only
+    CONNECTED means the guest actually reached the host over IPv6."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+        return "CONNECTED"
+    except ConnectionRefusedError:
+        return "REJECTED"
+    except socket.timeout:
+        return "TIMEOUT"
+    except OSError as exc:
+        if exc.errno == 111:   # ECONNREFUSED
+            return "REJECTED"
+        if exc.errno == 113:   # EHOSTUNREACH — no route (or REJECT --reject-with)
+            return "NOROUTE"
+        return f"ERROR:{exc.errno}"
+
+
+def _vm_global_v6(ctx: Context) -> str | None:
+    """The guest's routable IPv6 (ULA under NAT66), or None. Skips loopback and
+    link-local, which never carry egress or host-isolation traffic."""
+    for ips in ctx.vm_ips.values():
+        for ip in ips:
+            if ":" in ip and ip != "::1" and not ip.startswith("fe80"):
+                return ip
+    return None
+
+
+def _ula_gateway(ctx: Context) -> str | None:
+    """The host's on-link ULA (the migrant IPv6 gateway), derived as ::1 of the
+    guest ULA's /64. This is the address host-directed guest traffic targets."""
+    guest = _vm_global_v6(ctx)
+    if not guest:
+        return None
+    try:
+        net = ipaddress.IPv6Interface(f"{guest}/64").network
+    except ValueError:
+        return None
+    return str(net.network_address + 1)
+
+
 # ---------------------------------------------------------------------------
 # Tests: 3. Internet connectivity
 # ---------------------------------------------------------------------------
@@ -687,31 +737,29 @@ def _inet_https(ctx: Context) -> Result:
         return Result("FAIL", str(exc)[:120])
 
 
-@test("Internet", "IPv6 external reachability", expect="FAIL")
+@test("Internet", "IPv6 external reachability", expect="PASS")
 def _inet_ipv6(ctx: Context) -> Result:
-    """Always blocked at FORWARD regardless of NETWORK_ISOLATION setting.
-    A PASS result here is a security finding.
+    """The one authoritative IPv6 egress assertion. The desired outcome flips with
+    the mode, so this test decides PASS/FAIL itself: without --ipv6-nat, egress
+    MUST be blocked (a reachable internet host is a security finding); with
+    --ipv6-nat, egress MUST work (that is the feature). Isolation of the host/LAN
+    over IPv6 is checked separately in the Isolation section.
     """
-    has_global_v6 = any(
-        ip != "::1" and ":" in ip and not ip.startswith("fe80")
-        for ips in ctx.vm_ips.values()
-        for ip in ips
-    )
-    if not has_global_v6:
-        return Result("FAIL", "no global IPv6 address assigned (expected — IPv6 not configured)")
+    nat = ctx.args.ipv6_nat
+    guest_v6 = _vm_global_v6(ctx)
+    if not guest_v6:
+        if nat:
+            return Result("FAIL", "no global/ULA IPv6 assigned — NAT66 guest never got its address")
+        return Result("PASS", "no global IPv6 assigned (expected — IPv6 egress off)")
     target_ip = "2606:4700:4700::1111"  # Cloudflare IPv6 DNS
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
-            sock.settimeout(5)
-            sock.connect((target_ip, 53))
-        return Result(
-            "PASS",
-            f"Connected to [{target_ip}]:53 — UNEXPECTED; verify ip6tables FORWARD rule",
-        )
-    except socket.timeout:
-        return Result("FAIL", "timeout (blocked at FORWARD or no route — expected)")
-    except OSError as exc:
-        return Result("FAIL", f"blocked (expected): {exc}")
+    outcome = _tcp_probe6(target_ip, 53, timeout=5.0)
+    if outcome == "CONNECTED":
+        if nat:
+            return Result("PASS", f"reached [{target_ip}]:53 — NAT66 egress working")
+        return Result("FAIL", f"reached [{target_ip}]:53 — UNEXPECTED; verify ip6tables FORWARD rule")
+    if nat:
+        return Result("FAIL", f"{outcome} — NAT66 egress not working (host IPv6 uplink up?)")
+    return Result("PASS", f"{outcome} — blocked (expected, IPv6 egress off)")
 
 
 @test("Internet", "Public IP / tunnel info", expect=None)
@@ -831,33 +879,51 @@ def _iso_rfc1918_192(ctx: Context) -> Result:
     return Result("INFO", f"{outcome} — {_ISOLATION_NOTES.get(outcome, outcome)}")
 
 
-@test("Isolation", "IPv6 external reachability", expect="FAIL")
-def _iso_ipv6_external(ctx: Context) -> Result:
-    """Always blocked at ip6tables FORWARD regardless of NETWORK_ISOLATION setting.
-    A PASS result here is a security finding.
-    Note: this test also appears in the Internet section; it is included here
-    explicitly as an isolation verification.
+@test("Isolation", "IPv6 host reachability (ULA gateway TCP)", expect="PASS")
+def _iso_ipv6_host_tcp(ctx: Context) -> Result:
+    """NAT66's real risk: the host's on-link ULA is locally delivered, so guest->
+    host traffic hits the host INPUT chain, not the FORWARD rejects. Probe a host
+    port that is deliberately listening (started by the VM's pre-up hook and
+    passed via --ipv6-host-port). CONNECTED proves the guest reached a host
+    service over IPv6 — the isolation hole. Any blocked outcome is PASS. A known
+    listener is required so a plain ECONNREFUSED (reached host, nothing bound)
+    can't masquerade as 'safely blocked'.
     """
-    has_global_v6 = any(
-        ip != "::1" and ":" in ip and not ip.startswith("fe80")
-        for ips in ctx.vm_ips.values()
-        for ip in ips
-    )
-    if not has_global_v6:
-        return Result("FAIL", "no global IPv6 address assigned (expected — IPv6 not configured)")
-    target_ip = "2606:4700:4700::1111"  # Cloudflare IPv6 DNS
+    if not ctx.args.ipv6_nat:
+        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
+    if not ctx.args.ipv6_host_port:
+        return Result("SKIP", "no --ipv6-host-port specified (skipped)")
     try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
-            sock.settimeout(5)
-            sock.connect((target_ip, 53))
-        return Result(
-            "PASS",
-            f"Connected to [{target_ip}]:53 — UNEXPECTED; verify ip6tables FORWARD rule",
-        )
-    except socket.timeout:
-        return Result("FAIL", "timeout (blocked at FORWARD or no route — expected)")
-    except OSError as exc:
-        return Result("FAIL", f"blocked (expected): {exc}")
+        proto, port = parse_host_port(ctx.args.ipv6_host_port)
+    except ValueError as exc:
+        return Result("SKIP", str(exc))
+    if proto != "tcp":
+        return Result("SKIP", "only tcp is probed for host isolation")
+    gw = _ula_gateway(ctx)
+    if not gw:
+        return Result("FAIL", "no ULA gateway derivable — NAT66 guest has no ULA")
+    outcome = _tcp_probe6(gw, port, timeout=5.0)
+    if outcome == "CONNECTED":
+        return Result("FAIL", f"reached host [{gw}]:{port} over IPv6 — isolation hole")
+    return Result("PASS", f"{outcome} — host [{gw}]:{port} blocked (expected)")
+
+
+@test("Isolation", "IPv6 host reachability (ICMPv6 echo)", expect="PASS")
+def _iso_ipv6_host_icmp(ctx: Context) -> Result:
+    """The IPv4 side rejects ping to the host; NAT66 must not be looser. Echo to
+    the ULA gateway must be blocked (only NDP/error ICMPv6 is permitted on-link).
+    """
+    if not ctx.args.ipv6_nat:
+        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
+    gw = _ula_gateway(ctx)
+    if not gw:
+        return Result("FAIL", "no ULA gateway derivable — NAT66 guest has no ULA")
+    r = run_tool("ping", ["-6", "-c", "1", "-W", "3", gw], timeout=8)
+    if not r.available:
+        return Result("SKIP", "ping not found")
+    if r.returncode == 0:
+        return Result("FAIL", f"host {gw} answered ICMPv6 echo — looser than the IPv4 path")
+    return Result("PASS", f"host {gw} did not answer ICMPv6 echo (expected)")
 
 
 _GATEWAY_SURVEY_PORTS: list[tuple[int, str]] = [
@@ -1143,6 +1209,13 @@ def main() -> None:
             parse_host_port(args.host_port)
         except ValueError as exc:
             sys.stderr.write(f"Error: --host-port: {exc}\n")
+            sys.exit(2)
+
+    if args.ipv6_host_port:
+        try:
+            parse_host_port(args.ipv6_host_port)
+        except ValueError as exc:
+            sys.stderr.write(f"Error: --ipv6-host-port: {exc}\n")
             sys.exit(2)
 
     _warn_missing_tools()

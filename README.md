@@ -253,7 +253,7 @@ migrant unmount            # Unmount the shared folder loop image
 migrant ssh [-- cmd...]    # SSH into the VM as the configured user; optionally run a remote command (e.g. migrant ssh -- sudo cloud-init status)
 migrant tunnel [PORT...]   # Open SSH local-forwards from host to VM. Without args, uses TUNNEL_PORTS from Migrantfile.
 migrant console            # Open a serial console session (exit with Ctrl+])
-migrant ip                 # Print the VM's IP address
+migrant ip [-6]            # Print the VM's IPv4 address (what SSH uses). With -6, print the IPv6 (ULA) address when NETWORK_IPV6=nat is set
 migrant pubkey             # Generate the managed SSH key if needed and print its public key
 migrant tz [zone]          # Sync the host timezone to the VM, or set an explicit zone (e.g. America/New_York); defaults to the host timezone
 
@@ -467,8 +467,10 @@ migrant ssh -- sudo cloud-init status --wait
 migrant ssh -- sudo tail -f /var/log/cloud-init-output.log
 ```
 
-`migrant ip` prints the VM's IP address, which is useful for
-scripting or for connecting with tools other than SSH.
+`migrant ip` prints the VM's IPv4 address (the one SSH uses), which is
+useful for scripting or connecting with tools other than SSH. When
+`NETWORK_IPV6=nat` is set, `migrant ip -6` prints the VM's IPv6 (ULA)
+address, and `migrant status` shows an `ipv6:` line alongside `ip:`.
 
 ### storage
 
@@ -564,13 +566,47 @@ in a `Migrantfile` to opt out. When active, iptables rules are added that:
   existing connections)
 - Block the VM from reaching RFC 1918 addresses on the local network,
   other than the libvirt subnet itself (192.168.200.0/24)
-- Drop all IPv6 from the VM at the `FORWARD` chain (the libvirt network
-  provides no routable IPv6 to VMs; this makes that de-facto limitation
-  explicit)
+- Drop all IPv6 from the VM at the `FORWARD` chain by default (the libvirt
+  network provides no routable IPv6 to VMs). Opt a VM in to IPv6 egress with
+  `NETWORK_IPV6=nat` — see [IPv6 (NAT66)](#ipv6-nat66) below
 
 The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant setup` to have been run to install the libvirt
 hook.
+
+### IPv6 (NAT66)
+
+By default a migrant VM has no routable IPv6 — the `migrant` network is IPv4
+NAT only, and the qemu hook drops the VM's IPv6 at the `FORWARD` chain. Set
+`NETWORK_IPV6=nat` in a `Migrantfile` to opt a VM in to IPv6 egress. When
+enabled, the VM receives a ULA address (`fdca:6d16:2b1a::/64`) and the hook
+masquerades it to the host's IPv6 uplink, mirroring the IPv4 NAT. With
+`NETWORK_ISOLATION` on (the default), the VM still cannot reach the host or
+other VMs/LAN over IPv6 — only the internet.
+
+Once the VM is up, `migrant status` shows an `ipv6:` line and `migrant ip -6`
+prints the ULA address (best-effort — it is read from the DHCPv6 lease, so it
+may be blank if the guest configured a SLAAC-only address).
+
+Requirements and caveats:
+
+- **The host must have working IPv6 egress.** NAT66 masquerades to the host's
+  own IPv6 route; if the host is IPv4-only there is nothing to NAT to. Check on
+  the host with `ip -6 route get 2620:fe::fe`.
+- **The host firewall must permit ICMPv6 on the `virbr-migrant` bridge.**
+  Neighbor discovery to the VM's ULA gateway is global-scoped, so a firewall
+  that accepts ICMPv6 only from `fe80::/10` (a common default) breaks NAT66
+  *reply* traffic while egress still works. The qemu hook adds a per-VM INPUT
+  accept for exactly the needed ICMPv6 (neighbor discovery, router
+  solicit/advert, and PMTUD errors) — echo and everything else stay blocked, so
+  the guest cannot ping or otherwise reach the host over IPv6. Keep this rule in
+  place if you manage the host firewall out-of-band.
+- **Incompatible with WireGuard.** IPv6 is not routed through the tunnel
+  (fwmark policy routing is IPv4-only), so `migrant up` refuses to start a VM
+  that sets both `NETWORK_IPV6=nat` and a `wireguard.conf`.
+- **Existing installs must recreate the `migrant` network** to gain the IPv6
+  subnet — re-running `migrant setup` alone won't add it. See
+  [Migrating an existing VM to IPv6 (NAT66)](#migrating-an-existing-vm-to-ipv6-nat66).
 
 ### Host access rules
 
@@ -706,9 +742,11 @@ where the only route is `default dev mg-wg-<hash>`. The result: all VM
 traffic exits the host via the encrypted WireGuard tunnel, regardless
 of what the VM itself does.
 
-IPv6 from the VM is dropped at the `FORWARD` chain (shared with the
-network isolation rule). The fwmark routing is IPv4-only; without
-this rule IPv6 would bypass the tunnel.
+IPv6 from the VM is dropped at the `FORWARD` chain. The fwmark routing is
+IPv4-only, so without this IPv6 would bypass the tunnel — which is why
+`NETWORK_IPV6=nat` is refused alongside WireGuard (see
+[IPv6 (NAT66)](#ipv6-nat66)). A WireGuard VM therefore always has its IPv6
+dropped.
 
 `migrant up` verifies the tunnel is active before returning. If the
 WireGuard interface or routing rule is missing, or the marking rule was
@@ -752,7 +790,7 @@ The VM cannot bypass it:
   port-53 traffic is rewritten.
 - If the tunnel fails to come up, `migrant up` halts the VM rather
   than letting it run un-tunneled.
-- IPv6 is blocked at the FORWARD chain (shared with the network isolation rule) so there is no IPv6 leak path.
+- IPv6 is dropped at the FORWARD chain, so there is no IPv6 leak path. `NETWORK_IPV6=nat` (which opens IPv6 egress) is refused on WireGuard VMs, so a tunneled VM always has its IPv6 dropped.
 
 This does not prevent the VM from sending traffic to other hosts on the
 VPN once the tunnel is active. Network isolation is enabled by default
@@ -917,3 +955,42 @@ cp -a ~/workspace-backup/. workspace/
 migrant unmount
 migrant up
 ```
+
+## Migrating an existing VM to IPv6 (NAT66)
+
+`NETWORK_IPV6=nat` needs the `migrant` network to carry an IPv6 (ULA)
+subnet. `migrant setup` only *creates* the network when it is missing, so
+an existing install keeps its IPv4-only network and re-running `setup`
+alone will **not** add IPv6 — you have to recreate the network once.
+
+Recreating it restarts the shared `virbr-migrant` bridge, which interrupts
+**every** VM attached to the `migrant` network, so shut those down first.
+`net-destroy` stops the network only — it does not touch any VM's disk or
+definition — but a running VM loses connectivity until it is restarted.
+
+```bash
+# 1. Halt every VM on the migrant network (repeat per project if you run several)
+migrant halt
+
+# 2. Tear down the old IPv4-only network
+virsh net-destroy migrant
+virsh net-undefine migrant
+
+# 3. Recreate it — now dual-stack — and reinstall the hooks
+migrant setup
+
+# 4. Set NETWORK_IPV6=nat in the VM's Migrantfile, then bring it back up
+migrant up
+```
+
+Then confirm inside the VM that it picked up a ULA and can reach IPv6:
+
+```bash
+ip -6 addr show scope global      # expect an fdca:6d16:2b1a::/64 address
+curl -6 -sS https://ifconfig.co   # returns an IPv6 address
+```
+
+This requires the **host** to have working IPv6 egress
+(`ip -6 route get 2620:fe::fe` on the host); NAT66 has nothing to
+masquerade to otherwise. `NETWORK_IPV6=nat` is refused on a VM that also
+has a `wireguard.conf`.

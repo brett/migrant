@@ -41,6 +41,7 @@ cd test/<config>
 | `multi-rule/` | Combined `allow-host-port tcp/9999` + `allow-lan-host` in a single config |
 | `isolation-only/` | Default isolation with no HOST_ACCESS — verifies the VM cannot reach the host |
 | `no-isolation/` | `NETWORK_ISOLATION=false` — verifies the VM can reach the host freely |
+| `ipv6-nat/` | `NETWORK_IPV6=nat` — verifies NAT66 egress works while the host stays unreachable over IPv6 |
 
 ### Hook pattern
 
