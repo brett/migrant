@@ -13,6 +13,7 @@ careful consideration. Key containment properties to preserve:
 
 - KVM hypervisor boundary between guest and host
 - Network isolation (on by default) blocks the VM from reaching the host or LAN; set `NETWORK_ISOLATION=false` to opt out
+- IPv6 has no routable path by default (dropped at the FORWARD chain); `NETWORK_IPV6=nat` opts a VM in to NAT66 egress and is refused alongside WireGuard (IPv6 is not tunnel-routed)
 - The shared folder is the only intentional host↔guest data channel; its scope
   should remain narrow
 - The VM is designed to be destroyed and rebuilt, not patched in place
@@ -134,8 +135,8 @@ do that work unconditionally in `pre-up`; the args file is only for initial
 
 `/etc/migrant/${VM_NAME}/` is the data channel between unprivileged migrant
 and the privileged qemu/loop hooks. `sync_managed_config()` validates and writes
-all behavioral config (network isolation flag, shared folder isolation flag,
-HOST_ACCESS rules, WireGuard files) before the VM starts. The hooks read these
+all behavioral config (network isolation flag, IPv6/NAT66 flag, shared folder
+isolation flag, HOST_ACCESS rules, WireGuard files) before the VM starts. The hooks read these
 files at runtime.
 
 The VM description tag carries only identity (`managed-by=migrant`). All

@@ -37,6 +37,10 @@ Or add a task to your Ansible playbook to provision it automatically.
 
 # Supply optional inputs via flags
 ./netcheck.py --lan-ip 192.168.1.50 --host-port tcp/9999 --peer-ip 192.168.200.5
+
+# Verify a NETWORK_IPV6=nat VM: expect IPv6 egress to work, and confirm the host
+# is still unreachable over IPv6 (needs a host listener on the given port).
+./netcheck.py --no-interactive --ipv6-nat --ipv6-host-port tcp/19999
 ```
 
 ### What it checks
@@ -45,8 +49,8 @@ Or add a task to your Ansible playbook to provision it automatically.
 | ----------- | --------------------------------------------------------------------------------------------- |
 | Inventory   | Interfaces, routing tables, DNS resolvers, gateway                                            |
 | DNS         | Default resolver (A/AAAA), direct queries to 8.8.8.8/1.1.1.1, interception detection, whoami |
-| Internet    | HTTP/HTTPS reachability, IPv6 probe, public IP/VPN info, traceroute, MTU                      |
-| Isolation   | Gateway ping/TCP, RFC1918 TCP probes, IPv6 external                                           |
+| Internet    | HTTP/HTTPS reachability, IPv6 egress probe, public IP/VPN info, traceroute, MTU               |
+| Isolation   | Gateway ping/TCP, RFC1918 TCP probes, IPv6 host reachability (ULA gateway, `--ipv6-nat`)      |
 | Host access | TCP/UDP connect to a host port (requires `allow-host-port` in Migrantfile)                    |
 | LAN / peer  | Ping and TCP to a LAN host, peer VM ping                                                      |
 

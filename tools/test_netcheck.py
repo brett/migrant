@@ -121,3 +121,28 @@ def test_parse_vm_ips_veth_peer_suffix():
     result = nc.parse_vm_ips(output)
     assert "veth0" in result
     assert "10.0.0.1" in result["veth0"]
+
+
+def _ctx(vm_ips):
+    args = nc.build_parser().parse_args(["--no-interactive"])
+    return nc.Context(args=args, gateway="192.168.200.1", resolvers=[], vm_ips=vm_ips)
+
+
+def test_vm_global_v6_prefers_ula_over_linklocal():
+    ctx = _ctx({"lo": ["::1"], "eth0": ["fe80::5054:ff:feab:cdef", "fdca:6d16:2b1a::abcd"]})
+    assert nc._vm_global_v6(ctx) == "fdca:6d16:2b1a::abcd"
+
+
+def test_vm_global_v6_none_when_only_linklocal():
+    ctx = _ctx({"lo": ["::1"], "eth0": ["fe80::5054:ff:feab:cdef"]})
+    assert nc._vm_global_v6(ctx) is None
+
+
+def test_ula_gateway_is_prefix_colon_one():
+    ctx = _ctx({"eth0": ["fdca:6d16:2b1a::abcd"]})
+    assert nc._ula_gateway(ctx) == "fdca:6d16:2b1a::1"
+
+
+def test_ula_gateway_none_without_global_v6():
+    ctx = _ctx({"eth0": ["fe80::1"]})
+    assert nc._ula_gateway(ctx) is None
