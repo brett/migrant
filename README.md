@@ -306,9 +306,9 @@ MIGRANT_DIR=~/migrant/ubuntu migrant halt
 The typical use is to define a shell alias:
 
 ```bash
-alias mig-a="MIGRANT_DIR=$HOME/migrant/arch migrant"
-alias mig-d="MIGRANT_DIR=$HOME/migrant/debian migrant"
-alias mig-u="MIGRANT_DIR=$HOME/migrant/ubuntu migrant"
+alias mig-a="MIGRANT_DIR=$HOME/migrant/examples/arch migrant"
+alias mig-d="MIGRANT_DIR=$HOME/migrant/examples/debian migrant"
+alias mig-u="MIGRANT_DIR=$HOME/migrant/examples/ubuntu migrant"
 ```
 
 After which you can manage the VM from anywhere:
