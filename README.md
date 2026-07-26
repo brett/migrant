@@ -200,10 +200,9 @@ section for the drop-in configuration.
 
 ## Example: Claude Code agent VMs
 
-The `arch/`, `ubuntu/`, and `debian/` subdirectories contain ready-to-use
-examples for running [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-in an isolated VM on Arch Linux, Ubuntu, and Debian Trixie respectively.
-They use both provisioning methods:
+The `examples/` subdirectory contains ready-to-use examples for running [Claude
+Code](https://docs.anthropic.com/en/docs/claude-code) in an isolated VM on Arch
+Linux, Ubuntu, and Debian Trixie. They use both provisioning methods:
 
 - **`cloud-init.yml`** handles system bootstrap: creating the `migrant` user,
   configuring SSH, and mounting the shared folder
@@ -720,7 +719,7 @@ Place a standard `wireguard.conf` (wg-quick format) alongside the
 changes to `cloud-init.yml` or the VM are required.
 
 ```
-ubuntu/
+examples/ubuntu/
 ├── Migrantfile
 ├── cloud-init.yml
 └── wireguard.conf      ← drop any wg-quick config here
@@ -825,7 +824,7 @@ Place executable scripts in a `hooks/` directory alongside the
 `Migrantfile` to run host-side actions at VM state transitions:
 
 ```
-ubuntu/
+examples/ubuntu/
 ├── Migrantfile
 ├── cloud-init.yml
 ├── playbook.yml

@@ -14,7 +14,7 @@ cloud images. The qcow2 is built locally from `flake.nix` instead.
 
 Build the image (first time only, or after changing `flake.nix`):
 
-    cd nixos
+    cd examples/nixos
     nix build
 
 Update the SSH key in `cloud-init.yml` to match your managed key:

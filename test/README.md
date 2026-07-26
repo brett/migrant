@@ -7,7 +7,7 @@ Integration tests for migrant. All tests require a working
 
 ## Shell test scripts
 
-Run from any VM directory (e.g. `cd arch && ../test/test-hooks.sh`):
+Run from any example VM directory (e.g. `cd examples/arch && ../../test/test-hooks.sh`):
 
 - **test-hooks.sh** — lifecycle hook execution, ordering, and environment
   variables

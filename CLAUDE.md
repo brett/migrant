@@ -4,7 +4,8 @@ A single-file bash VM management tool built on libvirt/QEMU/KVM. The `setup/`
 directory holds installer assets (libvirt hooks, network definition, zsh
 completion) needed only by the `setup` subcommand — every VM lifecycle command
 (`up`, `halt`, `destroy`, etc.) remains fully self-contained in the single
-script.
+script. `examples/` holds ready-to-use example VMs (see "Example VM sync"
+below); `test/` and `tools/` are unrelated to VM lifecycle.
 
 ## Purpose
 
@@ -27,7 +28,7 @@ careful consideration. Key containment properties to preserve:
 - Run `shellcheck setup/qemu-hook setup/loop-hook setup/network-hook` after
   changes to any of them — must be clean (`setup/network.xml` and
   `setup/_migrant` are not shell and are not shellchecked)
-- Run `uvx ansible-lint arch/playbook.yml ubuntu/playbook.yml debian/playbook.yml` after changes to any playbook
+- Run `uvx ansible-lint examples/arch/playbook.yml examples/ubuntu/playbook.yml examples/debian/playbook.yml` after changes to any playbook
 - The script uses `set -euo pipefail`; follow these patterns:
   - Empty array expansion: `"${ARRAY[@]+"${ARRAY[@]}"}"`
   - Arithmetic that may evaluate to 0: `(( expr )) || true`
@@ -112,12 +113,15 @@ tap, across all tables and ip6tables.
 
 ## Example VM sync
 
-Keep `arch/`, `ubuntu/`, and `debian/` in parity — apply equivalent changes to all
-three. Distro-specific differences (package manager, unit names) are expected;
-structural or behavioural divergence is not.
+Keep all example VMs in `examples/` in parity — apply equivalent changes to
+all of them. Distro-specific differences (package manager, unit names) are
+expected; structural or behavioural divergence is not.
 
 Known parity exceptions:
-- **tmp.mount masked** (`debian/playbook.yml` only): Debian 13 uses tmpfs for `/tmp`; Ubuntu and Arch do not.
+- **tmp.mount masked** (`examples/debian/playbook.yml` only): Debian 13 uses tmpfs for `/tmp`; Ubuntu and Arch do not.
+- **`examples/nixos/`**: declarative image build with no `playbook.yml`; see
+  its README for the full list of structural differences from the other
+  examples.
 
 ## Lifecycle hooks
 
