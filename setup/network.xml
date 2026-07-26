@@ -1,0 +1,24 @@
+<network>
+  <name>migrant</name>
+  <forward mode="nat"/>
+  <bridge name="virbr-migrant" stp="on" delay="0"/>
+  <mac address="52:54:00:0a:cd:21"/>
+  <ip address="192.168.200.1" netmask="255.255.255.0">
+    <dhcp>
+      <range start="192.168.200.2" end="192.168.200.254"/>
+    </dhcp>
+  </ip>
+  <!-- Optional IPv6 (NAT66). The guest always receives this ULA, but egress is
+       gated per-VM by the qemu hook: NETWORK_IPV6=nat opts a VM in, otherwise
+       its IPv6 is dropped at FORWARD. The ULA global-id is arbitrary and
+       local-only (RFC 4193) — change it only if it collides with another
+       network on your host. It MUST match the ip6tables rules in apply_rules().
+       Existing installs won't gain this subnet until the network is recreated,
+       which restarts the shared bridge — shut down every VM on the migrant
+       network first (see the README "IPv6 (NAT66)" section for the sequence). -->
+  <ip family="ipv6" address="fdca:6d16:2b1a::1" prefix="64">
+    <dhcp>
+      <range start="fdca:6d16:2b1a::2" end="fdca:6d16:2b1a::ffff"/>
+    </dhcp>
+  </ip>
+</network>

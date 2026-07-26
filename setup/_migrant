@@ -1,0 +1,37 @@
+#compdef migrant
+
+_migrant() {
+  local -a subcommands
+  subcommands=(
+    "setup:One-time host setup: configures libvirt networking and installs firewall hooks"
+    "up:Create the VM if it does not exist, or start it if stopped"
+    "halt:Gracefully shut down the VM"
+    "destroy:Stop and permanently delete the VM, its disk, and any snapshots"
+    "provision:Run the Ansible playbook against the running VM"
+    "snapshot:Shut down the VM and save a snapshot of its disk"
+    "reset:Destroy the VM and rebuild it from the last snapshot"
+    "resize:Grow the VM's disk to match DISK_GB in the Migrantfile"
+    "status:Show the VM's current state and snapshot availability"
+    "mount:Mount the shared folder loop image for host-side access"
+    "unmount:Unmount the shared folder loop image"
+    "ssh:SSH into the VM; optionally run a remote command"
+    "tunnel:Open SSH local-forwards from host to VM"
+    "console:Open a serial console session"
+    "ip:Print the VM's IPv4 address, or (-6) its IPv6 address"
+    "pubkey:Generate the managed SSH key if needed and print its public key"
+    "tz:Sync the host timezone to the VM, or set an explicit zone"
+    "storage:List IMAGES_DIR contents grouped by base images and VMs"
+    "wg:Show live WireGuard interface status, including transfer stats and latest handshake"
+    "dominfo:Show detailed libvirt domain info for the VM"
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' subcommands
+    # 'umount' is a common typo; complete it as 'unmount'
+    [[ $PREFIX == um* ]] && compadd -U -- unmount
+  elif [[ $words[2] == ssh ]] && (( CURRENT == 3 )); then
+    compadd -- '--'
+  fi
+}
+
+_migrant "$@"

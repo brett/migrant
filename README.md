@@ -131,9 +131,14 @@ before running Ansible.
 ### 2. Install migrant
 
 ```bash
-cp migrant ~/bin/migrant
-chmod +x ~/bin/migrant
+ln -s ~/src/migrant/migrant ~/bin/migrant
 ```
+
+`cmd_setup` reads its installer assets (libvirt hooks, network definition,
+zsh completion) from a `setup/` directory next to `migrant`'s real file —
+symlinking instead of copying is what lets `migrant setup` find `setup/`
+automatically. If you'd rather copy `migrant` standalone, set
+`MIGRANT_SETUP_DIR=~/src/migrant/setup` before running `migrant setup`.
 
 Make sure `~/bin` is in your `PATH`. Add this to your `~/.bashrc` or
 `~/.zshrc` if needed:

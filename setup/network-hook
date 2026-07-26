@@ -1,0 +1,6 @@
+#!/bin/bash
+# Managed by migrant
+# Libvirt network hook args: $1=network-name $2=operation $3=sub-operation $4=extra
+if [[ "$1" == "migrant" && "$2" == "started" ]]; then
+  sysctl -w "net.ipv4.conf.virbr-migrant.rp_filter=0"
+fi

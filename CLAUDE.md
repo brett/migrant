@@ -1,7 +1,10 @@
 # migrant
 
-A single-file bash VM management tool built on libvirt/QEMU/KVM. One script
-(`migrant`), one example VM config (`claude/`).
+A single-file bash VM management tool built on libvirt/QEMU/KVM. The `setup/`
+directory holds installer assets (libvirt hooks, network definition, zsh
+completion) needed only by the `setup` subcommand — every VM lifecycle command
+(`up`, `halt`, `destroy`, etc.) remains fully self-contained in the single
+script.
 
 ## Purpose
 
@@ -21,6 +24,9 @@ careful consideration. Key containment properties to preserve:
 ## Code style
 
 - Run `shellcheck migrant` after every change — must be clean
+- Run `shellcheck setup/qemu-hook setup/loop-hook setup/network-hook` after
+  changes to any of them — must be clean (`setup/network.xml` and
+  `setup/_migrant` are not shell and are not shellchecked)
 - Run `uvx ansible-lint arch/playbook.yml ubuntu/playbook.yml debian/playbook.yml` after changes to any playbook
 - The script uses `set -euo pipefail`; follow these patterns:
   - Empty array expansion: `"${ARRAY[@]+"${ARRAY[@]}"}"`

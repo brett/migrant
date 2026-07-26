@@ -1,0 +1,106 @@
+#!/bin/bash
+# Managed by migrant
+
+VM_NAME="$1"
+OPERATION="$2"
+
+# All stderr goes to a persistent log file. libvirtd does not reliably forward
+# hook stderr to the journal, so this is the only reliable debug channel.
+mkdir -p /run/migrant
+exec 2>>/run/migrant/hook.log
+
+hook_log() {
+  echo "$(date --iso-8601=seconds) [$VM_NAME $OPERATION] $*" >&2
+}
+
+hook_log "loop-hook start"
+
+# Read the domain XML from stdin. libvirt pipes it to the hook for every
+# operation, so this is always available — unlike the persistent XML file,
+# which may not exist yet when the hook fires during initial virt-install.
+# (Never call virsh here: hooks run while libvirtd holds the per-domain lock,
+# so calling virsh against the same domain deadlocks.)
+local_xml=$(mktemp)
+trap 'rm -f "$local_xml"' EXIT
+cat > "$local_xml"
+grep -q "managed-by=migrant" "$local_xml" || exit 0
+
+# Check if shared folder isolation is disabled.
+[[ -f "/etc/migrant/${VM_NAME}/shared-folder-isolation-disabled" ]] && exit 0
+
+# Extract the source directory for each virtiofs filesystem from the domain XML.
+# python3 is used for robust XML parsing; it is available on all target systems.
+virtiofs_sources() {
+  python3 - "$local_xml" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
+tree = ET.parse(sys.argv[1])
+for fs in tree.findall('.//filesystem'):
+    drv = fs.find('driver')
+    if drv is not None and drv.get('type') == 'virtiofs':
+        src = fs.find('source')
+        if src is not None and src.get('dir'):
+            print(src.get('dir'))
+PYEOF
+}
+
+mount_shared_folders() {
+  local sources=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && sources+=("$line")
+  done < <(virtiofs_sources)
+
+  if [[ ${#sources[@]} -eq 0 ]]; then
+    hook_log "no virtiofs filesystems found in $local_xml"
+    return
+  fi
+
+  for source_dir in "${sources[@]}"; do
+    local img_path="${source_dir%/}.img"
+
+    if [[ ! -f "$img_path" ]]; then
+      # Image absent despite isolation being enabled. Refuse to start rather
+      # than silently serve an unprotected directory — the user opted into
+      # isolation and must not be left thinking it is in effect when it is not.
+      # A non-zero exit from a prepare hook causes libvirt to abort VM startup.
+      hook_log "error: shared folder image not found: $img_path"
+      hook_log "run 'migrant up' to recreate it"
+      exit 1
+    fi
+
+    if mountpoint -q "$source_dir" 2>/dev/null; then
+      hook_log "$source_dir already mounted"
+      continue
+    fi
+
+    mkdir -p "$source_dir"
+    if mount -o loop,nosymfollow "$img_path" "$source_dir"; then
+      hook_log "mounted $img_path at $source_dir"
+    else
+      hook_log "failed to mount $img_path at $source_dir"
+    fi
+  done
+}
+
+unmount_shared_folders() {
+  local sources=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && sources+=("$line")
+  done < <(virtiofs_sources)
+
+  for source_dir in "${sources[@]}"; do
+    if mountpoint -q "$source_dir" 2>/dev/null; then
+      if umount "$source_dir"; then
+        hook_log "unmounted $source_dir"
+      else
+        hook_log "failed to unmount $source_dir"
+      fi
+    else
+      hook_log "$source_dir not mounted, skipping"
+    fi
+  done
+}
+
+case "$OPERATION" in
+  prepare) mount_shared_folders ;;
+  release) unmount_shared_folders ;;
+esac
