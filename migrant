@@ -910,6 +910,10 @@ libvirt_conf_dir() {
 }
 
 cmd_setup() {
+  if [[ -n "${MIGRANT_SETUP_COMMAND:-}" ]]; then
+    exec "$MIGRANT_SETUP_COMMAND"
+  fi
+
   local qemu_hook network_hook
   qemu_hook="$(libvirt_conf_dir)/hooks/qemu.d/migrant"
   network_hook="$(libvirt_conf_dir)/hooks/network.d/migrant"
