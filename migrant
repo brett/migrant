@@ -1514,8 +1514,11 @@ cmd_tz() {
   require_running
   local tz="${1:-}"
   if [[ -z "$tz" ]]; then
-    tz=$(readlink /etc/localtime || true)
-    tz=${tz#/usr/share/zoneinfo/}
+    tz=$(readlink -f /etc/localtime || true)
+    tz=${tz##*/zoneinfo/}
+    if [[ "$tz" == /* ]]; then
+      tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    fi
   fi
   if [[ -z "$tz" ]]; then
     echo "[ERROR] Could not determine host timezone." >&2
