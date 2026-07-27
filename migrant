@@ -299,7 +299,8 @@ verify_shared_folder_mounts() {
 
 ensure_shared_folder_images() {
   shared_folder_isolation_enabled || return 0
-  local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
+  local loop_hook
+  loop_hook="$(libvirt_conf_dir)/hooks/qemu.d/migrant-loop"
   if [[ ! -f "$loop_hook" ]]; then
     echo "[ERROR] shared folder isolation is enabled but the loop image hook is not installed." >&2
     echo "  Run 'migrant setup' first, then re-run this command." >&2
@@ -904,9 +905,18 @@ resolve_setup_dir() {
   echo "$dir"
 }
 
+libvirt_conf_dir() {
+  echo "${LIBVIRT_CONF_DIR:-/etc/libvirt}"
+}
+
 cmd_setup() {
-  local qemu_hook="/etc/libvirt/hooks/qemu.d/migrant"
-  local network_hook="/etc/libvirt/hooks/network.d/migrant"
+  if [[ -n "${MIGRANT_SETUP_COMMAND:-}" ]]; then
+    exec "$MIGRANT_SETUP_COMMAND"
+  fi
+
+  local qemu_hook network_hook
+  qemu_hook="$(libvirt_conf_dir)/hooks/qemu.d/migrant"
+  network_hook="$(libvirt_conf_dir)/hooks/network.d/migrant"
 
   local setup_dir
   setup_dir=$(resolve_setup_dir)
@@ -972,7 +982,8 @@ cmd_setup() {
   fi
 
   # --- firewall backend ---
-  local network_conf="/etc/libvirt/network.conf"
+  local network_conf
+  network_conf="$(libvirt_conf_dir)/network.conf"
   local current_backend
   current_backend=$(grep -oP '(?<=^firewall_backend = ")[^"]+' "$network_conf" 2>/dev/null || echo "")
   if [[ -z "$current_backend" ]]; then
@@ -1011,7 +1022,8 @@ cmd_setup() {
   fi
 
   # --- qemu hook (loop image mount/unmount) ---
-  local loop_hook="/etc/libvirt/hooks/qemu.d/migrant-loop"
+  local loop_hook
+  loop_hook="$(libvirt_conf_dir)/hooks/qemu.d/migrant-loop"
 
   if [[ -f "$loop_hook" ]] && cmp -s "$setup_dir/loop-hook" "$loop_hook"; then
     printf '%-*s%s\n' "$kw" "loop hook:" "ok"
@@ -1514,8 +1526,11 @@ cmd_tz() {
   require_running
   local tz="${1:-}"
   if [[ -z "$tz" ]]; then
-    tz=$(readlink /etc/localtime || true)
-    tz=${tz#/usr/share/zoneinfo/}
+    tz=$(readlink -f /etc/localtime || true)
+    tz=${tz##*/zoneinfo/}
+    if [[ "$tz" == /* ]]; then
+      tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    fi
   fi
   if [[ -z "$tz" ]]; then
     echo "[ERROR] Could not determine host timezone." >&2
