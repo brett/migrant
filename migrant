@@ -8,14 +8,19 @@ set -euo pipefail
 # connect to the session daemon and fail with permission errors.
 export LIBVIRT_DEFAULT_URI="qemu:///system"
 
+# Tilde in an env var override is not expanded by the shell when the variable
+# is set via a prefix (e.g. MIGRANT_DIR='~/foo' cmd), so every overridable
+# path routes through this to expand '~' manually.
+expand_home() {
+  echo "${1/#\~/$HOME}"
+}
+
 SUBCOMMAND="${1:-}"
-MANAGED_KEY_PATH="$HOME/.ssh/migrant"
+MANAGED_KEY_PATH="$(expand_home "${MIGRANT_KEY_PATH:-$HOME/.ssh/migrant}")"
 
 # Resolve the VM directory: MIGRANT_DIR env var takes precedence over CWD.
-# Tilde in MIGRANT_DIR is expanded manually because it is not expanded when
-# the variable is set via an env var prefix (e.g. MIGRANT_DIR='~/foo' cmd).
 if [[ -n "${MIGRANT_DIR:-}" ]]; then
-  _migrant_dir="${MIGRANT_DIR/#~/$HOME}"
+  _migrant_dir="$(expand_home "$MIGRANT_DIR")"
   VM_DIR="$(realpath "$_migrant_dir")"
 else
   VM_DIR="$(pwd)"
@@ -23,8 +28,8 @@ fi
 
 CONFIG_FILE="$VM_DIR/Migrantfile"
 CLOUD_INIT_FILE="$VM_DIR/cloud-init.yml"
-IMAGES_DIR="/var/lib/libvirt/images"
-ZSH_SITE_FUNCTIONS="/usr/share/zsh/site-functions"
+IMAGES_DIR="$(expand_home "${LIBVIRT_IMAGES_DIR:-/var/lib/libvirt/images}")"
+ZSH_SITE_FUNCTIONS="$(expand_home "${MIGRANT_ZSH_SITE_FUNCTIONS:-/usr/share/zsh/site-functions}")"
 
 usage() {
   cat >&2 <<'EOF'
@@ -881,7 +886,7 @@ install_hook() {
 resolve_setup_dir() {
   local dir
   if [[ -n "${MIGRANT_SETUP_DIR:-}" ]]; then
-    dir="$MIGRANT_SETUP_DIR"
+    dir="$(expand_home "$MIGRANT_SETUP_DIR")"
   else
     dir="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/setup"
   fi
@@ -906,7 +911,7 @@ resolve_setup_dir() {
 }
 
 libvirt_conf_dir() {
-  echo "${LIBVIRT_CONF_DIR:-/etc/libvirt}"
+  expand_home "${LIBVIRT_CONF_DIR:-/etc/libvirt}"
 }
 
 cmd_setup() {

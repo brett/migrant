@@ -156,12 +156,14 @@ migrant setup
 This configures everything needed to use migrant: enables the libvirtd and
 virtlogd sockets, adds your user to the `libvirt` group, detects the host
 firewall backend (iptables or nftables) and updates `/etc/libvirt/network.conf`
-to match, defines the `migrant` NAT network, creates the images directory with
+to match, defines the `migrant` NAT network, creates the images directory
+(`/var/lib/libvirt/images`, or `LIBVIRT_IMAGES_DIR` if set) with
 group-writable permissions, installs three libvirt hooks (network isolation and
 WireGuard tunnel management, shared folder loop image mount/unmount, and
 `rp_filter` for the `linux-hardened` kernel), creates `/etc/migrant/` for
-managed VM configs, and installs ZSH completions if `$ZSH_SITE_FUNCTIONS`
-is set.
+managed VM configs, and installs ZSH completions if the destination directory
+(`/usr/share/zsh/site-functions`, or `MIGRANT_ZSH_SITE_FUNCTIONS` if set)
+exists.
 
 If your user was not already in the `libvirt` group, setup will add it and then
 fail — the group change is not live in the current session. Log out and back in
@@ -418,7 +420,8 @@ migrant can manage a dedicated passphrase-less SSH key at
 `~/.ssh/migrant`, shared across all VMs that use it. This is detected
 automatically: if `cloud-init.yml` contains a key whose comment is
 `migrant`, migrant uses `~/.ssh/migrant` exclusively for SSH
-connections (`IdentitiesOnly=yes`).
+connections (`IdentitiesOnly=yes`). Set `MIGRANT_KEY_PATH` to use a
+different path.
 
 First-time setup:
 
