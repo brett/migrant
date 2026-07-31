@@ -415,6 +415,43 @@ canonical_ipv4() {
   printf '%s.%s.%s.%s' "${out[@]}"
 }
 
+# Guest ports that already have an owner on the gateway: dnsmasq answers DHCP
+# there, and the WireGuard DNS DNAT is appended after the host-access rules, so
+# a forward-port on 53 would sit above it and take the guest's DNS out of the
+# tunnel. Rejected whether or not this VM has WireGuard today, since a config
+# that breaks when a tunnel is added later is worse than one never accepted.
+RESERVED_GUEST_PORTS=(53 67 68)
+
+# One owner per guest proto/port. Two entries claiming the same one install two
+# rules, and which of them the guest reaches is decided by insertion order.
+declare -A _CLAIMED_ENDPOINTS=()
+claim_guest_endpoint() {
+  local key="$1" rule="$2"
+  if [[ -n "${_CLAIMED_ENDPOINTS[$key]:-}" ]]; then
+    echo "[ERROR] two HOST_ACCESS entries claim guest port ${key}:" >&2
+    echo "    ${_CLAIMED_ENDPOINTS[$key]}" >&2
+    echo "    ${rule}" >&2
+    exit 65  # EX_DATAERR
+  fi
+  _CLAIMED_ENDPOINTS[$key]="$rule"
+}
+
+# A forward-port target has to be an address the host routes to. These are not:
+# they are locally delivered, undeliverable, or the guest's own subnet, where a
+# mapping would create a surprising hairpin.
+forward_port_target_ok() {
+  local ip="$1"
+  case "$ip" in
+    127.*)             return 1 ;;  # loopback; would need route_localnet
+    0.*)               return 1 ;;  # "this network"
+    255.255.255.255)   return 1 ;;  # broadcast
+    192.168.200.*)     return 1 ;;  # the guest's own subnet
+  esac
+  local first="${ip%%.*}"
+  (( 10#$first >= 224 )) && return 1  # multicast and reserved
+  return 0
+}
+
 # A shared folder that contains the VM's hooks directory is guest->host code
 # execution: the guest writes hooks/pre-up and migrant runs it, as the invoking
 # user, on the next up.
@@ -518,16 +555,78 @@ sync_managed_config() {
   # --- host access rules ---
   if [[ "$has_host_access" == true ]]; then
     local rules_content=""
+    _CLAIMED_ENDPOINTS=()
     for rule in "${HOST_ACCESS[@]}"; do
       case "$rule" in
         allow-host-port\ tcp/*|allow-host-port\ udp/*)
-          local port="${rule##*/}"
+          local spec="${rule#allow-host-port }"
+          local port="${spec##*/}"
           if ! is_valid_port "$port"; then
             echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
             echo "  allow-host-port requires a port number between 1 and 65535." >&2
             exit 65  # EX_DATAERR
           fi
+          claim_guest_endpoint "${spec%%/*}/$(( 10#$port ))" "$rule"
           rules_content+="${rule}"$'\n'
+          ;;
+        forward-port\ *)
+          local -a fp=()
+          read -ra fp <<< "$rule"
+          local fp_spec="${fp[1]:-}" fp_target="${fp[2]:-}" fp_mod="${fp[3]:-}"
+          local fp_proto="${fp_spec%%/*}" fp_gport="${fp_spec#*/}"
+          local fp_ip="${fp_target%:*}" fp_rport="${fp_target##*:}"
+          local fp_canon=""
+
+          if (( ${#fp[@]} < 3 || ${#fp[@]} > 4 )) \
+              || [[ "$fp_spec" != */* || "$fp_target" != *:* ]]; then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  Expected: forward-port <proto>/<guest-port> <ip>:<remote-port> [via-tunnel]" >&2
+            exit 65  # EX_DATAERR
+          fi
+          if [[ "$fp_proto" != tcp && "$fp_proto" != udp ]]; then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  forward-port protocol must be tcp or udp." >&2
+            exit 65  # EX_DATAERR
+          fi
+          if ! is_valid_port "$fp_gport" || ! is_valid_port "$fp_rport"; then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  forward-port requires port numbers between 1 and 65535." >&2
+            exit 65  # EX_DATAERR
+          fi
+          local reserved
+          for reserved in "${RESERVED_GUEST_PORTS[@]}"; do
+            if (( 10#$fp_gport == reserved )); then
+              echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+              echo "  Guest port $reserved is reserved: DHCP and DNS are answered on" >&2
+              echo "  the gateway, and a forward-port there would take the guest's DNS" >&2
+              echo "  out of a WireGuard tunnel." >&2
+              exit 65  # EX_DATAERR
+            fi
+          done
+          if ! fp_canon=$(canonical_ipv4 "$fp_ip") \
+              || ! forward_port_target_ok "$fp_canon"; then
+            echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+            echo "  forward-port needs a unicast IPv4 address the host can route to," >&2
+            echo "  not loopback, multicast, broadcast, or the guest's own subnet." >&2
+            exit 65  # EX_DATAERR
+          fi
+          if [[ -n "$fp_mod" ]]; then
+            if [[ "$fp_mod" != via-tunnel ]]; then
+              echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+              echo "  The only modifier is 'via-tunnel'." >&2
+              exit 65  # EX_DATAERR
+            fi
+            if [[ "$has_wireguard" != true ]]; then
+              echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
+              echo "  via-tunnel needs a wireguard.conf; without one there is no tunnel" >&2
+              echo "  for the target to be inside of." >&2
+              exit 65  # EX_DATAERR
+            fi
+          fi
+
+          claim_guest_endpoint "${fp_proto}/$(( 10#$fp_gport ))" "$rule"
+          rules_content+="forward-port ${fp_proto}/$(( 10#$fp_gport ))"
+          rules_content+=" ${fp_canon}:$(( 10#$fp_rport ))${fp_mod:+ $fp_mod}"$'\n'
           ;;
         allow-lan-host\ *)
           local host_ip canonical
@@ -541,7 +640,8 @@ sync_managed_config() {
           ;;
         *)
           echo "[ERROR] unrecognized HOST_ACCESS directive: $rule" >&2
-          echo "  Valid directives: allow-host-port <proto/port>, allow-lan-host <ip>" >&2
+          echo "  Valid directives: allow-host-port <proto/port>, allow-lan-host <ip>," >&2
+          echo "  forward-port <proto/guest-port> <ip>:<remote-port> [via-tunnel]" >&2
           exit 65  # EX_DATAERR
           ;;
       esac

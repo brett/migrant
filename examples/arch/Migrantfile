@@ -68,6 +68,7 @@ AUTOCONNECT=ssh
 #HOST_ACCESS=(
 #  "allow-host-port tcp/8080"        # VM can reach host:8080
 #  "allow-lan-host 192.168.1.50"     # VM can reach a specific LAN host
+#  "forward-port tcp/8081 10.0.0.5:80"  # VM reaches 10.0.0.5:80 as gateway:8081
 #)
 
 # Local SSH port-forwards opened by `migrant tunnel`. Each entry is a port

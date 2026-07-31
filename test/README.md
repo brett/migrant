@@ -25,6 +25,9 @@ Run from any example VM directory (e.g. `cd examples/arch && ../../test/test-hoo
 - **test-multi-nic.sh** — a VM with two NICs: every per-tap rule reaches every
   tap, the shared per-VM chain is filled once rather than once per tap, and
   teardown clears both. Needs `sudo` to read the rules
+- **test-forward-port.sh** — the `forward-port` directive: the mapping reaches
+  the target through the gateway and by no other route. Needs `sudo` to stand
+  up a routed target in a network namespace
 - **test-shared-folder.sh** — shared folder isolation: the loop image is
   mounted with `nosymfollow` and recorded, and the VM refuses to start when the
   image will not mount or the mount point is backed by something else. Needs

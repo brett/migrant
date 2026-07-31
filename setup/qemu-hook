@@ -209,15 +209,34 @@ vm_block_mac() {
 
 # Parsed once per VM, then applied to every tap.
 ha_parse() {
-  HA_PORTS=(); HA_LAN=()
-  local file="/etc/migrant/${1}/host-access" rule
+  HA_PORTS=(); HA_LAN=(); HA_FWD=(); HA_FWD_TUNNELED=()
+  local file="/etc/migrant/${1}/host-access" rule entry
   [[ -f "$file" ]] || return 0
   while IFS= read -r rule; do
     case "$rule" in
       allow-host-port\ *) HA_PORTS+=("${rule#allow-host-port }") ;;
       allow-lan-host\ *)  HA_LAN+=("${rule#allow-lan-host }") ;;
+      # "<proto>/<guest-port> <ip>:<remote-port>", with the via-tunnel modifier
+      # kept separately: it selects a route, never a rule.
+      forward-port\ *)
+        entry="${rule#forward-port }"
+        case "$entry" in
+          *\ via-tunnel) HA_FWD_TUNNELED+=("${entry% via-tunnel}") ;;
+          *)             HA_FWD+=("$entry") ;;
+        esac
+        ;;
     esac
   done < "$file"
+}
+
+# Split "<proto>/<guest-port> <ip>:<remote-port>" into the caller's proto,
+# gport, tip and tport. Every field was validated and canonicalised by
+# sync_managed_config; a malformed one here means the file was hand-edited.
+fwd_parse() {
+  local spec="${1%% *}" target="${1##* }"
+  proto="${spec%%/*}"; gport="${spec#*/}"
+  tip="${target%:*}";  tport="${target##*:}"
+  [[ -n "$proto" && -n "$gport" && -n "$tip" && -n "$tport" ]]
 }
 
 ipv4_to_int() {
@@ -356,8 +375,22 @@ wg_setup_iface() {
   # receives them. A /32 always wins over the default in the same table, so
   # all other traffic still exits through WireGuard unaffected.
   ha_parse "$vm"
+
+  # forward-port targets need the same exclusion: the mangle mark is applied in
+  # PREROUTING before the nat DNAT rewrites the destination, so the routing
+  # decision is taken against the target inside WG_TABLE, where the only route
+  # is the tunnel default. via-tunnel entries are omitted deliberately -- for
+  # those the tunnel is where the target lives.
+  local -a excl=("${HA_LAN[@]+"${HA_LAN[@]}"}")
+  local fwd proto gport tip tport
+  for fwd in "${HA_FWD[@]+"${HA_FWD[@]}"}"; do
+    if fwd_parse "$fwd"; then
+      excl+=("$tip")
+    fi
+  done
+
   local host_ip route_info route_dev route_via
-  for host_ip in "${HA_LAN[@]+"${HA_LAN[@]}"}"; do
+  for host_ip in "${excl[@]+"${excl[@]}"}"; do
     route_info=$(ip route get "$host_ip" 2>/dev/null | head -1) || true
     route_dev=$(printf '%s' "$route_info" \
       | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
@@ -593,7 +626,7 @@ require_bridge_netfilter() {
 # re-reads /etc/migrant — that holds the current Migrantfile, which may have
 # been edited since the VM started. Facts are written before the rule they
 # describe; a rule with no record strands on a tap name libvirt will reuse.
-STATE_VERSION_CURRENT=1
+STATE_VERSION_CURRENT=2
 
 state_begin() {
   STATE_FILE="/run/migrant/${1}.state"
@@ -608,6 +641,7 @@ state_add() {
 state_reset() {
   STATE_VERSION=""
   STATE_TAPS=(); STATE_MACS=(); STATE_HOST_PORTS=(); STATE_LAN_HOSTS=(); STATE_WG_DNS=()
+  STATE_FWD_PORTS=()
   STATE_ISOLATION=false
   STATE_IPV6_POLICY=""
   STATE_IPV6_INPUT=false
@@ -632,6 +666,7 @@ state_load() {
       route_localnet) STATE_RLNET="$val" ;;
       host_port)      STATE_HOST_PORTS+=("$val") ;;
       lan_host)       STATE_LAN_HOSTS+=("$val") ;;
+      forward_port)   STATE_FWD_PORTS+=("$val") ;;
       wg_applied)     STATE_WG_APPLIED="$val" ;;
       wg_dns)         STATE_WG_DNS+=("$val") ;;
       wg_dnat_target) STATE_WG_DNAT_TARGET="$val" ;;
@@ -661,6 +696,7 @@ state_assume_legacy() {
   ha_parse "$vm"
   STATE_HOST_PORTS=("${HA_PORTS[@]+"${HA_PORTS[@]}"}")
   STATE_LAN_HOSTS=("${HA_LAN[@]+"${HA_LAN[@]}"}")
+  STATE_FWD_PORTS=("${HA_FWD[@]+"${HA_FWD[@]}"}" "${HA_FWD_TUNNELED[@]+"${HA_FWD_TUNNELED[@]}"}")
   if (( ${#STATE_HOST_PORTS[@]} + ${#STATE_LAN_HOSTS[@]} > 0 )); then
     hook_log "$vm" "host-access rules reconstructed from current config; entries removed since start may survive teardown"
   fi
@@ -723,6 +759,22 @@ apply_tap_rules() {
     for entry in "${HA_LAN[@]+"${HA_LAN[@]}"}"; do
       rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" \
         -d "${entry}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    done
+
+    local fwd proto gport tip tport
+    for fwd in "${HA_FWD[@]+"${HA_FWD[@]}"}" "${HA_FWD_TUNNELED[@]+"${HA_FWD_TUNNELED[@]}"}"; do
+      fwd_parse "$fwd" || continue
+      rule_set iptables nat PREROUTING "" -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" -p "$proto" --dport "$gport" \
+        -j DNAT --to-destination "${tip}:${tport}"
+      # Matched on the conntrack entry's original destination -- what the guest
+      # addressed before the DNAT rewrote it. Without that, this equally accepts
+      # a packet sent straight to the target, and since the ACCEPT sits above
+      # the REJECTs above, the mapping would not be the only way in.
+      rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" \
+        -d "${tip}/32" -p "$proto" --dport "$tport" \
+        -m conntrack --ctdir ORIGINAL --ctstate NEW,ESTABLISHED \
+        --ctorigdst "$BRIDGE_GATEWAY" --ctorigdstport "$gport" -j ACCEPT
     done
 
     # ICMPv6 policy, decided at the top of INPUT. libvirt's LIBVIRT_INP accepts
@@ -864,6 +916,10 @@ apply_rules() {
       state_add lan_host "$entry"
       hook_log "$vm" "host-access: allow-lan-host $entry"
     done
+    for entry in "${HA_FWD[@]+"${HA_FWD[@]}"}" "${HA_FWD_TUNNELED[@]+"${HA_FWD_TUNNELED[@]}"}"; do
+      state_add forward_port "$entry"
+      hook_log "$vm" "host-access: forward-port $entry"
+    done
 
     state_add ipv6_input true
   fi
@@ -934,6 +990,18 @@ remove_tap_rules() {
     for entry in "${STATE_LAN_HOSTS[@]+"${STATE_LAN_HOSTS[@]}"}"; do
       rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" \
         -d "${entry}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    done
+
+    local proto gport tip tport
+    for entry in "${STATE_FWD_PORTS[@]+"${STATE_FWD_PORTS[@]}"}"; do
+      fwd_parse "$entry" || continue
+      rule_remove iptables nat PREROUTING -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" -p "$proto" --dport "$gport" \
+        -j DNAT --to-destination "${tip}:${tport}"
+      rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" \
+        -d "${tip}/32" -p "$proto" --dport "$tport" \
+        -m conntrack --ctdir ORIGINAL --ctstate NEW,ESTABLISHED \
+        --ctorigdst "$BRIDGE_GATEWAY" --ctorigdstport "$gport" -j ACCEPT
     done
 
     rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
