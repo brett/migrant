@@ -693,13 +693,19 @@ apply_tap_rules() {
     # this rule is evaluated before LIBVIRT_INP.
     rule_set iptables "" INPUT "" -m physdev --physdev-in "$iface" -p icmp -j REJECT
 
-    # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
-    # so VMs cannot communicate with each other over the shared bridge).
+    # Block the VM from private, shared and link-local destinations, including
+    # the libvirt subnet itself so VMs cannot reach each other over the shared
+    # bridge. Not comprehensive LAN isolation: private infrastructure can use
+    # globally routable prefixes, which no static list identifies. Shared
+    # address space carries overlay and carrier networks; link-local carries
+    # the metadata address. Both mirror what the IPv6 side already rejects.
     # These are inserted first so that allow-lan-host ACCEPTs, inserted
     # immediately after, end up above the REJECTs in the chain.
     rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
     rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
     rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 100.64.0.0/10 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 169.254.0.0/16 -j REJECT
 
     local entry
     for entry in "${HA_PORTS[@]+"${HA_PORTS[@]}"}"; do
@@ -933,6 +939,8 @@ remove_tap_rules() {
     rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
     rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
     rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 100.64.0.0/10 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 169.254.0.0/16 -j REJECT
   fi
 
   if [[ "$STATE_IPV6_INPUT" == true ]]; then

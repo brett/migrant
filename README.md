@@ -571,8 +571,13 @@ in a `Migrantfile` to opt out. When active, iptables rules are added that:
 - Block the VM from initiating new connections to the host (DNS and DHCP
   responses from the host are still delivered, as those are tracked as
   existing connections)
-- Block the VM from reaching RFC 1918 addresses on the local network,
-  other than the libvirt subnet itself (192.168.200.0/24)
+- Block the VM from reaching private (RFC 1918), shared (`100.64.0.0/10`) and
+  link-local (`169.254.0.0/16`) addresses, including the libvirt subnet itself
+  (192.168.200.0/24) so VMs cannot reach each other. Shared address space is
+  where overlay and mesh VPNs and carrier NAT allocate; link-local carries the
+  `169.254.169.254` metadata address. This is not comprehensive LAN isolation —
+  private infrastructure can use globally routable prefixes, which no static
+  list of special-use ranges identifies
 - Drop all IPv6 *egress* from the VM at the `FORWARD` chain by default (the
   libvirt network provides no routable IPv6 to VMs). Opt a VM in to IPv6 egress
   with `NETWORK_IPV6=nat` — see [IPv6 (NAT66)](#ipv6-nat66) below
@@ -596,6 +601,16 @@ and reject the guest's own DHCP and DNS. `migrant setup` sets
 `firewall_backend = "iptables"` in `/etc/libvirt/network.conf` and restarts
 libvirtd; this applies to every libvirt network on the host, not just
 `migrant`.
+
+These rules govern *forwarded* traffic. A host address inside one of these
+ranges is delivered locally, and guest→host is blocked by the per-VM `INPUT`
+chain instead — not by the rules above.
+
+**Upgrading:** a migrant that rejected only RFC 1918 let a VM reach overlay and
+mesh VPN peers without declaring them, so such a VM loses that access when the
+hook is updated. Name the address with `allow-lan-host <ip>` to restore it.
+Reaching every peer the host can route to, on every port, is the more
+surprising default for a sandbox holding an agent you do not trust.
 
 Two limits worth knowing. The rules are scoped by `physdev`, which matches a
 bridge port, so a NIC attached some other way — macvtap, for instance — is not
