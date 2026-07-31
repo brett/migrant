@@ -573,9 +573,13 @@ in a `Migrantfile` to opt out. When active, iptables rules are added that:
   existing connections)
 - Block the VM from reaching RFC 1918 addresses on the local network,
   other than the libvirt subnet itself (192.168.200.0/24)
-- Drop all IPv6 from the VM at the `FORWARD` chain by default (the libvirt
-  network provides no routable IPv6 to VMs). Opt a VM in to IPv6 egress with
-  `NETWORK_IPV6=nat` — see [IPv6 (NAT66)](#ipv6-nat66) below
+- Drop all IPv6 *egress* from the VM at the `FORWARD` chain by default (the
+  libvirt network provides no routable IPv6 to VMs). Opt a VM in to IPv6 egress
+  with `NETWORK_IPV6=nat` — see [IPv6 (NAT66)](#ipv6-nat66) below
+- Block the VM from initiating new IPv6 connections to the host, in every IPv6
+  mode. The bridge always carries a ULA, and guest→host traffic to it is locally
+  delivered to `INPUT` rather than `FORWARD`, so the egress drop above does not
+  cover it
 
 The rules are removed automatically when the VM stops or is destroyed.
 This requires `migrant setup` to have been run to install the libvirt

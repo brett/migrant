@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run netcheck in isolation-only mode (no --host-port, no --lan-ip)
-migrant ssh -- 'uv run ~/netcheck.py --no-interactive'
+# Run netcheck in isolation-only mode (no --host-port, no --lan-ip).
+# --ipv6-host-port targets pre-up's listener; deliberately no --ipv6-nat, since
+# the guest->host IPv6 path exists in every IPv6 mode.
+migrant ssh -- 'uv run ~/netcheck.py --no-interactive --ipv6-host-port tcp/19999'
 
 # Additional manual check: verify the VM cannot reach the gateway on port 80.
 # In pure isolation mode this connection MUST fail — a successful connect

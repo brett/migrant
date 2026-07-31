@@ -449,13 +449,10 @@ apply_rules() {
     fi
   fi
 
-  # IPv6 egress policy for this VM.
-  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
-    # Opt-in NAT66 (NETWORK_IPV6=nat): give the VM IPv6 egress via the host's
-    # uplink, mirroring the IPv4 NAT. Requires the host to have working IPv6.
-    # The ULA MUST match the <ip family="ipv6"> block in the migrant network XML.
-    nat66_shared_setup "$vm"
-
+  # Guest->host IPv6. Not gated on NETWORK_IPV6: network.xml gives the bridge a
+  # ULA in every mode, and guest->host is locally delivered to INPUT, so the
+  # default mode's FORWARD DROP below does not cover it.
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
     # ICMPv6 policy, decided at the top of INPUT. libvirt's LIBVIRT_INP accepts
     # ICMPv6 wholesale (as it does ICMP for v4), so — like the IPv4 ICMP reject —
     # it must be settled above LIBVIRT_INP, not in the per-VM CHAIN6 below (which
@@ -473,32 +470,39 @@ apply_rules() {
         || ip6tables -I INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT
     done
 
+    # Per-VM INPUT chain: reject NEW, after LIBVIRT_INP so DHCPv6/DNS to dnsmasq
+    # still work. Mirrors the IPv4 per-VM CHAIN.
+    ip6tables -N "$CHAIN6" 2>/dev/null || ip6tables -F "$CHAIN6"
+    ip6tables -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
+    local inp6_pos
+    inp6_pos=$(ip6tables -L INPUT --line-numbers -n \
+               | awk '/LIBVIRT_INP/{print $1; exit}') || true
+    if [[ -n "$inp6_pos" ]]; then
+      ip6tables -I INPUT "$((inp6_pos + 1))" \
+        -m physdev --physdev-in "$iface" -j "$CHAIN6"
+    else
+      ip6tables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
+    fi
+  fi
+
+  # IPv6 egress policy for this VM.
+  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    # Opt-in NAT66 (NETWORK_IPV6=nat): give the VM IPv6 egress via the host's
+    # uplink, mirroring the IPv4 NAT. Requires the host to have working IPv6.
+    # The ULA MUST match the <ip family="ipv6"> block in the migrant network XML.
+    nat66_shared_setup "$vm"
+
     if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
       # Mirror the IPv4 RFC1918 REJECTs: block the VM from other VMs/LAN (all ULA
       # incl. our subnet, and link-local) in FORWARD; internet falls through.
       ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
       ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
-
-      # Block guest->host: the host's on-link ULA is locally delivered, so it hits
-      # INPUT and never the FORWARD rejects above — without this NAT66 leaves every
-      # host IPv6 service reachable, unlike IPv4. Mirrors the IPv4 per-VM CHAIN:
-      # reject NEW, after LIBVIRT_INP so DHCPv6/DNS to dnsmasq still work.
-      ip6tables -N "$CHAIN6" 2>/dev/null || ip6tables -F "$CHAIN6"
-      ip6tables -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
-      local inp6_pos
-      inp6_pos=$(ip6tables -L INPUT --line-numbers -n \
-                 | awk '/LIBVIRT_INP/{print $1; exit}') || true
-      if [[ -n "$inp6_pos" ]]; then
-        ip6tables -I INPUT "$((inp6_pos + 1))" \
-          -m physdev --physdev-in "$iface" -j "$CHAIN6"
-      else
-        ip6tables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
-      fi
     fi
   else
     # Default: the migrant network provides no routable IPv6 to VMs, so drop it.
     # This also stops IPv6 from bypassing NAT/WireGuard via the host's default
-    # IPv6 path (WireGuard fwmark policy routing is IPv4-only).
+    # IPv6 path (WireGuard fwmark policy routing is IPv4-only). FORWARD only —
+    # guest->host is CHAIN6 above.
     ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
   fi
 
@@ -557,10 +561,8 @@ remove_rules() {
     iptables -D FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
   fi
 
-  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
-    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT 2>/dev/null || true
-    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT 2>/dev/null || true
-
+  # Mirrors the guest->host IPv6 block in apply_rules — keep the guards in step.
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
     local icmp6_type
     for icmp6_type in 133 134 135 136 1 2 3 4; do
       ip6tables -D INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT 2>/dev/null || true
@@ -570,6 +572,13 @@ remove_rules() {
     ip6tables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6" 2>/dev/null || true
     ip6tables -F "$CHAIN6" 2>/dev/null || true
     ip6tables -X "$CHAIN6" 2>/dev/null || true
+  fi
+
+  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+      ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT 2>/dev/null || true
+      ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT 2>/dev/null || true
+    fi
 
     # Drop the shared MASQUERADE and restore forwarding once the last NAT66 VM is
     # gone (the per-VM rules above are always removed).

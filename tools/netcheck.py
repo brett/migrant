@@ -881,16 +881,17 @@ def _iso_rfc1918_192(ctx: Context) -> Result:
 
 @test("Isolation", "IPv6 host reachability (ULA gateway TCP)", expect="PASS")
 def _iso_ipv6_host_tcp(ctx: Context) -> Result:
-    """NAT66's real risk: the host's on-link ULA is locally delivered, so guest->
-    host traffic hits the host INPUT chain, not the FORWARD rejects. Probe a host
-    port that is deliberately listening (started by the VM's pre-up hook and
-    passed via --ipv6-host-port). CONNECTED proves the guest reached a host
-    service over IPv6 — the isolation hole. Any blocked outcome is PASS. A known
-    listener is required so a plain ECONNREFUSED (reached host, nothing bound)
-    can't masquerade as 'safely blocked'.
+    """The host's on-link ULA is locally delivered, so guest->host traffic hits
+    the host INPUT chain, not the FORWARD rejects. Probe a host port that is
+    deliberately listening (started by the VM's pre-up hook and passed via
+    --ipv6-host-port). CONNECTED proves the guest reached a host service over
+    IPv6 — the isolation hole. Any blocked outcome is PASS. A known listener is
+    required so a plain ECONNREFUSED (reached host, nothing bound) can't
+    masquerade as 'safely blocked'.
+
+    Applies in every IPv6 mode, not only NAT66: network.xml declares the ULA and
+    a DHCPv6 range unconditionally.
     """
-    if not ctx.args.ipv6_nat:
-        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
     if not ctx.args.ipv6_host_port:
         return Result("SKIP", "no --ipv6-host-port specified (skipped)")
     try:
@@ -910,14 +911,13 @@ def _iso_ipv6_host_tcp(ctx: Context) -> Result:
 
 @test("Isolation", "IPv6 host reachability (ICMPv6 echo)", expect="PASS")
 def _iso_ipv6_host_icmp(ctx: Context) -> Result:
-    """The IPv4 side rejects ping to the host; NAT66 must not be looser. Echo to
+    """The IPv4 side rejects ping to the host; IPv6 must not be looser. Echo to
     the ULA gateway must be blocked (only NDP/error ICMPv6 is permitted on-link).
+    Applies in every IPv6 mode — the guest holds a ULA regardless of NAT66.
     """
-    if not ctx.args.ipv6_nat:
-        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
     gw = _ula_gateway(ctx)
     if not gw:
-        return Result("FAIL", "no ULA gateway derivable — NAT66 guest has no ULA")
+        return Result("FAIL", "no ULA gateway derivable — guest has no ULA")
     r = run_tool("ping", ["-6", "-c", "1", "-W", "3", gw], timeout=8)
     if not r.available:
         return Result("SKIP", "ping not found")
@@ -969,16 +969,16 @@ def _primary_iface(vm_ips: dict[str, list[str]]) -> str | None:
     return None
 
 
-@test("Isolation", "IPv6 link-local gateway reachability", expect=None)
+@test("Isolation", "IPv6 link-local gateway reachability", expect="PASS")
 def _iso_ipv6_linklocal(ctx: Context) -> Result:
     """Probe the host's link-local (fe80::) IPv6 address on the VM's bridge segment.
     Link-local traffic does not traverse the FORWARD chain — it arrives at the
-    host's INPUT chain.  Reachability here means the host's ip6tables INPUT
-    rules govern exposure, not the FORWARD isolation rules.
+    host's INPUT chain, so the FORWARD isolation rules do not govern it.
+    Reaching a host service here is an isolation failure, not a diagnostic.
     """
     iface = _primary_iface(ctx.vm_ips)
     if not iface:
-        return Result("INFO", "no non-loopback interface found")
+        return Result("SKIP", "no non-loopback interface found")
 
     # Ping the all-nodes multicast address to populate the neighbor cache.
     run_tool("ping", ["-6", "-c", "2", "-W", "2", f"ff02::1%{iface}"], timeout=8)
@@ -993,13 +993,16 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
             fe80_neighbors.append(m.group(1))
 
     if not fe80_neighbors:
+        # Inconclusive, not safe: the ULA probe uses a known listener and is the
+        # authoritative guest->host IPv6 check.
         return Result(
-            "INFO",
-            "no fe80 neighbors discovered (neighbor cache empty)",
+            "SKIP",
+            "no fe80 neighbors discovered — inconclusive, see the ULA gateway check",
             detail=neigh_out.strip() or "(empty)",
         )
 
     findings: list[str] = []
+    connected = False
     for addr in fe80_neighbors:
         try:
             scope_id = socket.if_nametoindex(iface)
@@ -1007,6 +1010,7 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
                 sock.settimeout(3)
                 sock.connect((addr, 22, 0, scope_id))
             findings.append(f"{addr} :22 CONNECTED")
+            connected = True
         except ConnectionRefusedError:
             findings.append(f"{addr} :22 REJECTED (host reachable, no SSH listener)")
         except socket.timeout:
@@ -1014,7 +1018,10 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
         except OSError as exc:
             findings.append(f"{addr} :22 ERROR:{exc.errno}")
 
-    return Result("INFO", "; ".join(findings), detail=neigh_out.strip())
+    summary = "; ".join(findings)
+    if connected:
+        return Result("FAIL", summary, detail=neigh_out.strip())
+    return Result("PASS", summary, detail=neigh_out.strip())
 
 
 # ---------------------------------------------------------------------------
