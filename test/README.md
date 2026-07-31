@@ -12,7 +12,9 @@ Run from any example VM directory (e.g. `cd examples/arch && ../../test/test-hoo
 - **test-hooks.sh** — lifecycle hook execution, ordering, and environment
   variables
 - **test-managed-config.sh** — managed config files, HOST_ACCESS
-  validation, iptables rule creation and cleanup
+  validation, iptables rule creation and cleanup, `allow-host-port` DNAT
+  scoping, and the `route_localnet` refcount. The last of these creates a
+  second, short-lived VM named `<VM_NAME>-rl2` in a temp directory
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is
   consumed on read, absent file is a no-op
@@ -34,7 +36,7 @@ cd test/<config>
 
 | Config | What it tests |
 | ------ | ------------- |
-| `tcp-host-port/` | `allow-host-port tcp/9999` against a listener bound to `0.0.0.0` — covers the easy case |
+| `tcp-host-port/` | `allow-host-port tcp/9999` against a listener bound to `0.0.0.0` — covers the easy case, and that the port is mapped from the gateway only rather than hijacked from every address |
 | `udp-host-port/` | `allow-host-port udp/9999` — UDP listener on host, VM sends datagram through isolation |
 | `localhost-host-port/` | `allow-host-port tcp/9998` against a listener bound to **`127.0.0.1`** — exercises the DNAT leg |
 | `lan-host/` | `allow-lan-host` — VM reaches the host's default router (auto-detected) |

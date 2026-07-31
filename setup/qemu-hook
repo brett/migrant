@@ -37,6 +37,29 @@ _rule_argv() {
   RULE_CHAIN="$3"
 }
 
+# Host-global state (a shared sysctl, a shared MASQUERADE) is reference counted
+# by per-VM sentinel files so the last VM out restores the host. The lock spans
+# the whole read-modify-write, which the xtables lock cannot: two VMs could
+# otherwise both see themselves as the last one, or neither save the prior value.
+refdir_lock() {
+  mkdir -p "$1"
+  exec {REFDIR_LOCK_FD}>"$1/.lock"
+  flock "$REFDIR_LOCK_FD"
+}
+
+refdir_unlock() {
+  flock -u "$REFDIR_LOCK_FD" 2>/dev/null || true
+  exec {REFDIR_LOCK_FD}>&- 2>/dev/null || true
+}
+
+# True while another VM holds a reference. Sentinels are VM names; the dotfiles
+# are bookkeeping.
+refdir_in_use() {
+  local remaining
+  remaining=$(find "$1" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | head -1) || true
+  [[ -n "$remaining" ]]
+}
+
 # Delete every copy of a rule. Best-effort: teardown continues regardless.
 rule_remove() {
   local n=0
@@ -421,27 +444,15 @@ wg_teardown() {
 # shared by every NAT66 VM and can't be scoped to a tap. Reference-count their
 # users via sentinel files so they are added on the first VM and reverted on the
 # last — otherwise they outlive the sandbox and leave the host more permissive.
+# MUST match <ip address=...> in the migrant network XML.
+BRIDGE_GATEWAY="192.168.200.1"
+
 NAT66_ULA="fdca:6d16:2b1a::/64"
 NAT66_REFDIR="/run/migrant/nat66"
 
-# The refcount, .fwd-prev, the shared MASQUERADE and a global sysctl are read
-# and rewritten as one transition, so concurrent VMs must not interleave here:
-# both could see themselves as the last one out. The xtables lock is per
-# command and does not cover the sequence.
-nat66_lock() {
-  mkdir -p "$NAT66_REFDIR"
-  exec {NAT66_LOCK_FD}>"$NAT66_REFDIR/.lock"
-  flock "$NAT66_LOCK_FD"
-}
-
-nat66_unlock() {
-  flock -u "$NAT66_LOCK_FD" 2>/dev/null || true
-  exec {NAT66_LOCK_FD}>&- 2>/dev/null || true
-}
-
 nat66_shared_setup() {
   local vm="$1"
-  nat66_lock
+  refdir_lock "$NAT66_REFDIR"
 
   # Save the host's prior forwarding value once so the last teardown restores it
   # exactly, rather than blindly zeroing a host that legitimately forwards IPv6.
@@ -457,20 +468,15 @@ nat66_shared_setup() {
     || ip6tables -w -t nat -A POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE
 
   touch "$NAT66_REFDIR/$vm"
-  nat66_unlock
+  refdir_unlock
 }
 
 nat66_shared_teardown() {
   local vm="$1"
-  nat66_lock
+  refdir_lock "$NAT66_REFDIR"
   rm -f "$NAT66_REFDIR/$vm"
-
-  # Revert only once no NAT66 VM remains (sentinels are VM names; .fwd-prev and
-  # .lock are dotfiles, excluded here).
-  local remaining
-  remaining=$(find "$NAT66_REFDIR" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | head -1) || true
-  if [[ -n "$remaining" ]]; then
-    nat66_unlock
+  if refdir_in_use "$NAT66_REFDIR"; then
+    refdir_unlock
     return 0
   fi
 
@@ -479,7 +485,41 @@ nat66_shared_teardown() {
   prev=$(cat "$NAT66_REFDIR/.fwd-prev" 2>/dev/null) || prev=0
   sysctl -w "net.ipv6.conf.all.forwarding=${prev:-0}" >/dev/null 2>&1 || true
   rm -f "$NAT66_REFDIR/.fwd-prev"
-  nat66_unlock
+  refdir_unlock
+}
+
+# route_localnet is a property of the shared bridge, not of one VM, so it is
+# reference counted the same way: set for the first VM that needs it, restored
+# to the host's prior value once the last one stops.
+RLNET_REFDIR="/run/migrant/route-localnet"
+RLNET_SYSCTL="net.ipv4.conf.virbr-migrant.route_localnet"
+
+rlnet_acquire() {
+  local vm="$1"
+  refdir_lock "$RLNET_REFDIR"
+  if [[ ! -f "$RLNET_REFDIR/.prev" ]]; then
+    sysctl -n "$RLNET_SYSCTL" > "$RLNET_REFDIR/.prev" 2>/dev/null \
+      || echo 0 > "$RLNET_REFDIR/.prev"
+  fi
+  sysctl -w "${RLNET_SYSCTL}=1" >/dev/null
+  touch "$RLNET_REFDIR/$vm"
+  refdir_unlock
+}
+
+rlnet_release() {
+  local vm="$1"
+  refdir_lock "$RLNET_REFDIR"
+  rm -f "$RLNET_REFDIR/$vm"
+  if refdir_in_use "$RLNET_REFDIR"; then
+    refdir_unlock
+    return 0
+  fi
+
+  local prev
+  prev=$(cat "$RLNET_REFDIR/.prev" 2>/dev/null) || prev=0
+  sysctl -w "${RLNET_SYSCTL}=${prev:-0}" >/dev/null 2>&1 || true
+  rm -f "$RLNET_REFDIR/.prev"
+  refdir_unlock
 }
 
 require_bridge_netfilter() {
@@ -520,6 +560,7 @@ state_reset() {
   STATE_IPV6_POLICY=""
   STATE_IPV6_INPUT=false
   STATE_NAT66_REF=false
+  STATE_RLNET=false
   STATE_WG_APPLIED=false
   STATE_WG_DNAT_TARGET=""
 }
@@ -536,6 +577,7 @@ state_load() {
       ipv6_policy)    STATE_IPV6_POLICY="$val" ;;
       ipv6_input)     STATE_IPV6_INPUT="$val" ;;
       nat66_ref)      STATE_NAT66_REF="$val" ;;
+      route_localnet) STATE_RLNET="$val" ;;
       host_port)      STATE_HOST_PORTS+=("$val") ;;
       lan_host)       STATE_LAN_HOSTS+=("$val") ;;
       wg_applied)     STATE_WG_APPLIED="$val" ;;
@@ -609,8 +651,11 @@ apply_tap_rules() {
 
     local entry
     for entry in "${HA_PORTS[@]+"${HA_PORTS[@]}"}"; do
-      # DNAT to 127.0.0.1: reach services bound to localhost on the host.
+      # DNAT to 127.0.0.1 reaches host services whatever they bind to. Scoped to
+      # the gateway: without -d this rewrites every connection the guest makes on
+      # that port, to any address, and lands it on the host instead.
       rule_set iptables nat PREROUTING "" -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" \
         -p "${entry%%/*}" --dport "${entry#*/}" \
         -j DNAT --to-destination 127.0.0.1:"${entry#*/}"
     done
@@ -726,11 +771,15 @@ apply_rules() {
     ip6tables -w -N "$CHAIN6" 2>/dev/null || ip6tables -w -F "$CHAIN6"
     ip6tables -w -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
 
+    if (( ${#HA_PORTS[@]} > 0 )); then
+      # The kernel drops packets to 127/8 arriving on a non-loopback interface
+      # unless route_localnet is set.
+      state_add route_localnet true
+      rlnet_acquire "$vm"
+    fi
+
     for entry in "${HA_PORTS[@]+"${HA_PORTS[@]}"}"; do
       state_add host_port "$entry"
-      # route_localnet=1 required: the kernel drops packets to 127/8 arriving on
-      # a non-loopback interface. A property of the bridge, not of one tap.
-      sysctl -w "net.ipv4.conf.virbr-migrant.route_localnet=1" >/dev/null
       # Inside the per-VM chain, just flushed, so it is already canonical.
       iptables -w -I "$CHAIN" -p "${entry%%/*}" --dport "${entry#*/}" \
         -m conntrack --ctstate NEW -j ACCEPT
@@ -798,6 +847,11 @@ remove_tap_rules() {
     for entry in "${STATE_HOST_PORTS[@]+"${STATE_HOST_PORTS[@]}"}"; do
       proto="${entry%%/*}"
       port="${entry#*/}"
+      rule_remove iptables nat PREROUTING -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" \
+        -p "$proto" --dport "$port" \
+        -j DNAT --to-destination 127.0.0.1:"$port"
+      # An unscoped copy from an earlier hook version outlives its VM otherwise.
       rule_remove iptables nat PREROUTING -m physdev --physdev-in "$iface" \
         -p "$proto" --dport "$port" \
         -j DNAT --to-destination 127.0.0.1:"$port"
@@ -869,6 +923,12 @@ remove_rules() {
     # Drops the shared MASQUERADE and restores forwarding once the last NAT66 VM
     # is gone.
     nat66_shared_teardown "$vm"
+  fi
+
+  # Absent from a record written before this was refcounted, which is correct:
+  # no reference was taken then, so there is none to drop.
+  if [[ "$STATE_RLNET" == true ]] || [[ -f "$RLNET_REFDIR/$vm" ]]; then
+    rlnet_release "$vm"
   fi
 
   # Everything below runs even with no record at all — a leftover WireGuard

@@ -100,6 +100,11 @@ def test(
 # CLI
 # ---------------------------------------------------------------------------
 
+# RFC1918, so isolation rejects it, and unallocated on any plausible host — a
+# connection that lands here was rewritten to the host rather than sent.
+HOST_PORT_DECOY = "10.255.255.254"
+
+
 def parse_host_port(spec: str) -> tuple[str, int]:
     """Parse 'tcp/9999' or 'udp/9999' into (proto, port).
 
@@ -127,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LAN host IP to probe (skips interactive prompt)")
     p.add_argument("--host-port", metavar="SPEC",
                    help="Host port, e.g. tcp/9999 (skips interactive prompt)")
+    p.add_argument("--host-port-decoy", metavar="IP", default=HOST_PORT_DECOY,
+                   help="Address used to prove --host-port is not redirected from "
+                        f"anywhere but the gateway (default: {HOST_PORT_DECOY})")
     p.add_argument("--peer-ip", metavar="IP",
                    help="Another migrant VM IP to probe (skips interactive prompt)")
     p.add_argument("--ipv6-nat", action="store_true",
@@ -1149,6 +1157,34 @@ def _host_port(ctx: Context) -> Result:
         return Result("PASS", f"UDP datagram sent to {ctx.gateway}:{port} without error")
     except OSError as exc:
         return Result("FAIL", f"UDP send failed: {exc}")
+
+
+@test("Host access", "Host port is not redirected from other addresses", expect="PASS")
+def _host_port_scope(ctx: Context) -> Result:
+    """allow-host-port must map the gateway only, not hijack the port.
+
+    An unscoped DNAT rewrites this connection to the host's loopback and it
+    CONNECTS to the same listener the positive test reaches. Scoped, the
+    address is left alone and the isolation rules reject it.
+    """
+    if not ctx.args.host_port:
+        return Result("SKIP", "no --host-port specified (skipped)")
+    try:
+        proto, port = parse_host_port(ctx.args.host_port)
+    except ValueError as exc:
+        return Result("SKIP", str(exc))
+    if proto != "tcp":
+        return Result("SKIP", "only tcp can distinguish reached from rewritten")
+
+    decoy = ctx.args.host_port_decoy
+    outcome = _tcp_probe(decoy, port, timeout=5.0)
+    if outcome == "CONNECTED":
+        return Result(
+            "FAIL",
+            f"connected to {decoy}:{port} — the DNAT is rewriting every "
+            f"destination on this port, not just {ctx.gateway}",
+        )
+    return Result("PASS", f"{outcome} to {decoy}:{port}")
 
 
 # ---------------------------------------------------------------------------

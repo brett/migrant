@@ -656,6 +656,12 @@ bind address. `allow-lan-host` inserts an ACCEPT in the FORWARD chain
 before the RFC 1918 REJECT rules. All directives are removed automatically
 when the VM stops.
 
+The `allow-host-port` DNAT matches only traffic addressed to the bridge
+gateway, `192.168.200.1`. Point the guest there — reaching the host by any
+other address, such as its LAN IP, is not rewritten and is blocked by the
+isolation rules. Connections the guest makes to *other* hosts on the same port
+are left alone.
+
 `HOST_ACCESS` has no effect when isolation is disabled (`NETWORK_ISOLATION=false`) —
 there is nothing to poke holes in.
 
