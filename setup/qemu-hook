@@ -5,7 +5,9 @@ set -euo pipefail
 VM_NAME="$1"
 OPERATION="$2"
 # iptables chain names are limited to 29 characters; hash the VM name so
-# the chain name stays within that limit regardless of VM name length.
+# the chain name stays within that limit regardless of VM name length. 32 bits
+# of it: two names collide at even odds around 77k VMs, and a collision means
+# one VM's teardown flushes and deletes the other's chain.
 CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 # Separate ip6tables chain for the NAT66 per-VM INPUT reject (see apply_rules).
 # Distinct prefix so the v4 and v6 per-VM chains never collide.
@@ -218,6 +220,43 @@ ha_parse() {
   done < "$file"
 }
 
+ipv4_to_int() {
+  local IFS=. o1 o2 o3 o4
+  read -r o1 o2 o3 o4 <<<"$1"
+  [[ -n "$o4" ]] || return 1
+  printf '%s' $(( (10#$o1 << 24) + (10#$o2 << 16) + (10#$o3 << 8) + 10#$o4 ))
+}
+
+# True when the tunnel explicitly claims this address. AllowedIPs reaches
+# wireguard-wg.conf but is otherwise never parsed. A default route is not a
+# claim: a full-tunnel 0.0.0.0/0 covers every address, so honouring it here
+# would warn about every allow-lan-host entry.
+wg_claims_ip() {
+  local file="/etc/migrant/${1}/wireguard-wg.conf" ip="$2"
+  [[ -r "$file" ]] || return 1
+  local ip_int cidr net len net_int mask
+  ip_int=$(ipv4_to_int "$ip") || return 1
+  while read -r cidr; do
+    [[ "$cidr" == *:* ]] && continue
+    net="${cidr%%/*}"
+    len="${cidr#*/}"
+    [[ "$cidr" == */* ]] || len=32
+    [[ "$len" =~ ^[0-9]+$ ]] || continue
+    (( len > 0 && len <= 32 )) || continue
+    net_int=$(ipv4_to_int "$net") || continue
+    mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+    if (( (ip_int & mask) == (net_int & mask) )); then
+      return 0
+    fi
+  done < <(awk -F= '
+    /^[[:space:]]*AllowedIPs[[:space:]]*=/ {
+      gsub(/[[:space:]]/, "", $2)
+      n = split($2, a, ",")
+      for (i = 1; i <= n; i++) print a[i]
+    }' "$file")
+  return 1
+}
+
 wg_dns_parse() {
   WG_DNS_IPS=()
   local file="/etc/migrant/${1}/wireguard-dns" ip
@@ -324,6 +363,11 @@ wg_setup_iface() {
       | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
     route_via=$(printf '%s' "$route_info" \
       | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+    if [[ -n "$route_dev" && "$route_dev" != "$WG_IFACE" ]] \
+        && wg_claims_ip "$vm" "$host_ip"; then
+      hook_log "$vm" \
+        "host-access: $host_ip is inside the tunnel's AllowedIPs but routes via $route_dev; if another machine holds that address there, traffic reaches it instead"
+    fi
     if [[ -n "$route_dev" ]]; then
       if [[ -n "$route_via" ]]; then
         ip route add "${host_ip}/32" via "$route_via" dev "$route_dev" \

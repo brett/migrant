@@ -597,6 +597,14 @@ and reject the guest's own DHCP and DNS. `migrant setup` sets
 libvirtd; this applies to every libvirt network on the host, not just
 `migrant`.
 
+Two limits worth knowing. The rules are scoped by `physdev`, which matches a
+bridge port, so a NIC attached some other way — macvtap, for instance — is not
+covered by them and isolation does not apply to it. And there is no MAC
+anti-spoofing: the bridge-level gate that holds a guest offline during rule
+setup matches on source MAC, so a guest that changes its own MAC steps around
+that gate. Neither weakens the `physdev`-scoped rules themselves, which are
+what stops guest→host traffic once they are installed.
+
 ### IPv6 (NAT66)
 
 By default a migrant VM has no routable IPv6 — the `migrant` network is IPv4
@@ -661,6 +669,15 @@ gateway, `192.168.200.1`. Point the guest there — reaching the host by any
 other address, such as its LAN IP, is not rewritten and is blocked by the
 isolation rules. Connections the guest makes to *other* hosts on the same port
 are left alone.
+
+On a WireGuard VM, `allow-lan-host` is resolved against the host's main routing
+table and the result is excluded from the tunnel. Point it at an address that
+lives *inside* the VPN and the traffic leaves by whatever device that table
+selects instead — another VPN, an overlay, a VLAN, or the physical NIC — where
+a different machine may hold that address, so the VM talks to a stranger with
+no error anywhere. The hook logs a warning when the tunnel's
+`AllowedIPs` explicitly claims a target that routes elsewhere; it cannot warn
+for a full-tunnel `0.0.0.0/0`, which claims every address.
 
 `HOST_ACCESS` has no effect when isolation is disabled (`NETWORK_ISOLATION=false`) —
 there is nothing to poke holes in.
