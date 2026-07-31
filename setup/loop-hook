@@ -43,11 +43,31 @@ for fs in tree.findall('.//filesystem'):
 PYEOF
 }
 
+# findmnt names the loop device, not the image behind it.
+loop_backing_file() {
+  local dev backing
+  dev=$(findmnt -nro SOURCE "$1" 2>/dev/null) || return 1
+  [[ "$dev" == /dev/loop* ]] || return 1
+  backing=$(losetup -l -n -O BACK-FILE "$dev" 2>/dev/null) || return 1
+  # An unlinked backing file is reported with a ' (deleted)' suffix.
+  backing="${backing% (deleted)}"
+  [[ -n "$backing" ]] && echo "$backing"
+}
+
+# What is actually mounted, for migrant to verify once the VM is running.
+# migrant cannot read the domain XML, so a filesystem contributed through
+# .virt-install-extra-args is visible only here.
+MOUNT_RECORD="/run/migrant/${VM_NAME}.shared"
+
 mount_shared_folders() {
   local sources=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && sources+=("$line")
   done < <(virtiofs_sources)
+
+  # Truncated first: a record left by the previous lifecycle would otherwise
+  # satisfy verification before anything has been mounted.
+  : > "$MOUNT_RECORD"
 
   if [[ ${#sources[@]} -eq 0 ]]; then
     hook_log "no virtiofs filesystems found in $local_xml"
@@ -68,16 +88,30 @@ mount_shared_folders() {
     fi
 
     if mountpoint -q "$source_dir" 2>/dev/null; then
+      # Something is mounted here, but mountpoint alone does not say what.
+      # Stale or unrelated mount state would otherwise be served to the guest
+      # while both this hook and migrant report isolation active.
+      local backing
+      backing=$(loop_backing_file "$source_dir") || backing=""
+      if [[ "$backing" != "$img_path" ]]; then
+        hook_log "error: $source_dir is mounted from '${backing:-an unknown source}', not $img_path"
+        hook_log "unmount it, then start the VM again"
+        exit 1
+      fi
       hook_log "$source_dir already mounted"
+      printf '%s\t%s\n' "$source_dir" "$img_path" >> "$MOUNT_RECORD"
       continue
     fi
 
     mkdir -p "$source_dir"
-    if mount -o loop,nosymfollow "$img_path" "$source_dir"; then
-      hook_log "mounted $img_path at $source_dir"
-    else
-      hook_log "failed to mount $img_path at $source_dir"
+    if ! mount -o loop,nosymfollow "$img_path" "$source_dir"; then
+      # Same contract as the missing image above. Left unmounted, virtiofsd
+      # serves the bare host directory: no nosymfollow, no size cap.
+      hook_log "error: failed to mount $img_path at $source_dir"
+      exit 1
     fi
+    hook_log "mounted $img_path at $source_dir"
+    printf '%s\t%s\n' "$source_dir" "$img_path" >> "$MOUNT_RECORD"
   done
 }
 
@@ -98,6 +132,7 @@ unmount_shared_folders() {
       hook_log "$source_dir not mounted, skipping"
     fi
   done
+  rm -f "$MOUNT_RECORD"
 }
 
 case "$OPERATION" in

@@ -287,19 +287,53 @@ wait_for_cloud_init() {
   echo "cloud-init done." >&2
 }
 
+# findmnt names the loop device; sysfs holds the image behind it and is
+# readable without root, unlike losetup.
+mount_backing_file() {
+  local dev backing
+  dev=$(findmnt -nro SOURCE "$1" 2>/dev/null) || return 1
+  [[ "$dev" == /dev/loop* ]] || return 1
+  backing="/sys/block/${dev#/dev/}/loop/backing_file"
+  [[ -r "$backing" ]] || return 1
+  # An unlinked backing file is reported with a ' (deleted)' suffix.
+  backing=$(<"$backing")
+  echo "${backing% (deleted)}"
+}
+
+shared_mount_failed() {
+  echo "[ERROR] $1" >&2
+  echo "  The guest would be served an unprotected directory. Halting VM." >&2
+  echo "  Check: cat /run/migrant/hook.log" >&2
+  virsh destroy "$VM_NAME" 2>/dev/null || true
+  exit 70  # EX_SOFTWARE
+}
+
 verify_shared_folder_mounts() {
   shared_folder_isolation_enabled || return 0
-  [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
-  for shared_folder in "${SHARED_FOLDERS[@]}"; do
-    local host_path
-    host_path=$(shared_folder_host_path "$shared_folder")
-    if ! mountpoint -q "$host_path" 2>/dev/null; then
-      echo "[ERROR] VM started but '$host_path' is not mounted." >&2
-      echo "  The loop hook may have failed." >&2
-      echo "  Check: cat /run/migrant/hook.log" >&2
-      exit 1
+
+  # The loop hook records what it mounted, taken from the domain XML. Reading
+  # SHARED_FOLDERS instead would miss a filesystem added through
+  # .virt-install-extra-args, which is mounted but would never be verified.
+  local record="/run/migrant/${VM_NAME}.shared"
+  if [[ ! -f "$record" ]]; then
+    shared_mount_failed "VM started but the loop hook recorded no shared folder mounts.
+  It is missing or too old to write /run/migrant/<vm>.shared — run 'migrant setup'."
+  fi
+
+  local dir img backing
+  while IFS=$'\t' read -r dir img; do
+    [[ -n "$dir" ]] || continue
+    mountpoint -q "$dir" 2>/dev/null \
+      || shared_mount_failed "VM started but '$dir' is not mounted."
+    # Advisory: the hook already refused to start unless the backing matched,
+    # so a host where sysfs will not answer is not worth halting over.
+    backing=$(mount_backing_file "$dir") || backing=""
+    if [[ -z "$backing" ]]; then
+      echo "[WARNING] could not confirm which image backs '$dir'." >&2
+    elif [[ "$backing" != "$img" ]]; then
+      shared_mount_failed "'$dir' is mounted from '$backing', not '$img'."
     fi
-  done
+  done < "$record"
 }
 
 ensure_shared_folder_images() {

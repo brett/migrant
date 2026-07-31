@@ -15,6 +15,10 @@ Run from any example VM directory (e.g. `cd examples/arch && ../../test/test-hoo
   validation, iptables rule creation and cleanup, `allow-host-port` DNAT
   scoping, and the `route_localnet` refcount. The last of these creates a
   second, short-lived VM named `<VM_NAME>-rl2` in a temp directory
+- **test-shared-folder.sh** — shared folder isolation: the loop image is
+  mounted with `nosymfollow` and recorded, and the VM refuses to start when the
+  image will not mount or the mount point is backed by something else. Needs
+  `sudo` to stage a foreign mount
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is
   consumed on read, absent file is a no-op

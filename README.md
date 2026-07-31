@@ -717,6 +717,13 @@ protections:
   host disk usage starts at ~67 MB and grows with contents; the full cap
   is never paid upfront.
 
+Both protections are enforced rather than assumed. If the image is missing,
+fails to mount, or the mount point turns out to be backed by something other
+than that image, the VM refuses to start — otherwise `virtiofsd` would serve
+the bare host directory with neither `nosymfollow` nor the size cap. `migrant
+up` re-checks once the VM is running and halts it if what is mounted is not
+what the hook recorded.
+
 The loop image is mounted automatically by the QEMU hook when the VM
 starts, and unmounted when it stops. While the VM is halted, the
 workspace files are inside the image and not directly accessible on the
