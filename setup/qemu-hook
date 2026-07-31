@@ -24,11 +24,10 @@ hook_log() {
 
 hook_log "$VM_NAME" "hook start"
 
-# Rules outside the per-VM chains are inserted unconditionally and deleted once,
-# so a repeated start or a partial teardown leaves duplicates — and one delete
-# then leaves a live copy behind, on a tap name libvirt reuses. These helpers
-# establish exactly one copy instead. -C, -D and -I share a single argument
-# list, so a check can never drift from the rule it guards.
+# Rules outside the per-VM chains are established as exactly one copy: a stray
+# duplicate survives teardown and rebinds to whichever VM next receives the tap
+# name. -C, -D and -I share one argument list so a check cannot drift from the
+# rule it guards.
 RULE_DELETE_BOUND=16
 
 _rule_argv() {
@@ -54,12 +53,10 @@ libvirt_inp_missing() {
   hook_log "$1" "set firewall_backend = \"iptables\" in /etc/libvirt/network.conf, then run 'migrant setup'"
 }
 
-# INPUT jumps are placed at a line number read from the ruleset, and this hook's
-# own top-of-INPUT inserts renumber it. Two VMs starting at once could each read
-# a position the other then invalidated, landing a jump above LIBVIRT_INP where
-# it pre-empts the DHCP and DNS accepts the guest needs. The xtables lock is per
-# command and cannot cover a read-then-insert, so serialise the whole lifecycle.
-# Ordering is always lifecycle then NAT66; never the reverse.
+# INPUT jumps go at a line number read from the ruleset, which this hook's own
+# top-of-INPUT inserts renumber. The xtables lock is per command and cannot
+# cover a read-then-insert, so the whole lifecycle is serialised instead.
+# Lock ordering is always lifecycle then NAT66, never the reverse.
 LIFECYCLE_LOCK_WAIT=5
 
 lifecycle_lock() {
@@ -428,10 +425,9 @@ NAT66_ULA="fdca:6d16:2b1a::/64"
 NAT66_REFDIR="/run/migrant/nat66"
 
 # The refcount, .fwd-prev, the shared MASQUERADE and a global sysctl are read
-# and rewritten together. Two VMs starting or stopping at once would otherwise
-# interleave — both seeing themselves as the last, or neither saving the prior
-# forwarding value. The xtables lock does not help: it serialises individual
-# commands, not this sequence.
+# and rewritten as one transition, so concurrent VMs must not interleave here:
+# both could see themselves as the last one out. The xtables lock is per
+# command and does not cover the sequence.
 nat66_lock() {
   mkdir -p "$NAT66_REFDIR"
   exec {NAT66_LOCK_FD}>"$NAT66_REFDIR/.lock"
@@ -487,11 +483,10 @@ nat66_shared_teardown() {
 }
 
 require_bridge_netfilter() {
-  # Every rule below matches with -m physdev, which is inert unless bridged
-  # traffic is passed to ip(6)tables. migrant setup sets and persists both
-  # sysctls, but that can be undone afterwards, so re-check here: failing the
-  # started hook aborts the domain, whereas installing rules that match nothing
-  # would leave the VM running with no isolation at all.
+  # -m physdev matches nothing unless bridged traffic is passed to ip(6)tables.
+  # migrant setup persists both sysctls, but they can be changed afterwards, so
+  # re-check: failing this hook aborts the domain, where installing inert rules
+  # would leave it running with no isolation.
   local vm="$1" key
   for key in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
     if [[ "$(cat "/proc/sys/net/bridge/${key}" 2>/dev/null || echo 0)" != 1 ]]; then
@@ -504,9 +499,8 @@ require_bridge_netfilter() {
 
 # /run/migrant/<vm>.state records what apply_rules installed, so teardown never
 # re-reads /etc/migrant — that holds the current Migrantfile, which may have
-# been edited since the VM started. Each fact is written before the rule it
-# describes: deleting a rule that was never installed is a no-op, while a rule
-# with no record is stranded on a tap name libvirt will reuse.
+# been edited since the VM started. Facts are written before the rule they
+# describe; a rule with no record strands on a tap name libvirt will reuse.
 STATE_VERSION_CURRENT=1
 
 state_begin() {
@@ -582,20 +576,16 @@ apply_tap_rules() {
   local vm="$1" iface="$2"
 
   if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-    # The jump must land after libvirt's LIBVIRT_INP chain (which accepts DHCP
-    # and DNS destined for dnsmasq) but before any host-firewall REJECT/DROP
-    # that would catch bridged traffic first. Stale copies are cleared before
-    # the position is read: deleting one that sat above LIBVIRT_INP would shift
-    # the line number out from under us.
+    # The jump lands after LIBVIRT_INP (which accepts DHCP and DNS bound for
+    # dnsmasq) but before any host-firewall REJECT/DROP. Stale copies go first:
+    # deleting one above LIBVIRT_INP would shift the line number being read.
     rule_remove iptables "" INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
     local inp_pos
     inp_pos=$(iptables -w -L INPUT --line-numbers -n \
               | awk '/LIBVIRT_INP/{print $1; exit}')
     if [[ -z "$inp_pos" ]]; then
-      # Appending instead would place the jump after any host ACCEPT for the
-      # bridge, and the guest's DHCP and DNS would hit the chain's REJECT before
-      # reaching dnsmasq. Refuse rather than install rules that do the wrong
-      # thing in both directions.
+      # Appending would put the jump after any host ACCEPT for the bridge while
+      # the chain's REJECT still caught the guest's own DHCP and DNS.
       libvirt_inp_missing "$vm" iptables
       return 7
     fi
@@ -693,14 +683,9 @@ apply_rules() {
   # Before any rule is installed, and well before the MAC is unblocked below.
   require_bridge_netfilter "$vm"
 
-  # Every tap, not just the first: a multi-NIC VM whose later NICs went
-  # unfiltered had no isolation and no WireGuard mark on them, while the
-  # verification sentinel still reported success.
-  #
-  # libvirt assigns tap interfaces before firing 'started begin', so the live
-  # domain XML always contains <target dev='vnetN'/> by this point.
-  # Anchor to 'vnet' to avoid matching disk targets (<target dev='vda' bus='virtio'/>).
-  # Try both quote forms since XML permits either.
+  # Rules are per-NIC, so resolve every tap. libvirt assigns them before firing
+  # 'started begin', so the live domain XML always has <target dev='vnetN'/> by
+  # now. Anchor to 'vnet' to skip disk targets; both quote forms are valid XML.
   local -a ifaces=()
   mapfile -t ifaces < <(echo "$xml" | grep -o "target dev='vnet[^']*'" | cut -d"'" -f2)
   if (( ${#ifaces[@]} == 0 )); then

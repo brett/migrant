@@ -995,18 +995,14 @@ cmd_setup() {
     current_backend="nftables"  # libvirt default
   fi
 
-  # The isolation rules jump from INPUT to a per-VM chain positioned relative to
-  # libvirt's LIBVIRT_INP, which exists only under the iptables backend. Under
-  # nftables libvirt filters in its own table, LIBVIRT_INP is absent, and the
-  # qemu hook refuses to start the VM. So set the backend rather than guessing
-  # whether the host looks like an iptables host: the previous check required
-  # nft to report no tables at all, which migrant's own bridge table already
-  # contradicts, so it never fired.
+  # Isolation needs libvirt's LIBVIRT_INP chain to position its INPUT jump, and
+  # that chain exists only under the iptables backend — under nftables libvirt
+  # filters in its own table and the qemu hook refuses to start the VM.
   if [[ "$current_backend" == "iptables" ]]; then
     printf '%-*s%s\n' "$kw" "firewall backend:" "iptables"
   else
-    # sed alone silently does nothing when the file has no such line, so the
-    # two cases are separated rather than chained with ||.
+    # sed exits 0 when it matches nothing, so the append case must be its own
+    # branch rather than a || fallback.
     if grep -qE '^[[:space:]]*#?[[:space:]]*firewall_backend[[:space:]]*=' "$network_conf" 2>/dev/null; then
       sudo sed -i 's/^[[:space:]]*#\?[[:space:]]*firewall_backend[[:space:]]*=.*/firewall_backend = "iptables"/' \
         "$network_conf"
@@ -1021,9 +1017,8 @@ cmd_setup() {
   fi
 
   # --- bridge netfilter ---
-  # Every isolation rule matches with -m physdev, which is inert unless
-  # br_netfilter is loaded and bridged traffic is passed to ip(6)tables. Without
-  # both, the hook installs its rules cleanly and none of them ever match.
+  # -m physdev matches nothing unless br_netfilter is loaded and bridged traffic
+  # is passed to ip(6)tables, so every isolation rule depends on both.
   local brnf_probe="/proc/sys/net/bridge/bridge-nf-call-iptables"
   local brnf_modconf="/etc/modules-load.d/migrant.conf"
   local brnf_sysctl="/etc/sysctl.d/99-migrant.conf"
