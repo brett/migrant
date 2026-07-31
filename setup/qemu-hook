@@ -349,6 +349,22 @@ nat66_shared_teardown() {
   rm -f "$NAT66_REFDIR/.fwd-prev"
 }
 
+require_bridge_netfilter() {
+  # Every rule below matches with -m physdev, which is inert unless bridged
+  # traffic is passed to ip(6)tables. migrant setup sets and persists both
+  # sysctls, but that can be undone afterwards, so re-check here: failing the
+  # started hook aborts the domain, whereas installing rules that match nothing
+  # would leave the VM running with no isolation at all.
+  local vm="$1" key
+  for key in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+    if [[ "$(cat "/proc/sys/net/bridge/${key}" 2>/dev/null || echo 0)" != 1 ]]; then
+      hook_log "$vm" "net.bridge.${key} is not 1; physdev rules would not match"
+      hook_log "$vm" "run 'migrant setup' to restore it"
+      return 5
+    fi
+  done
+}
+
 apply_rules() {
   local vm="$1"
   hook_log "$vm" "apply_rules: enter"
@@ -360,6 +376,9 @@ apply_rules() {
     || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
     || [[ "${HAS_NETWORK_IPV6:-false}" == true ]] \
     || return 0
+
+  # Before any rule is installed, and well before the MAC is unblocked below.
+  require_bridge_netfilter "$vm"
 
   # Locate the tap interface for this VM without calling virsh.
   local iface=""

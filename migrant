@@ -1015,6 +1015,52 @@ cmd_setup() {
     printf '%-*s%s\n' "$kw" "firewall backend:" "$current_backend"
   fi
 
+  # --- bridge netfilter ---
+  # Every isolation rule matches with -m physdev, which is inert unless
+  # br_netfilter is loaded and bridged traffic is passed to ip(6)tables. Without
+  # both, the hook installs its rules cleanly and none of them ever match.
+  local brnf_probe="/proc/sys/net/bridge/bridge-nf-call-iptables"
+  local brnf_modconf="/etc/modules-load.d/migrant.conf"
+  local brnf_sysctl="/etc/sysctl.d/99-migrant.conf"
+  local brnf_actions=""
+
+  if [[ ! -e "$brnf_probe" ]]; then
+    sudo modprobe br_netfilter 2>/dev/null || true
+    if [[ ! -e "$brnf_probe" ]]; then
+      printf '%-*s%s\n' "$kw" "bridge netfilter:" "unavailable [ERROR]"
+      printf '  %-*s%s\n' "$skw" "note:" "br_netfilter could not be loaded; isolation cannot work"
+      exit 69  # EX_UNAVAILABLE
+    fi
+    brnf_actions="module loaded"
+  fi
+
+  if [[ "$(cat "$brnf_modconf" 2>/dev/null)" != "br_netfilter" ]]; then
+    echo br_netfilter | sudo tee "$brnf_modconf" > /dev/null
+    brnf_actions="${brnf_actions:+${brnf_actions}, }module persisted"
+  fi
+
+  local brnf_key
+  for brnf_key in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+    if [[ "$(cat "/proc/sys/net/bridge/${brnf_key}" 2>/dev/null || echo 0)" != 1 ]]; then
+      sudo sysctl -w "net.bridge.${brnf_key}=1" > /dev/null
+      brnf_actions="${brnf_actions:+${brnf_actions}, }${brnf_key}=1"
+    fi
+  done
+
+  local brnf_want="net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1"
+  if [[ "$(cat "$brnf_sysctl" 2>/dev/null)" != "$brnf_want" ]]; then
+    printf '%s\n' "$brnf_want" | sudo tee "$brnf_sysctl" > /dev/null
+    brnf_actions="${brnf_actions:+${brnf_actions}, }sysctl persisted"
+  fi
+
+  if [[ -n "$brnf_actions" ]]; then
+    printf '%-*s%s\n' "$kw" "bridge netfilter:" "${brnf_actions} [changed]"
+    (( changes++ )) || true
+  else
+    printf '%-*s%s\n' "$kw" "bridge netfilter:" "ok"
+  fi
+
   # --- qemu hook (network isolation + WireGuard) ---
   if [[ -f "$qemu_hook" ]] && cmp -s "$setup_dir/qemu-hook" "$qemu_hook"; then
     printf '%-*s%s\n' "$kw" "qemu hook:" "ok"

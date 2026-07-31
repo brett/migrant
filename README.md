@@ -582,8 +582,11 @@ in a `Migrantfile` to opt out. When active, iptables rules are added that:
   cover it
 
 The rules are removed automatically when the VM stops or is destroyed.
-This requires `migrant setup` to have been run to install the libvirt
-hook.
+This requires `migrant setup` to have been run to install the libvirt hook
+and enable bridge netfilter (`br_netfilter` plus the
+`net.bridge.bridge-nf-call-ip*tables` sysctls) — the rules match bridged
+traffic through `physdev` and are inert without it. A VM refuses to start if
+either sysctl is later set back to 0.
 
 ### IPv6 (NAT66)
 
