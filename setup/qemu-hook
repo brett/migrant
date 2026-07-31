@@ -61,12 +61,20 @@ refdir_in_use() {
 }
 
 # Delete every copy of a rule. Best-effort: teardown continues regardless.
+# Teardown continues past a rule it cannot remove, so that the rest still goes;
+# both exits are logged, or an incomplete teardown looks like a clean one.
 rule_remove() {
   local n=0
   _rule_argv "$1" "$2" "$3"; shift 3
   while "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -C "$RULE_CHAIN" "$@" 2>/dev/null; do
-    "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -D "$RULE_CHAIN" "$@" 2>/dev/null || break
-    (( ++n >= RULE_DELETE_BOUND )) && break
+    if ! "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -D "$RULE_CHAIN" "$@" 2>/dev/null; then
+      hook_log "$VM_NAME" "$RULE_CHAIN: delete failed while the rule is still present: $*"
+      break
+    fi
+    if (( ++n >= RULE_DELETE_BOUND )); then
+      hook_log "$VM_NAME" "$RULE_CHAIN: over $RULE_DELETE_BOUND copies of one rule; some remain: $*"
+      break
+    fi
   done
   return 0
 }
@@ -728,19 +736,36 @@ apply_rules() {
   # Before any rule is installed, and well before the MAC is unblocked below.
   require_bridge_netfilter "$vm"
 
-  # Rules are per-NIC, so resolve every tap. libvirt assigns them before firing
-  # 'started begin', so the live domain XML always has <target dev='vnetN'/> by
-  # now. Anchor to 'vnet' to skip disk targets; both quote forms are valid XML.
+  # Rules are per-NIC, so resolve every tap. Scoped to <interface> elements
+  # rather than anchored on a 'vnet' prefix, which skips disk targets but also
+  # skips any NIC libvirt did not name that way; its MAC would still be
+  # unblocked below, leaving it with no rules at all. Both quote forms are
+  # valid XML. libvirt assigns tap names before firing 'started begin'.
   local -a ifaces=()
-  mapfile -t ifaces < <(echo "$xml" | grep -o "target dev='vnet[^']*'" | cut -d"'" -f2)
-  if (( ${#ifaces[@]} == 0 )); then
-    mapfile -t ifaces < <(echo "$xml" | grep -o 'target dev="vnet[^"]*"' | cut -d'"' -f2)
-  fi
+  mapfile -t ifaces < <(echo "$xml" | awk '
+    /<interface[ >]/ { inif = 1 }
+    inif && /target dev=/ {
+      line = $0
+      sub(/.*target dev=./, "", line)
+      sub(/[\047"].*/, "", line)
+      print line
+    }
+    /<\/interface>/ { inif = 0 }
+  ')
 
   if (( ${#ifaces[@]} == 0 )); then
     hook_log "$vm" "no tap found; XML target lines:"
     echo "$xml" | grep -i "target" >&2
     hook_log "$vm" "no tap interface found"
+    return 4
+  fi
+
+  # Every NIC must resolve to a tap. One that does not would be left with no
+  # rules while unblock_macs still releases its MAC.
+  local nic_count
+  nic_count=$(echo "$xml" | grep -c '<interface[ >]') || nic_count=0
+  if (( nic_count != ${#ifaces[@]} )); then
+    hook_log "$vm" "$nic_count NICs but ${#ifaces[@]} taps resolved; refusing to start"
     return 4
   fi
 

@@ -98,6 +98,12 @@ mount_shared_folders() {
         hook_log "unmount it, then start the VM again"
         exit 1
       fi
+      # The right image mounted the wrong way is still only half the isolation.
+      if ! findmnt -no OPTIONS "$source_dir" 2>/dev/null | grep -qw nosymfollow; then
+        hook_log "error: $source_dir is mounted without nosymfollow"
+        hook_log "unmount it, then start the VM again"
+        exit 1
+      fi
       hook_log "$source_dir already mounted"
       printf '%s\t%s\n' "$source_dir" "$img_path" >> "$MOUNT_RECORD"
       continue

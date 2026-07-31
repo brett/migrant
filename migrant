@@ -325,6 +325,8 @@ verify_shared_folder_mounts() {
     [[ -n "$dir" ]] || continue
     mountpoint -q "$dir" 2>/dev/null \
       || shared_mount_failed "VM started but '$dir' is not mounted."
+    findmnt -no OPTIONS "$dir" 2>/dev/null | grep -qw nosymfollow \
+      || shared_mount_failed "'$dir' is mounted without nosymfollow."
     # Advisory: the hook already refused to start unless the backing matched,
     # so a host where sysfs will not answer is not worth halting over.
     backing=$(mount_backing_file "$dir") || backing=""
