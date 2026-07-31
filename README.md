@@ -694,6 +694,11 @@ using the same connection settings as `migrant ssh`.
 
 ### Shared folder isolation
 
+A shared folder may not contain the VM directory's `hooks/`. Hooks run on the
+host as the invoking user, so a guest able to write `hooks/pre-up` would run
+code on the host at the next `migrant up`. Sharing the VM directory itself, or
+any parent of it, is refused for the same reason — share a subdirectory.
+
 By default, the shared folder is backed by a fixed-size ext4 loop image
 (`workspace.img` alongside your `Migrantfile`). This provides two
 protections:

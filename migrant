@@ -359,13 +359,51 @@ wg_iface_and_table() {
 }
 
 is_valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+  # 10# so a leading zero is read as decimal rather than octal; the digit bound
+  # keeps the arithmetic away from overflow.
+  [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# Echo the canonical dotted-quad form of a strict IPv4 address, or fail. The
+# hook matches its rules by text for -C and -D, so what is stored has to be the
+# form iptables will render back.
+canonical_ipv4() {
+  local ip="$1" o
+  local -a octets=() out=()
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -ra octets <<< "$ip"
+  for o in "${octets[@]}"; do
+    (( 10#$o <= 255 )) || return 1
+    out+=( "$(( 10#$o ))" )
+  done
+  printf '%s.%s.%s.%s' "${out[@]}"
+}
+
+# A shared folder that contains the VM's hooks directory is guest->host code
+# execution: the guest writes hooks/pre-up and migrant runs it, as the invoking
+# user, on the next up.
+validate_shared_folder_paths() {
+  [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return 0
+  local hooks_dir shared_folder host_path prefix
+  hooks_dir=$(realpath -m "$VM_DIR/hooks")
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    host_path=$(realpath -m "$(shared_folder_host_path "$shared_folder")")
+    prefix="${host_path%/}/"
+    if [[ "$hooks_dir" == "$host_path" || "$hooks_dir" == "$prefix"* ]]; then
+      echo "[ERROR] SHARED_FOLDERS entry exposes the VM's hooks directory: $shared_folder" >&2
+      echo "  $host_path contains $hooks_dir, so a guest could write a hook that" >&2
+      echo "  runs on the host at the next 'migrant up'. Share a subdirectory instead." >&2
+      exit 65  # EX_DATAERR
+    fi
+  done
 }
 
 sync_managed_config() {
   # Write all behavioral config to /etc/migrant/${VM_NAME}/ for the qemu and
   # loop hooks to consume. The directory is created only when at least one
   # feature needs it, and removed when empty.
+  validate_shared_folder_paths
+
   local managed_dir="/etc/migrant/${VM_NAME}"
   local needs_dir=false
 
@@ -456,13 +494,14 @@ sync_managed_config() {
           rules_content+="${rule}"$'\n'
           ;;
         allow-lan-host\ *)
-          local host_ip="${rule#allow-lan-host }"
-          if [[ ! "$host_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          local host_ip canonical
+          host_ip="${rule#allow-lan-host }"
+          if ! canonical=$(canonical_ipv4 "$host_ip"); then
             echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
             echo "  allow-lan-host requires a numeric IPv4 address." >&2
             exit 65  # EX_DATAERR
           fi
-          rules_content+="${rule}"$'\n'
+          rules_content+="allow-lan-host ${canonical}"$'\n'
           ;;
         *)
           echo "[ERROR] unrecognized HOST_ACCESS directive: $rule" >&2
@@ -512,11 +551,13 @@ sync_wireguard_files() {
     echo "  Edit wireguard.conf and re-run 'migrant up'." >&2
     exit 65  # EX_DATAERR
   fi
-  if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  local wg_endpoint_canonical
+  if ! wg_endpoint_canonical=$(canonical_ipv4 "$wg_endpoint"); then
     echo "[ERROR] wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
     echo "  Edit wireguard.conf and re-run 'migrant up'." >&2
     exit 65  # EX_DATAERR
   fi
+  wg_endpoint="$wg_endpoint_canonical"
 
   # wireguard.conf — raw copy (contains private key; permissions must be tight)
   cp "$wg_src" "$managed_dir/wireguard.conf"
@@ -973,13 +1014,13 @@ cmd_setup() {
   if [[ ! -d /etc/migrant ]]; then
     sudo mkdir -p /etc/migrant
     sudo chown root:libvirt /etc/migrant
-    sudo chmod 2770 /etc/migrant
+    sudo chmod 3770 /etc/migrant
     printf '%-*s%s\n' "$kw" "/etc/migrant:" "created [changed]"
     (( changes++ )) || true
   elif [[ "$(stat -c '%G' /etc/migrant)" != "libvirt" \
-       || "$(stat -c '%a' /etc/migrant)" != "2770" ]]; then
+       || "$(stat -c '%a' /etc/migrant)" != "3770" ]]; then
     sudo chown root:libvirt /etc/migrant
-    sudo chmod 2770 /etc/migrant
+    sudo chmod 3770 /etc/migrant
     printf '%-*s%s\n' "$kw" "/etc/migrant:" "permissions updated [changed]"
     (( changes++ )) || true
   else
