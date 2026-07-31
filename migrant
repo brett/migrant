@@ -995,24 +995,29 @@ cmd_setup() {
     current_backend="nftables"  # libvirt default
   fi
 
-  # Detect which firewall system the host actually uses:
-  # - Legacy iptables: has rules in iptables but not in nft
-  # - nftables: nft list ruleset shows tables (ignore libvirt's own)
-  local host_uses_legacy_iptables=false
-  if sudo iptables -S 2>/dev/null | grep -qv '^-P .* ACCEPT$' \
-      && ! sudo nft list ruleset 2>/dev/null | grep -q 'table'; then
-    host_uses_legacy_iptables=true
-  fi
-
-  if $host_uses_legacy_iptables && [[ "$current_backend" != "iptables" ]]; then
-    sudo sed -i 's/#\?\s*firewall_backend\s*=\s*"[^"]*"/firewall_backend = "iptables"/' \
-      "$network_conf" 2>/dev/null \
-      || echo 'firewall_backend = "iptables"' | sudo tee -a "$network_conf" > /dev/null
-    sudo systemctl restart libvirtd
-    printf '%-*s%s\n' "$kw" "firewall backend:" "switched to iptables [changed]"
-    (( changes++ )) || true
+  # The isolation rules jump from INPUT to a per-VM chain positioned relative to
+  # libvirt's LIBVIRT_INP, which exists only under the iptables backend. Under
+  # nftables libvirt filters in its own table, LIBVIRT_INP is absent, and the
+  # qemu hook refuses to start the VM. So set the backend rather than guessing
+  # whether the host looks like an iptables host: the previous check required
+  # nft to report no tables at all, which migrant's own bridge table already
+  # contradicts, so it never fired.
+  if [[ "$current_backend" == "iptables" ]]; then
+    printf '%-*s%s\n' "$kw" "firewall backend:" "iptables"
   else
-    printf '%-*s%s\n' "$kw" "firewall backend:" "$current_backend"
+    # sed alone silently does nothing when the file has no such line, so the
+    # two cases are separated rather than chained with ||.
+    if grep -qE '^[[:space:]]*#?[[:space:]]*firewall_backend[[:space:]]*=' "$network_conf" 2>/dev/null; then
+      sudo sed -i 's/^[[:space:]]*#\?[[:space:]]*firewall_backend[[:space:]]*=.*/firewall_backend = "iptables"/' \
+        "$network_conf"
+    else
+      echo 'firewall_backend = "iptables"' | sudo tee -a "$network_conf" > /dev/null
+    fi
+    sudo systemctl restart libvirtd
+    printf '%-*s%s\n' "$kw" "firewall backend:" \
+      "set to iptables (was ${current_backend}) [changed]"
+    printf '  %-*s%s\n' "$skw" "note:" "applies to every libvirt network on this host"
+    (( changes++ )) || true
   fi
 
   # --- bridge netfilter ---

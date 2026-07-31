@@ -49,6 +49,35 @@ rule_remove() {
   return 0
 }
 
+libvirt_inp_missing() {
+  hook_log "$1" "$2: LIBVIRT_INP not found in INPUT — libvirt is not using its iptables backend"
+  hook_log "$1" "set firewall_backend = \"iptables\" in /etc/libvirt/network.conf, then run 'migrant setup'"
+}
+
+# INPUT jumps are placed at a line number read from the ruleset, and this hook's
+# own top-of-INPUT inserts renumber it. Two VMs starting at once could each read
+# a position the other then invalidated, landing a jump above LIBVIRT_INP where
+# it pre-empts the DHCP and DNS accepts the guest needs. The xtables lock is per
+# command and cannot cover a read-then-insert, so serialise the whole lifecycle.
+# Ordering is always lifecycle then NAT66; never the reverse.
+LIFECYCLE_LOCK_WAIT=5
+
+lifecycle_lock() {
+  mkdir -p /run/migrant
+  exec {LIFECYCLE_LOCK_FD}>/run/migrant/.lifecycle
+  # Bounded by the tunnel-verification deadline in cmd_up: blocking longer than
+  # that would see the VM destroyed while this hook still waits.
+  if ! flock -w "$LIFECYCLE_LOCK_WAIT" "$LIFECYCLE_LOCK_FD"; then
+    hook_log "$VM_NAME" "timed out waiting for the migrant lifecycle lock"
+    return 8
+  fi
+}
+
+lifecycle_unlock() {
+  flock -u "$LIFECYCLE_LOCK_FD" 2>/dev/null || true
+  exec {LIFECYCLE_LOCK_FD}>&- 2>/dev/null || true
+}
+
 # Delete every copy, then install one. $4 is the insert position: "" for the
 # top of the chain, "append" for the end, or a line number.
 rule_set() {
@@ -562,12 +591,16 @@ apply_tap_rules() {
     local inp_pos
     inp_pos=$(iptables -w -L INPUT --line-numbers -n \
               | awk '/LIBVIRT_INP/{print $1; exit}')
-    if [[ -n "$inp_pos" ]]; then
-      iptables -w -I INPUT "$((inp_pos + 1))" \
-        -m physdev --physdev-in "$iface" -j "$CHAIN"
-    else
-      iptables -w -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    if [[ -z "$inp_pos" ]]; then
+      # Appending instead would place the jump after any host ACCEPT for the
+      # bridge, and the guest's DHCP and DNS would hit the chain's REJECT before
+      # reaching dnsmasq. Refuse rather than install rules that do the wrong
+      # thing in both directions.
+      libvirt_inp_missing "$vm" iptables
+      return 7
     fi
+    iptables -w -I INPUT "$((inp_pos + 1))" \
+      -m physdev --physdev-in "$iface" -j "$CHAIN"
 
     # ICMP must be blocked with a direct INSERT, not inside the per-VM chain.
     # libvirt's LIBVIRT_INP chain runs before the per-VM chain (which is appended)
@@ -619,12 +652,12 @@ apply_tap_rules() {
     local inp6_pos
     inp6_pos=$(ip6tables -w -L INPUT --line-numbers -n \
                | awk '/LIBVIRT_INP/{print $1; exit}') || true
-    if [[ -n "$inp6_pos" ]]; then
-      ip6tables -w -I INPUT "$((inp6_pos + 1))" \
-        -m physdev --physdev-in "$iface" -j "$CHAIN6"
-    else
-      ip6tables -w -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
+    if [[ -z "$inp6_pos" ]]; then
+      libvirt_inp_missing "$vm" ip6tables
+      return 7
     fi
+    ip6tables -w -I INPUT "$((inp6_pos + 1))" \
+      -m physdev --physdev-in "$iface" -j "$CHAIN6"
   fi
 
   if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
@@ -883,6 +916,15 @@ case "$OPERATION" in
   prepare) rm -f "/run/migrant/${VM_NAME}.wgmark"
            vm_block_mac   "$VM_NAME"    # all managed VMs (NI or WG)
            wg_setup_iface "$VM_NAME" ;; # WG VMs only
-  started) apply_rules    "$VM_NAME" ;; # NI rules + wg_setup_rules; unblock MAC; sentinel
-  release) remove_rules   "$VM_NAME" ;; # wg_teardown if WG; defensive MAC cleanup
+           # Both mutate INPUT, so they take the lifecycle lock. A failure must
+           # still release it, hence the explicit status capture rather than
+           # letting set -e unwind.
+  started) lifecycle_lock
+           apply_rules "$VM_NAME" && rc=0 || rc=$?
+           lifecycle_unlock
+           exit "$rc" ;;
+  release) lifecycle_lock
+           remove_rules "$VM_NAME" && rc=0 || rc=$?
+           lifecycle_unlock
+           exit "$rc" ;;
 esac

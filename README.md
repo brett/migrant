@@ -588,6 +588,15 @@ and enable bridge netfilter (`br_netfilter` plus the
 traffic through `physdev` and are inert without it. A VM refuses to start if
 either sysctl is later set back to 0.
 
+libvirt must also be using its **iptables** firewall backend. The per-VM chain
+is entered from `INPUT` just after libvirt's `LIBVIRT_INP`, which does not
+exist under the nftables backend — libvirt filters in its own table instead. A
+VM refuses to start rather than install rules that would both miss host traffic
+and reject the guest's own DHCP and DNS. `migrant setup` sets
+`firewall_backend = "iptables"` in `/etc/libvirt/network.conf` and restarts
+libvirtd; this applies to every libvirt network on the host, not just
+`migrant`.
+
 ### IPv6 (NAT66)
 
 By default a migrant VM has no routable IPv6 — the `migrant` network is IPv4
