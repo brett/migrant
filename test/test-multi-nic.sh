@@ -15,9 +15,9 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 #   cd examples/arch && ../../test/test-multi-nic.sh
 #
 # Prerequisites:
-#   - migrant setup has been run (with the updated hooks)
+#   - migrant setup has been run
 #   - sudo, for reading the rules
-#   - No VM with this name currently exists (the test creates and destroys one)
+#   - No VM with this name exists; the test creates and destroys one
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MIGRANT="$(cd "$SCRIPT_DIR/.." && pwd)/migrant"
