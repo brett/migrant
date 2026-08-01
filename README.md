@@ -727,8 +727,7 @@ IPv4 only. There is no IPv6 form, and a NAT66 target is not supported.
 
 Guest ports 53, 67 and 68 are refused: DHCP and DNS are answered on the
 gateway, and a mapping on 53 would sit above the WireGuard DNS interception and
-take the guest's queries out of the tunnel. No two entries may claim the same
-guest `proto/port`.
+take the guest's queries out of the tunnel.
 
 The reply arrives on whichever interface the host uses to reach the target, so
 that interface must not have reverse-path filtering strict enough to drop it.
@@ -746,6 +745,10 @@ refused rather than ignored.
 The exclusion route is resolved once, when the VM is prepared. If the route to
 the target changes afterwards the tunnel table is not updated and the mapping
 stops working until the VM restarts.
+
+No two entries may claim the same guest `proto/port`, whichever directives they
+are: two rules for one endpoint install both, and insertion order rather than
+the config decides which the guest reaches.
 
 `HOST_ACCESS` has no effect when isolation is disabled (`NETWORK_ISOLATION=false`) —
 there is nothing to poke holes in.

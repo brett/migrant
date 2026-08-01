@@ -163,8 +163,8 @@ When adding a new feature that requires privileged enforcement:
 ## The teardown record: `/run/migrant/<vm>.state`
 
 `apply_rules` writes each fact — tap, MAC, isolation flag, IPv6 policy, refcount
-taken, host-access entry — *before* installing the rule it describes, and
-`remove_rules` undoes exactly what is recorded. Teardown must
+taken, host-access entry, forward-port tuple — *before* installing the rule it
+describes, and `remove_rules` undoes exactly what is recorded. Teardown must
 never re-read `/etc/migrant/`: that holds the current Migrantfile, so a config
 edited between `up` and `halt` would leave whatever the file no longer mentions
 bound to a tap name libvirt hands to the next VM.
