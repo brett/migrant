@@ -160,8 +160,10 @@ to match, defines the `migrant` NAT network, creates the images directory
 (`/var/lib/libvirt/images`, or `LIBVIRT_IMAGES_DIR` if set) with
 group-writable permissions, installs three libvirt hooks (network isolation and
 WireGuard tunnel management, shared folder loop image mount/unmount, and
-`rp_filter` for the `linux-hardened` kernel), creates `/etc/migrant/` for
-managed VM configs, and installs ZSH completions if the destination directory
+`rp_filter` for the `linux-hardened` kernel), loads `br_netfilter` and sets the
+`bridge-nf-call-ip*tables` sysctls that the isolation rules depend on —
+persisting both — creates `/etc/migrant/` for managed VM configs, and installs
+ZSH completions if the destination directory
 (`/usr/share/zsh/site-functions`, or `MIGRANT_ZSH_SITE_FUNCTIONS` if set)
 exists.
 

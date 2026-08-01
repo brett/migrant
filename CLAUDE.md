@@ -16,8 +16,9 @@ the host — do not introduce features that widen the attack surface without
 careful consideration. Key containment properties to preserve:
 
 - KVM hypervisor boundary between guest and host
-- Network isolation (on by default) blocks the VM from reaching the host or LAN; set `NETWORK_ISOLATION=false` to opt out
-- IPv6 has no routable path by default (dropped at the FORWARD chain); `NETWORK_IPV6=nat` opts a VM in to NAT66 egress and is refused alongside WireGuard (IPv6 is not tunnel-routed)
+- Network isolation (on by default) blocks the VM from reaching the host or LAN; set `NETWORK_ISOLATION=false` to opt out. Forwarded traffic to private, shared (`100.64.0.0/10`) and link-local destinations is rejected; guest→host is the per-VM INPUT chain, not those rejects
+- IPv6 egress has no routable path by default (dropped at the FORWARD chain); `NETWORK_IPV6=nat` opts a VM in to NAT66 egress and is refused alongside WireGuard (IPv6 is not tunnel-routed). Guest→host IPv6 is blocked at INPUT in *every* IPv6 mode: the bridge always carries a ULA and that traffic is delivered locally, so the egress drop never sees it
+- Rules match with `-m physdev`, which only sees bridge ports, and the MAC gate matches a source address the guest can change; neither is a substitute for the rules themselves
 - The shared folder is the only intentional host↔guest data channel; its scope
   should remain narrow
 - The VM is designed to be destroyed and rebuilt, not patched in place
@@ -157,6 +158,27 @@ When adding a new feature that requires privileged enforcement:
 1. Add the Migrantfile variable and validation to `sync_managed_config()`
 2. Write the validated data to `/etc/migrant/${VM_NAME}/`
 3. Read it in the appropriate hook (`apply_rules`, `remove_rules`, etc.)
+4. Record what was installed in `.state` and tear down from that record
+
+## The teardown record: `/run/migrant/<vm>.state`
+
+`apply_rules` writes each fact — tap, MAC, isolation flag, IPv6 policy, refcount
+taken, host-access entry — *before* installing the rule it describes, and
+`remove_rules` undoes exactly what is recorded. Teardown must
+never re-read `/etc/migrant/`: that holds the current Migrantfile, so a config
+edited between `up` and `halt` would leave whatever the file no longer mentions
+bound to a tap name libvirt hands to the next VM.
+
+A rule with no record strands. A new key is added to `state_load`'s `case` and
+bumps `STATE_VERSION_CURRENT`; keys are only ever added, never repurposed, so a
+record from either side of a bump still parses.
+
+## Rules are established, not inserted
+
+Use `rule_set` and `rule_remove` rather than bare `-I`/`-D`. They delete every
+copy before installing one, because a duplicate survives a single-delete
+teardown and rebinds to whichever VM next receives that tap name. Leftover
+REJECTs fail closed; leftover ACCEPTs fail open.
 
 ## Target platform
 
