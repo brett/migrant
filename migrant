@@ -1474,6 +1474,8 @@ esac
 df -h /
 REMOTE
   echo "Disk resized to ${DISK_GB}G."
+  _MIGRANT_VM_IP="$ip"
+  run_hook "post-up"
 }
 
 vm_has_ssh() {
