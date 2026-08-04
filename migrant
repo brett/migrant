@@ -1386,7 +1386,6 @@ cmd_reset() {
 }
 
 cmd_resize() {
-  _MIGRANT_TRIGGER="resize"
   if [[ -z "${DISK_GB:-}" ]]; then
     echo "[ERROR] 'DISK_GB' is not set in Migrantfile" >&2
     exit 78
@@ -1474,8 +1473,6 @@ esac
 df -h /
 REMOTE
   echo "Disk resized to ${DISK_GB}G."
-  _MIGRANT_VM_IP="$ip"
-  run_hook "post-up"
 }
 
 vm_has_ssh() {

@@ -49,13 +49,13 @@ not stay alive waiting on a user-defined hook script.
 
 Each hook receives these variables in its environment:
 
-| Variable          | Description                                                                            |
-| ----------------- | -------------------------------------------------------------------------------------- |
-| `MIGRANT_VM_NAME` | VM name from the Migrantfile                                                           |
-| `MIGRANT_VM_DIR`  | Absolute path to the VM directory                                                      |
-| `MIGRANT_HOOK`    | Hook name (`pre-up`, `post-up`, `pre-down`, `post-down`)                               |
-| `MIGRANT_TRIGGER` | Command that caused this hook (`up`, `halt`, `snapshot`, `destroy`, `reset`, `resize`) |
-| `MIGRANT_VM_IP`   | VM IP address (set when available; empty for `pre-up` and console-only `post-up`)      |
+| Variable          | Description                                                                       |
+| ----------------- | --------------------------------------------------------------------------------- |
+| `MIGRANT_VM_NAME` | VM name from the Migrantfile                                                      |
+| `MIGRANT_VM_DIR`  | Absolute path to the VM directory                                                 |
+| `MIGRANT_HOOK`    | Hook name (`pre-up`, `post-up`, `pre-down`, `post-down`)                          |
+| `MIGRANT_TRIGGER` | Command that caused this hook (`up`, `halt`, `snapshot`, `destroy`, `reset`)      |
+| `MIGRANT_VM_IP`   | VM IP address (set when available; empty for `pre-up` and console-only `post-up`) |
 
 All `Migrantfile` variables (`VM_NAME`, `RAM_MB`, `NETWORKS`, etc.) are also
 present in the environment, since the `Migrantfile` is sourced before hooks run.
