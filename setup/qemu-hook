@@ -5,7 +5,9 @@ set -euo pipefail
 VM_NAME="$1"
 OPERATION="$2"
 # iptables chain names are limited to 29 characters; hash the VM name so
-# the chain name stays within that limit regardless of VM name length.
+# the chain name stays within that limit regardless of VM name length. 32 bits
+# of it: two names collide at even odds around 77k VMs, and a collision means
+# one VM's teardown flushes and deletes the other's chain.
 CHAIN="MIGRANT_$(printf '%s' "$VM_NAME" | md5sum | head -c8)"
 # Separate ip6tables chain for the NAT66 per-VM INPUT reject (see apply_rules).
 # Distinct prefix so the v4 and v6 per-VM chains never collide.
@@ -24,6 +26,110 @@ hook_log() {
 
 hook_log "$VM_NAME" "hook start"
 
+# Rules outside the per-VM chains are established as exactly one copy: a stray
+# duplicate survives teardown and rebinds to whichever VM next receives the tap
+# name. -C, -D and -I share one argument list so a check cannot drift from the
+# rule it guards.
+RULE_DELETE_BOUND=16
+
+_rule_argv() {
+  RULE_IPT="$1"
+  RULE_TBL=()
+  [[ -n "$2" ]] && RULE_TBL=(-t "$2")
+  RULE_CHAIN="$3"
+}
+
+# Host-global state (a shared sysctl, a shared MASQUERADE) is reference counted
+# by per-VM sentinel files so the last VM out restores the host. The lock spans
+# the whole read-modify-write, which the xtables lock cannot: two VMs could
+# otherwise both see themselves as the last one, or neither save the prior value.
+refdir_lock() {
+  mkdir -p "$1"
+  exec {REFDIR_LOCK_FD}>"$1/.lock"
+  flock "$REFDIR_LOCK_FD"
+}
+
+refdir_unlock() {
+  flock -u "$REFDIR_LOCK_FD" 2>/dev/null || true
+  exec {REFDIR_LOCK_FD}>&- 2>/dev/null || true
+}
+
+# True while another VM holds a reference. Sentinels are VM names; the dotfiles
+# are bookkeeping.
+refdir_in_use() {
+  local remaining
+  remaining=$(find "$1" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | head -1) || true
+  [[ -n "$remaining" ]]
+}
+
+# Delete every copy of a rule. Best-effort: teardown continues regardless.
+# Teardown continues past a rule it cannot remove, so that the rest still goes;
+# both exits are logged, or an incomplete teardown looks like a clean one.
+rule_remove() {
+  local n=0
+  _rule_argv "$1" "$2" "$3"; shift 3
+  while "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -C "$RULE_CHAIN" "$@" 2>/dev/null; do
+    if ! "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -D "$RULE_CHAIN" "$@" 2>/dev/null; then
+      hook_log "$VM_NAME" "$RULE_CHAIN: delete failed while the rule is still present: $*"
+      break
+    fi
+    if (( ++n >= RULE_DELETE_BOUND )); then
+      hook_log "$VM_NAME" "$RULE_CHAIN: over $RULE_DELETE_BOUND copies of one rule; some remain: $*"
+      break
+    fi
+  done
+  return 0
+}
+
+libvirt_inp_missing() {
+  hook_log "$1" "$2: LIBVIRT_INP not found in INPUT — libvirt is not using its iptables backend"
+  hook_log "$1" "set firewall_backend = \"iptables\" in /etc/libvirt/network.conf, then run 'migrant setup'"
+}
+
+# INPUT jumps go at a line number read from the ruleset, which this hook's own
+# top-of-INPUT inserts renumber. The xtables lock is per command and cannot
+# cover a read-then-insert, so the whole lifecycle is serialised instead.
+# Lock ordering is always lifecycle then NAT66, never the reverse.
+LIFECYCLE_LOCK_WAIT=5
+
+lifecycle_lock() {
+  mkdir -p /run/migrant
+  exec {LIFECYCLE_LOCK_FD}>/run/migrant/.lifecycle
+  # Bounded by the tunnel-verification deadline in cmd_up: blocking longer than
+  # that would see the VM destroyed while this hook still waits.
+  if ! flock -w "$LIFECYCLE_LOCK_WAIT" "$LIFECYCLE_LOCK_FD"; then
+    hook_log "$VM_NAME" "timed out waiting for the migrant lifecycle lock"
+    return 8
+  fi
+}
+
+lifecycle_unlock() {
+  flock -u "$LIFECYCLE_LOCK_FD" 2>/dev/null || true
+  exec {LIFECYCLE_LOCK_FD}>&- 2>/dev/null || true
+}
+
+# Delete every copy, then install one. $4 is the insert position: "" for the
+# top of the chain, "append" for the end, or a line number.
+rule_set() {
+  local pos="$4"
+  _rule_argv "$1" "$2" "$3"; shift 4
+  local n=0
+  while "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -C "$RULE_CHAIN" "$@" 2>/dev/null; do
+    "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -D "$RULE_CHAIN" "$@"
+    if (( ++n >= RULE_DELETE_BOUND )); then
+      # Logging and inserting anyway would add to the pile rather than
+      # establish canonical state.
+      hook_log "$VM_NAME" "$RULE_CHAIN: over $RULE_DELETE_BOUND copies of one rule; refusing to continue"
+      return 6
+    fi
+  done
+  case "$pos" in
+    append) "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -A "$RULE_CHAIN" "$@" ;;
+    "")     "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -I "$RULE_CHAIN" "$@" ;;
+    *)      "$RULE_IPT" -w "${RULE_TBL[@]+"${RULE_TBL[@]}"}" -I "$RULE_CHAIN" "$pos" "$@" ;;
+  esac
+}
+
 # Read the domain XML from stdin. libvirt pipes it to the hook for every
 # operation, so this is always available — unlike the persistent XML file,
 # which may not exist yet when the hook fires during initial virt-install.
@@ -39,7 +145,21 @@ HAS_NETWORK_ISOLATION=false
 HAS_NETWORK_IPV6=false
 [[ -f "/etc/migrant/${VM_NAME}/network-ipv6" ]] && HAS_NETWORK_IPV6=true
 
-VM_MAC=$(echo "$xml" | grep -o "mac address='[^']*'" | head -1 | cut -d"'" -f2)
+# Every NIC's MAC. mapfile rather than a pipeline, so a domain with no NIC
+# yields an empty array instead of tripping pipefail.
+mapfile -t VM_MACS < <(echo "$xml" | grep -o "mac address='[^']*'" | cut -d"'" -f2)
+if (( ${#VM_MACS[@]} == 0 )); then
+  mapfile -t VM_MACS < <(echo "$xml" | grep -o 'mac address="[^"]*"' | cut -d'"' -f2)
+fi
+
+# Unblock, or defensively clean, every NIC's MAC.
+unblock_macs() {
+  local mac
+  for mac in "${VM_MACS[@]+"${VM_MACS[@]}"}"; do
+    [[ -n "$mac" ]] || continue
+    nft delete element bridge migrant blocked_macs "{ $mac }" 2>/dev/null || true
+  done
+}
 
 wg_iface_and_table() {
   # Interface name: "mg-wg-" + first 7 hex chars of MD5(vm_name).
@@ -61,7 +181,7 @@ vm_block_mac() {
   [[ "$HAS_NETWORK_ISOLATION" == true ]] \
     || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]] \
     || return 0
-  [[ -z "$VM_MAC" ]] && return 0
+  (( ${#VM_MACS[@]} > 0 )) || return 0
 
   # nftables bridge 'prerouting' is the right hook: internet-bound traffic from
   # the VM reaches the bridge with the gateway MAC as destination, so it is
@@ -79,9 +199,75 @@ vm_block_mac() {
     nft add rule bridge migrant prerouting ether saddr @blocked_macs drop
   fi
 
-  # Remove any stale MAC entry from a previous failed setup, then add this VM.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
-  nft add element bridge migrant blocked_macs "{ $VM_MAC }"
+  # Remove any stale entry from a previous failed setup, then block every NIC.
+  local mac
+  for mac in "${VM_MACS[@]}"; do
+    nft delete element bridge migrant blocked_macs "{ $mac }" 2>/dev/null || true
+    nft add element bridge migrant blocked_macs "{ $mac }"
+  done
+}
+
+# Parsed once per VM, then applied to every tap.
+ha_parse() {
+  HA_PORTS=(); HA_LAN=()
+  local file="/etc/migrant/${1}/host-access" rule
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r rule; do
+    case "$rule" in
+      allow-host-port\ *) HA_PORTS+=("${rule#allow-host-port }") ;;
+      allow-lan-host\ *)  HA_LAN+=("${rule#allow-lan-host }") ;;
+    esac
+  done < "$file"
+}
+
+ipv4_to_int() {
+  local IFS=. o1 o2 o3 o4
+  read -r o1 o2 o3 o4 <<<"$1"
+  [[ -n "$o4" ]] || return 1
+  printf '%s' $(( (10#$o1 << 24) + (10#$o2 << 16) + (10#$o3 << 8) + 10#$o4 ))
+}
+
+# True when the tunnel explicitly claims this address. AllowedIPs reaches
+# wireguard-wg.conf but is otherwise never parsed. A default route is not a
+# claim: a full-tunnel 0.0.0.0/0 covers every address, so honouring it here
+# would warn about every allow-lan-host entry.
+wg_claims_ip() {
+  local file="/etc/migrant/${1}/wireguard-wg.conf" ip="$2"
+  [[ -r "$file" ]] || return 1
+  local ip_int cidr net len net_int mask
+  ip_int=$(ipv4_to_int "$ip") || return 1
+  while read -r cidr; do
+    [[ "$cidr" == *:* ]] && continue
+    net="${cidr%%/*}"
+    len="${cidr#*/}"
+    [[ "$cidr" == */* ]] || len=32
+    [[ "$len" =~ ^[0-9]+$ ]] || continue
+    (( len > 0 && len <= 32 )) || continue
+    net_int=$(ipv4_to_int "$net") || continue
+    mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+    if (( (ip_int & mask) == (net_int & mask) )); then
+      return 0
+    fi
+  done < <(awk -F= '
+    /^[[:space:]]*AllowedIPs[[:space:]]*=/ {
+      gsub(/[[:space:]]/, "", $2)
+      n = split($2, a, ",")
+      for (i = 1; i <= n; i++) print a[i]
+    }' "$file")
+  return 1
+}
+
+wg_dns_parse() {
+  WG_DNS_IPS=()
+  local file="/etc/migrant/${1}/wireguard-dns" ip
+  [[ -f "$file" ]] || return 0
+  local -a raw=()
+  IFS=',' read -ra raw <<< "$(cat "$file")"
+  for ip in "${raw[@]+"${raw[@]}"}"; do
+    ip="${ip// /}"
+    [[ -n "$ip" ]] && WG_DNS_IPS+=("$ip")
+  done
+  return 0
 }
 
 wg_setup_iface() {
@@ -103,10 +289,15 @@ wg_setup_iface() {
   # partial failure (e.g. wg setconf fails on a malformed key) leaves the
   # interface in the kernel. The next start attempt then fails at ip link add
   # with "File exists" and the VM cannot start until the user manually runs
-  # ip link del. ip route flush and ip rule del are similarly defensive.
+  # ip link del. ip route flush and ip rule del are similarly defensive; the
+  # policy rule is deleted until absent, since one delete leaves any duplicate
+  # from an earlier lifecycle in place.
   ip link del "$WG_IFACE" 2>/dev/null || true
   ip route flush table "$WG_TABLE" 2>/dev/null || true
-  ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
+  local n=0
+  while ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null; do
+    (( ++n >= RULE_DELETE_BOUND )) && break
+  done
 
   ip link add "$WG_IFACE" type wireguard 2>/dev/null || {
     hook_log "$vm" "wg_setup_iface: failed to create WireGuard interface"
@@ -164,35 +355,32 @@ wg_setup_iface() {
   # exit via the VPN — the FORWARD ACCEPT fires but the destination never
   # receives them. A /32 always wins over the default in the same table, so
   # all other traffic still exits through WireGuard unaffected.
-  local ha_file="/etc/migrant/${vm}/host-access"
-  if [[ -f "$ha_file" ]]; then
-    while IFS= read -r rule; do
-      [[ -z "$rule" ]] && continue
-      case "$rule" in
-        allow-lan-host\ *)
-          local host_ip="${rule#allow-lan-host }"
-          local route_info route_dev route_via
-          route_info=$(ip route get "$host_ip" 2>/dev/null | head -1) || true
-          route_dev=$(printf '%s' "$route_info" \
-            | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
-          route_via=$(printf '%s' "$route_info" \
-            | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
-          if [[ -n "$route_dev" ]]; then
-            if [[ -n "$route_via" ]]; then
-              ip route add "${host_ip}/32" via "$route_via" dev "$route_dev" \
-                table "$WG_TABLE"
-            else
-              ip route add "${host_ip}/32" dev "$route_dev" table "$WG_TABLE"
-            fi
-            hook_log "$vm" "host-access: exclusion route $host_ip via $route_dev"
-          else
-            hook_log "$vm" \
-              "host-access: no route to $host_ip; allow-lan-host may not work"
-          fi
-          ;;
-      esac
-    done < "$ha_file"
-  fi
+  ha_parse "$vm"
+  local host_ip route_info route_dev route_via
+  for host_ip in "${HA_LAN[@]+"${HA_LAN[@]}"}"; do
+    route_info=$(ip route get "$host_ip" 2>/dev/null | head -1) || true
+    route_dev=$(printf '%s' "$route_info" \
+      | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+    route_via=$(printf '%s' "$route_info" \
+      | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+    if [[ -n "$route_dev" && "$route_dev" != "$WG_IFACE" ]] \
+        && wg_claims_ip "$vm" "$host_ip"; then
+      hook_log "$vm" \
+        "host-access: $host_ip is inside the tunnel's AllowedIPs but routes via $route_dev; if another machine holds that address there, traffic reaches it instead"
+    fi
+    if [[ -n "$route_dev" ]]; then
+      if [[ -n "$route_via" ]]; then
+        ip route add "${host_ip}/32" via "$route_via" dev "$route_dev" \
+          table "$WG_TABLE"
+      else
+        ip route add "${host_ip}/32" dev "$route_dev" table "$WG_TABLE"
+      fi
+      hook_log "$vm" "host-access: exclusion route $host_ip via $route_dev"
+    else
+      hook_log "$vm" \
+        "host-access: no route to $host_ip; allow-lan-host may not work"
+    fi
+  done
 
   # Policy rule: divert marked packets to the WireGuard table. This does not
   # require the tap interface and is placed here (prepare) so that
@@ -224,7 +412,7 @@ wg_setup_rules() {
   # PREROUTING, bridged packets appear to arrive on the bridge device
   # (virbr-migrant), not the physical tap port (vnet1). physdev matches the
   # underlying bridge port, which is what uniquely identifies this VM's traffic.
-  iptables -t mangle -A PREROUTING \
+  rule_set iptables mangle PREROUTING append \
     -m physdev --physdev-in "$iface" -j MARK --set-mark "$WG_TABLE"
 
   # DNS handling — IPs pre-parsed and normalized at sync time.
@@ -238,21 +426,17 @@ wg_setup_rules() {
   #      to believe it is talking to 192.168.200.1; conntrack reverses the
   #      translation on the response. physdev is required for the same
   #      reason it is required for the mangle mark rule above.
-  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
-  if [[ -f "$wg_dns_file" ]]; then
-    local first_dns=""
-    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
-    for dns_ip in "${dns_list[@]}"; do
-      dns_ip="${dns_ip// /}"
-      [[ -z "$dns_ip" ]] && continue
-      iptables -I FORWARD -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT
+  local dns_ip first_dns=""
+  if (( ${#WG_DNS_IPS[@]} > 0 )); then
+    for dns_ip in "${WG_DNS_IPS[@]}"; do
+      rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT
       [[ -z "$first_dns" ]] && first_dns="$dns_ip"
     done
     if [[ -n "$first_dns" ]]; then
-      iptables -t nat -A PREROUTING \
+      rule_set iptables nat PREROUTING append \
         -m physdev --physdev-in "$iface" -p udp --dport 53 \
         -j DNAT --to-destination "$first_dns"
-      iptables -t nat -A PREROUTING \
+      rule_set iptables nat PREROUTING append \
         -m physdev --physdev-in "$iface" -p tcp --dport 53 \
         -j DNAT --to-destination "$first_dns"
     fi
@@ -262,36 +446,38 @@ wg_setup_rules() {
 }
 
 wg_teardown() {
-  local vm="$1" iface="$2"
+  local vm="$1"; shift
+  local -a taps=("$@")
 
   local WG_IFACE WG_TABLE
   wg_iface_and_table "$vm"
 
-  iptables -t mangle -D PREROUTING \
-    -m physdev --physdev-in "$iface" -j MARK \
-    --set-mark "$WG_TABLE" 2>/dev/null || true
-  ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null || true
-  ip route flush table "$WG_TABLE" 2>/dev/null || true
+  # DNS addresses come from the teardown record, not wireguard-dns: that file
+  # tracks the current Migrantfile and may no longer list what was installed.
+  local iface dns_ip
+  for iface in "${taps[@]+"${taps[@]}"}"; do
+    [[ -n "$iface" ]] || continue
+    rule_remove iptables mangle PREROUTING \
+      -m physdev --physdev-in "$iface" -j MARK --set-mark "$WG_TABLE"
 
-  local wg_dns_file="/etc/migrant/${vm}/wireguard-dns"
-  if [[ -f "$wg_dns_file" ]]; then
-    local first_dns=""
-    IFS=',' read -ra dns_list <<< "$(cat "$wg_dns_file")"
-    for dns_ip in "${dns_list[@]}"; do
-      dns_ip="${dns_ip// /}"
-      [[ -z "$dns_ip" ]] && continue
-      iptables -D FORWARD -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT 2>/dev/null || true
-      [[ -z "$first_dns" ]] && first_dns="$dns_ip"
+    for dns_ip in "${STATE_WG_DNS[@]+"${STATE_WG_DNS[@]}"}"; do
+      rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d "${dns_ip}/32" -j ACCEPT
     done
-    if [[ -n "$first_dns" ]]; then
-      iptables -t nat -D PREROUTING \
+    if [[ -n "$STATE_WG_DNAT_TARGET" ]]; then
+      rule_remove iptables nat PREROUTING \
         -m physdev --physdev-in "$iface" -p udp --dport 53 \
-        -j DNAT --to-destination "$first_dns" 2>/dev/null || true
-      iptables -t nat -D PREROUTING \
+        -j DNAT --to-destination "$STATE_WG_DNAT_TARGET"
+      rule_remove iptables nat PREROUTING \
         -m physdev --physdev-in "$iface" -p tcp --dport 53 \
-        -j DNAT --to-destination "$first_dns" 2>/dev/null || true
+        -j DNAT --to-destination "$STATE_WG_DNAT_TARGET"
     fi
-  fi
+  done
+
+  local n=0
+  while ip rule del fwmark "$WG_TABLE" lookup "$WG_TABLE" 2>/dev/null; do
+    (( ++n >= RULE_DELETE_BOUND )) && break
+  done
+  ip route flush table "$WG_TABLE" 2>/dev/null || true
 
   ip link set "$WG_IFACE" down 2>/dev/null || true
   ip link del "$WG_IFACE" 2>/dev/null || true
@@ -300,8 +486,8 @@ wg_teardown() {
   rm -f "/run/migrant/${vm}.wgbadkey"
 
   # Defensive cleanup: if wg_setup_rules never ran (e.g. 'started' hook
-  # crashed before unblocking), the MAC entry may still be in the set.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+  # crashed before unblocking), the MAC entries may still be in the set.
+  unblock_macs
 
   hook_log "$vm" "WireGuard torn down: $WG_IFACE"
 }
@@ -310,12 +496,15 @@ wg_teardown() {
 # shared by every NAT66 VM and can't be scoped to a tap. Reference-count their
 # users via sentinel files so they are added on the first VM and reverted on the
 # last — otherwise they outlive the sandbox and leave the host more permissive.
+# MUST match <ip address=...> in the migrant network XML.
+BRIDGE_GATEWAY="192.168.200.1"
+
 NAT66_ULA="fdca:6d16:2b1a::/64"
 NAT66_REFDIR="/run/migrant/nat66"
 
 nat66_shared_setup() {
   local vm="$1"
-  mkdir -p "$NAT66_REFDIR"
+  refdir_lock "$NAT66_REFDIR"
 
   # Save the host's prior forwarding value once so the last teardown restores it
   # exactly, rather than blindly zeroing a host that legitimately forwards IPv6.
@@ -325,28 +514,261 @@ nat66_shared_setup() {
   fi
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 
-  # -C guard keeps the shared MASQUERADE idempotent across VMs.
-  ip6tables -t nat -C POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null \
-    || ip6tables -t nat -A POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE
+  # -C guard rather than delete-then-insert: this rule is shared, and removing
+  # it mid-transition would drop egress for every other NAT66 VM.
+  ip6tables -w -t nat -C POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null \
+    || ip6tables -w -t nat -A POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE
 
   touch "$NAT66_REFDIR/$vm"
+  refdir_unlock
 }
 
 nat66_shared_teardown() {
   local vm="$1"
+  refdir_lock "$NAT66_REFDIR"
   rm -f "$NAT66_REFDIR/$vm"
+  if refdir_in_use "$NAT66_REFDIR"; then
+    refdir_unlock
+    return 0
+  fi
 
-  # Revert only once no NAT66 VM remains (sentinels are VM names; .fwd-prev is a
-  # dotfile, excluded here).
-  local remaining
-  remaining=$(find "$NAT66_REFDIR" -mindepth 1 -maxdepth 1 -type f ! -name '.*' 2>/dev/null | head -1) || true
-  [[ -n "$remaining" ]] && return 0
-
-  ip6tables -t nat -D POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null || true
+  ip6tables -w -t nat -D POSTROUTING -s "$NAT66_ULA" ! -o virbr-migrant -j MASQUERADE 2>/dev/null || true
   local prev
   prev=$(cat "$NAT66_REFDIR/.fwd-prev" 2>/dev/null) || prev=0
   sysctl -w "net.ipv6.conf.all.forwarding=${prev:-0}" >/dev/null 2>&1 || true
   rm -f "$NAT66_REFDIR/.fwd-prev"
+  refdir_unlock
+}
+
+# route_localnet is a property of the shared bridge, not of one VM, so it is
+# reference counted the same way: set for the first VM that needs it, restored
+# to the host's prior value once the last one stops.
+RLNET_REFDIR="/run/migrant/route-localnet"
+RLNET_SYSCTL="net.ipv4.conf.virbr-migrant.route_localnet"
+
+rlnet_acquire() {
+  local vm="$1"
+  refdir_lock "$RLNET_REFDIR"
+  if [[ ! -f "$RLNET_REFDIR/.prev" ]]; then
+    sysctl -n "$RLNET_SYSCTL" > "$RLNET_REFDIR/.prev" 2>/dev/null \
+      || echo 0 > "$RLNET_REFDIR/.prev"
+  fi
+  sysctl -w "${RLNET_SYSCTL}=1" >/dev/null
+  touch "$RLNET_REFDIR/$vm"
+  refdir_unlock
+}
+
+rlnet_release() {
+  local vm="$1"
+  refdir_lock "$RLNET_REFDIR"
+  rm -f "$RLNET_REFDIR/$vm"
+  if refdir_in_use "$RLNET_REFDIR"; then
+    refdir_unlock
+    return 0
+  fi
+
+  local prev
+  prev=$(cat "$RLNET_REFDIR/.prev" 2>/dev/null) || prev=0
+  sysctl -w "${RLNET_SYSCTL}=${prev:-0}" >/dev/null 2>&1 || true
+  rm -f "$RLNET_REFDIR/.prev"
+  refdir_unlock
+}
+
+require_bridge_netfilter() {
+  # -m physdev matches nothing unless bridged traffic is passed to ip(6)tables.
+  # migrant setup persists both sysctls, but they can be changed afterwards, so
+  # re-check: failing this hook aborts the domain, where installing inert rules
+  # would leave it running with no isolation.
+  local vm="$1" key
+  for key in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+    if [[ "$(cat "/proc/sys/net/bridge/${key}" 2>/dev/null || echo 0)" != 1 ]]; then
+      hook_log "$vm" "net.bridge.${key} is not 1; physdev rules would not match"
+      hook_log "$vm" "run 'migrant setup' to restore it"
+      return 5
+    fi
+  done
+}
+
+# /run/migrant/<vm>.state records what apply_rules installed, so teardown never
+# re-reads /etc/migrant — that holds the current Migrantfile, which may have
+# been edited since the VM started. Facts are written before the rule they
+# describe; a rule with no record strands on a tap name libvirt will reuse.
+STATE_VERSION_CURRENT=1
+
+state_begin() {
+  STATE_FILE="/run/migrant/${1}.state"
+  mkdir -p /run/migrant
+  printf 'version=%s\n' "$STATE_VERSION_CURRENT" > "$STATE_FILE"
+}
+
+state_add() {
+  printf '%s=%s\n' "$1" "$2" >> "$STATE_FILE"
+}
+
+state_reset() {
+  STATE_VERSION=""
+  STATE_TAPS=(); STATE_MACS=(); STATE_HOST_PORTS=(); STATE_LAN_HOSTS=(); STATE_WG_DNS=()
+  STATE_ISOLATION=false
+  STATE_IPV6_POLICY=""
+  STATE_IPV6_INPUT=false
+  STATE_NAT66_REF=false
+  STATE_RLNET=false
+  STATE_WG_APPLIED=false
+  STATE_WG_DNAT_TARGET=""
+}
+
+state_load() {
+  local key val
+  state_reset
+  while IFS='=' read -r key val; do
+    case "$key" in
+      version)        STATE_VERSION="$val" ;;
+      tap)            STATE_TAPS+=("$val") ;;
+      mac)            STATE_MACS+=("$val") ;;
+      isolation)      STATE_ISOLATION="$val" ;;
+      ipv6_policy)    STATE_IPV6_POLICY="$val" ;;
+      ipv6_input)     STATE_IPV6_INPUT="$val" ;;
+      nat66_ref)      STATE_NAT66_REF="$val" ;;
+      route_localnet) STATE_RLNET="$val" ;;
+      host_port)      STATE_HOST_PORTS+=("$val") ;;
+      lan_host)       STATE_LAN_HOSTS+=("$val") ;;
+      wg_applied)     STATE_WG_APPLIED="$val" ;;
+      wg_dns)         STATE_WG_DNS+=("$val") ;;
+      wg_dnat_target) STATE_WG_DNAT_TARGET="$val" ;;
+      # New keys go here, with a STATE_VERSION_CURRENT bump. Keys are only ever
+      # added, never repurposed, so a record from either side of a bump still
+      # reads: unknown keys fall through this case and the rest is exact.
+    esac
+  done < "$1"
+}
+
+state_assume_legacy() {
+  # No usable record. The tap is all we have, so delete every fixed rule variant
+  # and let the per-rule '|| true' absorb the misses.
+  local vm="$1" iface="$2"
+  state_reset
+  [[ -n "$iface" ]] && STATE_TAPS=("$iface")
+  STATE_ISOLATION=true
+  STATE_IPV6_INPUT=true
+  STATE_IPV6_POLICY=all
+  if [[ -f "$NAT66_REFDIR/$vm" ]]; then
+    STATE_NAT66_REF=true
+  fi
+
+  # Nothing else names the host-access ports, so fall back to the current
+  # config: stale entries beat leaving a DNAT on a tap libvirt will reuse.
+  # WireGuard DNS rules are not reconstructed.
+  ha_parse "$vm"
+  STATE_HOST_PORTS=("${HA_PORTS[@]+"${HA_PORTS[@]}"}")
+  STATE_LAN_HOSTS=("${HA_LAN[@]+"${HA_LAN[@]}"}")
+  if (( ${#STATE_HOST_PORTS[@]} + ${#STATE_LAN_HOSTS[@]} > 0 )); then
+    hook_log "$vm" "host-access rules reconstructed from current config; entries removed since start may survive teardown"
+  fi
+}
+
+apply_tap_rules() {
+  local vm="$1" iface="$2"
+
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    # The jump lands after LIBVIRT_INP (which accepts DHCP and DNS bound for
+    # dnsmasq) but before any host-firewall REJECT/DROP. Stale copies go first:
+    # deleting one above LIBVIRT_INP would shift the line number being read.
+    rule_remove iptables "" INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    local inp_pos
+    inp_pos=$(iptables -w -L INPUT --line-numbers -n \
+              | awk '/LIBVIRT_INP/{print $1; exit}')
+    if [[ -z "$inp_pos" ]]; then
+      # Appending would put the jump after any host ACCEPT for the bridge while
+      # the chain's REJECT still caught the guest's own DHCP and DNS.
+      libvirt_inp_missing "$vm" iptables
+      return 7
+    fi
+    iptables -w -I INPUT "$((inp_pos + 1))" \
+      -m physdev --physdev-in "$iface" -j "$CHAIN"
+
+    # ICMP must be blocked with a direct INSERT, not inside the per-VM chain.
+    # libvirt's LIBVIRT_INP chain runs before the per-VM chain (which is appended)
+    # and unconditionally ACCEPTs ICMP for its bridge — so any ICMP rule inside
+    # the per-VM chain is never reached.  Inserting at the top of INPUT ensures
+    # this rule is evaluated before LIBVIRT_INP.
+    rule_set iptables "" INPUT "" -m physdev --physdev-in "$iface" -p icmp -j REJECT
+
+    # Block the VM from private, shared and link-local destinations, including
+    # the libvirt subnet itself so VMs cannot reach each other over the shared
+    # bridge. Not comprehensive LAN isolation: private infrastructure can use
+    # globally routable prefixes, which no static list identifies. Shared
+    # address space carries overlay and carrier networks; link-local carries
+    # the metadata address. Both mirror what the IPv6 side already rejects.
+    # These are inserted first so that allow-lan-host ACCEPTs, inserted
+    # immediately after, end up above the REJECTs in the chain.
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 100.64.0.0/10 -j REJECT
+    rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" -d 169.254.0.0/16 -j REJECT
+
+    local entry
+    for entry in "${HA_PORTS[@]+"${HA_PORTS[@]}"}"; do
+      # DNAT to 127.0.0.1 reaches host services whatever they bind to. Scoped to
+      # the gateway: without -d this rewrites every connection the guest makes on
+      # that port, to any address, and lands it on the host instead.
+      rule_set iptables nat PREROUTING "" -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" \
+        -p "${entry%%/*}" --dport "${entry#*/}" \
+        -j DNAT --to-destination 127.0.0.1:"${entry#*/}"
+    done
+    # allow-lan-host uses NEW,ESTABLISHED,RELATED because the RFC1918 REJECTs
+    # are stateless — without ESTABLISHED, ongoing connections would be
+    # rejected mid-stream.
+    for entry in "${HA_LAN[@]+"${HA_LAN[@]}"}"; do
+      rule_set iptables "" FORWARD "" -m physdev --physdev-in "$iface" \
+        -d "${entry}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    done
+
+    # ICMPv6 policy, decided at the top of INPUT. libvirt's LIBVIRT_INP accepts
+    # ICMPv6 wholesale (as it does ICMP for v4), so — like the IPv4 ICMP reject —
+    # it must be settled above LIBVIRT_INP, not in the per-VM CHAIN6 (which
+    # LIBVIRT_INP pre-empts). Accept only what the VM needs on-link: neighbor
+    # discovery (133-136, using ULA not link-local source here) and PMTUD/error
+    # types (1-4); reject the rest — notably echo, matching the IPv4 side that
+    # rejects ping to the host. Insert the catch-all reject first so the type
+    # ACCEPTs, inserted after, stack above it. Per-tap physdev, so nothing leaks
+    # bridge-wide.
+    rule_set ip6tables "" INPUT "" -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT
+    local icmp6_type
+    for icmp6_type in 133 134 135 136 1 2 3 4; do
+      rule_set ip6tables "" INPUT "" -m physdev --physdev-in "$iface" \
+        -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT
+    done
+
+    rule_remove ip6tables "" INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
+    local inp6_pos
+    inp6_pos=$(ip6tables -w -L INPUT --line-numbers -n \
+               | awk '/LIBVIRT_INP/{print $1; exit}') || true
+    if [[ -z "$inp6_pos" ]]; then
+      libvirt_inp_missing "$vm" ip6tables
+      return 7
+    fi
+    ip6tables -w -I INPUT "$((inp6_pos + 1))" \
+      -m physdev --physdev-in "$iface" -j "$CHAIN6"
+  fi
+
+  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+      # Mirror the IPv4 RFC1918 REJECTs: block the VM from other VMs/LAN (all ULA
+      # incl. our subnet, and link-local) in FORWARD; internet falls through.
+      rule_set ip6tables "" FORWARD "" -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
+      rule_set ip6tables "" FORWARD "" -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
+    fi
+  else
+    # Default: the migrant network provides no routable IPv6 to VMs, so drop it.
+    # This also stops IPv6 from bypassing NAT/WireGuard via the host's default
+    # IPv6 path (WireGuard fwmark policy routing is IPv4-only). FORWARD only —
+    # guest->host is CHAIN6.
+    rule_set ip6tables "" FORWARD "" -m physdev --physdev-in "$iface" -j DROP
+  fi
+
+  wg_setup_rules "$vm" "$iface"
 }
 
 apply_rules() {
@@ -361,154 +783,123 @@ apply_rules() {
     || [[ "${HAS_NETWORK_IPV6:-false}" == true ]] \
     || return 0
 
-  # Locate the tap interface for this VM without calling virsh.
-  local iface=""
+  # Before any rule is installed, and well before the MAC is unblocked below.
+  require_bridge_netfilter "$vm"
 
-  # libvirt assigns tap interfaces before firing 'started begin', so the live
-  # domain XML always contains <target dev='vnetN'/> by this point.
-  # Anchor to 'vnet' to avoid matching disk targets (<target dev='vda' bus='virtio'/>).
-  # Try both quote forms since XML permits either.
-  iface=$(echo "$xml" | grep -o "target dev='vnet[^']*'" | head -1 | cut -d"'" -f2)
-  if [[ -z "$iface" ]]; then
-    iface=$(echo "$xml" | grep -o 'target dev="vnet[^"]*"' | head -1 | cut -d'"' -f2)
-  fi
+  # Rules are per-NIC, so resolve every tap. Scoped to <interface> elements
+  # rather than anchored on a 'vnet' prefix, which skips disk targets but also
+  # skips any NIC libvirt did not name that way; its MAC would still be
+  # unblocked below, leaving it with no rules at all. Both quote forms are
+  # valid XML. libvirt assigns tap names before firing 'started begin'.
+  local -a ifaces=()
+  mapfile -t ifaces < <(echo "$xml" | awk '
+    /<interface[ >]/ { inif = 1 }
+    inif && /target dev=/ {
+      line = $0
+      sub(/.*target dev=./, "", line)
+      sub(/[\047"].*/, "", line)
+      print line
+    }
+    /<\/interface>/ { inif = 0 }
+  ')
 
-  if [[ -z "$iface" ]]; then
+  if (( ${#ifaces[@]} == 0 )); then
     hook_log "$vm" "no tap found; XML target lines:"
     echo "$xml" | grep -i "target" >&2
     hook_log "$vm" "no tap interface found"
     return 4
   fi
 
-  mkdir -p /run/migrant
-  echo "$iface" > "/run/migrant/${vm}.iface"
-
-  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-    # Per-VM INPUT chain: block new connections from VM to host.
-    # Must be after libvirt's LIBVIRT_INP chain (which accepts DHCP and DNS
-    # destined for dnsmasq) but before any host-firewall REJECT/DROP rules
-    # that would catch bridged traffic first.
-    iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
-
-    iptables -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
-    local inp_pos
-    inp_pos=$(iptables -L INPUT --line-numbers -n \
-              | awk '/LIBVIRT_INP/{print $1; exit}')
-    if [[ -n "$inp_pos" ]]; then
-      iptables -I INPUT "$((inp_pos + 1))" \
-        -m physdev --physdev-in "$iface" -j "$CHAIN"
-    else
-      iptables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
-    fi
-
-    # ICMP must be blocked with a direct INSERT, not inside the per-VM chain.
-    # libvirt's LIBVIRT_INP chain runs before the per-VM chain (which is appended)
-    # and unconditionally ACCEPTs ICMP for its bridge — so any ICMP rule inside
-    # the per-VM chain is never reached.  Inserting at the top of INPUT ensures
-    # this rule is evaluated before LIBVIRT_INP.
-    iptables -I INPUT -m physdev --physdev-in "$iface" -p icmp -j REJECT
-
-    # Block VM-to-LAN (all RFC1918 ranges, including the libvirt subnet itself
-    # so VMs cannot communicate with each other over the shared bridge).
-    # These are inserted first so that allow-lan-host ACCEPTs, inserted
-    # immediately after, end up above the REJECTs in the chain.
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
-    iptables -I FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
-
-    # Insert host-access allow rules above the RFC1918 REJECTs. allow-lan-host
-    # uses NEW,ESTABLISHED,RELATED because the RFC1918 REJECTs are stateless —
-    # without ESTABLISHED, ongoing connections would be rejected mid-stream.
-    local ha_file="/etc/migrant/${vm}/host-access"
-    if [[ -f "$ha_file" ]]; then
-      while IFS= read -r rule; do
-        [[ -z "$rule" ]] && continue
-        case "$rule" in
-          allow-host-port\ *)
-            local spec="${rule#allow-host-port }"
-            local proto="${spec%%/*}"
-            local port="${spec#*/}"
-            # DNAT to 127.0.0.1: reach services bound to localhost on the host.
-            # route_localnet=1 required: kernel drops packets to 127/8 from non-loopback interfaces.
-            sysctl -w "net.ipv4.conf.virbr-migrant.route_localnet=1" >/dev/null
-            iptables -t nat -I PREROUTING -m physdev --physdev-in "$iface" \
-              -p "$proto" --dport "$port" \
-              -j DNAT --to-destination 127.0.0.1:"$port"
-            iptables -I "$CHAIN" -p "$proto" --dport "$port" \
-              -m conntrack --ctstate NEW -j ACCEPT
-            hook_log "$vm" "host-access: allow-host-port $proto/$port"
-            ;;
-          allow-lan-host\ *)
-            local host_ip="${rule#allow-lan-host }"
-            iptables -I FORWARD -m physdev --physdev-in "$iface" \
-              -d "${host_ip}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
-            hook_log "$vm" "host-access: allow-lan-host $host_ip"
-            ;;
-        esac
-      done < "$ha_file"
-    fi
+  # Every NIC must resolve to a tap. One that does not would be left with no
+  # rules while unblock_macs still releases its MAC.
+  local nic_count
+  nic_count=$(echo "$xml" | grep -c '<interface[ >]') || nic_count=0
+  if (( nic_count != ${#ifaces[@]} )); then
+    hook_log "$vm" "$nic_count NICs but ${#ifaces[@]} taps resolved; refusing to start"
+    return 4
   fi
 
-  # IPv6 egress policy for this VM.
+  ha_parse "$vm"
+  wg_dns_parse "$vm"
+
+  local iface mac entry
+  state_begin "$vm"
+  for iface in "${ifaces[@]}"; do state_add tap "$iface"; done
+  for mac in "${VM_MACS[@]+"${VM_MACS[@]}"}"; do state_add mac "$mac"; done
+
+  # A hook that reads .iface instead returns without cleaning anything when it
+  # is absent — not even the blocked MAC, leaving the guest with no network.
+  # Keep writing it so such a hook can still tear down what this one started;
+  # it only ever understood one tap.
+  echo "${ifaces[0]}" > "/run/migrant/${vm}.iface"
+
+  # --- per VM: shared chains and host-global state, installed once ---
+
+  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
+    state_add isolation true
+
+    # Per-VM INPUT chain: block new connections from VM to host. Every tap jumps
+    # to this one chain, so it is created and filled here rather than per tap.
+    iptables -w -N "$CHAIN" 2>/dev/null || iptables -w -F "$CHAIN"
+    iptables -w -A "$CHAIN" -m conntrack --ctstate NEW -j REJECT
+
+    ip6tables -w -N "$CHAIN6" 2>/dev/null || ip6tables -w -F "$CHAIN6"
+    ip6tables -w -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
+
+    if (( ${#HA_PORTS[@]} > 0 )); then
+      # The kernel drops packets to 127/8 arriving on a non-loopback interface
+      # unless route_localnet is set.
+      state_add route_localnet true
+      rlnet_acquire "$vm"
+    fi
+
+    for entry in "${HA_PORTS[@]+"${HA_PORTS[@]}"}"; do
+      state_add host_port "$entry"
+      # Inside the per-VM chain, just flushed, so it is already canonical.
+      iptables -w -I "$CHAIN" -p "${entry%%/*}" --dport "${entry#*/}" \
+        -m conntrack --ctstate NEW -j ACCEPT
+      hook_log "$vm" "host-access: allow-host-port $entry"
+    done
+    for entry in "${HA_LAN[@]+"${HA_LAN[@]}"}"; do
+      state_add lan_host "$entry"
+      hook_log "$vm" "host-access: allow-lan-host $entry"
+    done
+
+    state_add ipv6_input true
+  fi
+
   if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
+    state_add ipv6_policy nat
+    state_add nat66_ref true
     # Opt-in NAT66 (NETWORK_IPV6=nat): give the VM IPv6 egress via the host's
     # uplink, mirroring the IPv4 NAT. Requires the host to have working IPv6.
     # The ULA MUST match the <ip family="ipv6"> block in the migrant network XML.
     nat66_shared_setup "$vm"
-
-    # ICMPv6 policy, decided at the top of INPUT. libvirt's LIBVIRT_INP accepts
-    # ICMPv6 wholesale (as it does ICMP for v4), so — like the IPv4 ICMP reject —
-    # it must be settled above LIBVIRT_INP, not in the per-VM CHAIN6 below (which
-    # LIBVIRT_INP pre-empts). Accept only what the VM needs on-link: neighbor
-    # discovery (133-136, using ULA not link-local source here) and PMTUD/error
-    # types (1-4); reject the rest — notably echo, matching the IPv4 side that
-    # rejects ping to the host. Insert the catch-all reject first so the type
-    # ACCEPTs, inserted after, stack above it. Per-tap physdev, so nothing leaks
-    # bridge-wide.
-    ip6tables -C INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT 2>/dev/null \
-      || ip6tables -I INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT
-    local icmp6_type
-    for icmp6_type in 133 134 135 136 1 2 3 4; do
-      ip6tables -C INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT 2>/dev/null \
-        || ip6tables -I INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT
-    done
-
-    if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-      # Mirror the IPv4 RFC1918 REJECTs: block the VM from other VMs/LAN (all ULA
-      # incl. our subnet, and link-local) in FORWARD; internet falls through.
-      ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
-      ip6tables -I FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
-
-      # Block guest->host: the host's on-link ULA is locally delivered, so it hits
-      # INPUT and never the FORWARD rejects above — without this NAT66 leaves every
-      # host IPv6 service reachable, unlike IPv4. Mirrors the IPv4 per-VM CHAIN:
-      # reject NEW, after LIBVIRT_INP so DHCPv6/DNS to dnsmasq still work.
-      ip6tables -N "$CHAIN6" 2>/dev/null || ip6tables -F "$CHAIN6"
-      ip6tables -A "$CHAIN6" -m conntrack --ctstate NEW -j REJECT
-      local inp6_pos
-      inp6_pos=$(ip6tables -L INPUT --line-numbers -n \
-                 | awk '/LIBVIRT_INP/{print $1; exit}') || true
-      if [[ -n "$inp6_pos" ]]; then
-        ip6tables -I INPUT "$((inp6_pos + 1))" \
-          -m physdev --physdev-in "$iface" -j "$CHAIN6"
-      else
-        ip6tables -A INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
-      fi
-    fi
   else
-    # Default: the migrant network provides no routable IPv6 to VMs, so drop it.
-    # This also stops IPv6 from bypassing NAT/WireGuard via the host's default
-    # IPv6 path (WireGuard fwmark policy routing is IPv4-only).
-    ip6tables -I FORWARD -m physdev --physdev-in "$iface" -j DROP
+    state_add ipv6_policy drop
   fi
 
-  wg_setup_rules "$vm" "$iface"
+  if [[ -f "/etc/migrant/${vm}/wireguard.conf" ]]; then
+    state_add wg_applied true
+    local dns_ip
+    for dns_ip in "${WG_DNS_IPS[@]+"${WG_DNS_IPS[@]}"}"; do
+      state_add wg_dns "$dns_ip"
+    done
+    if (( ${#WG_DNS_IPS[@]} > 0 )); then
+      state_add wg_dnat_target "${WG_DNS_IPS[0]}"
+    fi
+  fi
 
-  # Unblock the VM's MAC now that all rules are in place (both NI and WG).
-  # vm_block_mac ran in prepare for any managed VM; this is the corresponding
-  # unblock. It runs here — not inside wg_setup_rules — so NI-only VMs are
-  # also unblocked after their REJECT rules are applied.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+  # --- per tap ---
+
+  for iface in "${ifaces[@]}"; do
+    apply_tap_rules "$vm" "$iface"
+  done
+
+  # Unblock every NIC now that all rules are in place (both NI and WG).
+  # vm_block_mac ran in prepare for any managed VM; this is its counterpart, and
+  # it runs here — not inside wg_setup_rules — so NI-only VMs are unblocked too.
+  unblock_macs
 
   # Sentinel: written last so its presence implies all rules applied and MAC
   # unblocked. verify_wireguard_tunnel polls for this rather than querying
@@ -518,83 +909,144 @@ apply_rules() {
   fi
 }
 
-remove_rules() {
-  local vm="$1"
-  local iface
-  iface=$(cat "/run/migrant/${vm}.iface" 2>/dev/null) || return 0
-  [[ -z "$iface" ]] && return 0
+remove_tap_rules() {
+  local vm="$1" iface="$2"
 
-  if [[ "$HAS_NETWORK_ISOLATION" == true ]]; then
-    iptables -D INPUT -m physdev --physdev-in "$iface" -p icmp -j REJECT 2>/dev/null || true
-    iptables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN" 2>/dev/null || true
-    iptables -F "$CHAIN" 2>/dev/null || true
-    iptables -X "$CHAIN" 2>/dev/null || true
+  if [[ "$STATE_ISOLATION" == true ]]; then
+    rule_remove iptables "" INPUT -m physdev --physdev-in "$iface" -p icmp -j REJECT
+    rule_remove iptables "" INPUT -m physdev --physdev-in "$iface" -j "$CHAIN"
+    iptables -w -F "$CHAIN" 2>/dev/null || true
+    iptables -w -X "$CHAIN" 2>/dev/null || true
 
-    # Remove FORWARD/PREROUTING rules outside the per-VM chain (already flushed above).
-    local ha_file="/etc/migrant/${vm}/host-access"
-    if [[ -f "$ha_file" ]]; then
-      while IFS= read -r rule; do
-        case "$rule" in
-          allow-host-port\ *)
-            local spec="${rule#allow-host-port }"
-            local proto="${spec%%/*}"
-            local port="${spec#*/}"
-            iptables -t nat -D PREROUTING -m physdev --physdev-in "$iface" \
-              -p "$proto" --dport "$port" \
-              -j DNAT --to-destination 127.0.0.1:"$port" 2>/dev/null || true
-            ;;
-          allow-lan-host\ *)
-            local host_ip="${rule#allow-lan-host }"
-            iptables -D FORWARD -m physdev --physdev-in "$iface" \
-              -d "${host_ip}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-            ;;
-        esac
-      done < "$ha_file"
-    fi
+    local entry proto port
+    for entry in "${STATE_HOST_PORTS[@]+"${STATE_HOST_PORTS[@]}"}"; do
+      proto="${entry%%/*}"
+      port="${entry#*/}"
+      rule_remove iptables nat PREROUTING -m physdev --physdev-in "$iface" \
+        -d "$BRIDGE_GATEWAY/32" \
+        -p "$proto" --dport "$port" \
+        -j DNAT --to-destination 127.0.0.1:"$port"
+      # An unscoped copy from an earlier hook version outlives its VM otherwise.
+      rule_remove iptables nat PREROUTING -m physdev --physdev-in "$iface" \
+        -p "$proto" --dport "$port" \
+        -j DNAT --to-destination 127.0.0.1:"$port"
+    done
+    for entry in "${STATE_LAN_HOSTS[@]+"${STATE_LAN_HOSTS[@]}"}"; do
+      rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" \
+        -d "${entry}/32" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    done
 
-    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT 2>/dev/null || true
-    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT 2>/dev/null || true
-    iptables -D FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT 2>/dev/null || true
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 10.0.0.0/8 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 172.16.0.0/12 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 192.168.0.0/16 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 100.64.0.0/10 -j REJECT
+    rule_remove iptables "" FORWARD -m physdev --physdev-in "$iface" -d 169.254.0.0/16 -j REJECT
   fi
 
-  if [[ "${HAS_NETWORK_IPV6:-false}" == true ]]; then
-    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT 2>/dev/null || true
-    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT 2>/dev/null || true
-
+  if [[ "$STATE_IPV6_INPUT" == true ]]; then
     local icmp6_type
     for icmp6_type in 133 134 135 136 1 2 3 4; do
-      ip6tables -D INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT 2>/dev/null || true
+      rule_remove ip6tables "" INPUT -m physdev --physdev-in "$iface" \
+        -p ipv6-icmp --icmpv6-type "$icmp6_type" -j ACCEPT
     done
-    ip6tables -D INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT 2>/dev/null || true
+    rule_remove ip6tables "" INPUT -m physdev --physdev-in "$iface" -p ipv6-icmp -j REJECT
 
-    ip6tables -D INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6" 2>/dev/null || true
-    ip6tables -F "$CHAIN6" 2>/dev/null || true
-    ip6tables -X "$CHAIN6" 2>/dev/null || true
-
-    # Drop the shared MASQUERADE and restore forwarding once the last NAT66 VM is
-    # gone (the per-VM rules above are always removed).
-    nat66_shared_teardown "$vm"
-  else
-    ip6tables -D FORWARD -m physdev --physdev-in "$iface" -j DROP 2>/dev/null || true
+    rule_remove ip6tables "" INPUT -m physdev --physdev-in "$iface" -j "$CHAIN6"
+    ip6tables -w -F "$CHAIN6" 2>/dev/null || true
+    ip6tables -w -X "$CHAIN6" 2>/dev/null || true
   fi
 
+  # 'all' means the policy was not recorded, so both variants are attempted.
+  if [[ "$STATE_IPV6_POLICY" == nat || "$STATE_IPV6_POLICY" == all ]] \
+      && [[ "$STATE_ISOLATION" == true ]]; then
+    rule_remove ip6tables "" FORWARD -m physdev --physdev-in "$iface" -d fc00::/7  -j REJECT
+    rule_remove ip6tables "" FORWARD -m physdev --physdev-in "$iface" -d fe80::/10 -j REJECT
+  fi
+  if [[ "$STATE_IPV6_POLICY" == drop || "$STATE_IPV6_POLICY" == all ]]; then
+    rule_remove ip6tables "" FORWARD -m physdev --physdev-in "$iface" -j DROP
+  fi
+}
+
+remove_rules() {
+  local vm="$1"
+  local state_file="/run/migrant/${vm}.state"
+  local legacy_file="/run/migrant/${vm}.iface"
+
+  if [[ -f "$state_file" ]]; then
+    state_load "$state_file"
+    if [[ ! "$STATE_VERSION" =~ ^[0-9]+$ ]]; then
+      hook_log "$vm" "state record carries no usable version; best-effort cleanup"
+      state_assume_legacy "$vm" "$(cat "$legacy_file" 2>/dev/null || true)"
+    elif (( STATE_VERSION > STATE_VERSION_CURRENT )); then
+      # Written by a newer hook. Every key this one knows still parses, so the
+      # taps and MACs are complete and only rules recorded under keys added
+      # since are missed. The legacy path would be worse: it knows one tap.
+      hook_log "$vm" "state version $STATE_VERSION is newer than $STATE_VERSION_CURRENT; rules recorded under unknown keys may remain"
+    fi
+  elif [[ -f "$legacy_file" ]]; then
+    hook_log "$vm" "no state record; best-effort cleanup from .iface"
+    state_assume_legacy "$vm" "$(cat "$legacy_file" 2>/dev/null || true)"
+  else
+    hook_log "$vm" "no state record; unconditional cleanup only"
+    state_reset
+  fi
+
+  local iface
+  for iface in "${STATE_TAPS[@]+"${STATE_TAPS[@]}"}"; do
+    remove_tap_rules "$vm" "$iface"
+  done
+
+  if [[ "$STATE_NAT66_REF" == true ]]; then
+    # Drops the shared MASQUERADE and restores forwarding once the last NAT66 VM
+    # is gone.
+    nat66_shared_teardown "$vm"
+  fi
+
+  # Absent from a record written before this was refcounted, which is correct:
+  # no reference was taken then, so there is none to drop.
+  if [[ "$STATE_RLNET" == true ]] || [[ -f "$RLNET_REFDIR/$vm" ]]; then
+    rlnet_release "$vm"
+  fi
+
+  # Everything below runs even with no record at all — a leftover WireGuard
+  # interface outlives the VM, and a MAC left in the set leaves the guest with
+  # no network on its next start.
   local WG_IFACE WG_TABLE
   wg_iface_and_table "$vm"
-  if ip link show "$WG_IFACE" &>/dev/null \
-      || [[ -f "/etc/migrant/${vm}/wireguard-dns" ]]; then
-    wg_teardown "$vm" "$iface"
+  if [[ "$STATE_WG_APPLIED" == true ]] \
+      || ip link show "$WG_IFACE" &>/dev/null \
+      || [[ -f "/etc/migrant/${vm}/wireguard.conf" ]]; then
+    wg_teardown "$vm" "${STATE_TAPS[@]+"${STATE_TAPS[@]}"}"
   fi
 
-  # Defensive MAC cleanup: covers NI-only VMs (wg_teardown never runs for them)
-  # and any case where apply_rules crashed before the unblock. Idempotent.
-  nft delete element bridge migrant blocked_macs "{ $VM_MAC }" 2>/dev/null || true
+  # Recorded MACs first, then whatever the XML shows, in case the record is
+  # absent or predates a NIC being added.
+  local mac
+  for mac in "${STATE_MACS[@]+"${STATE_MACS[@]}"}"; do
+    [[ -n "$mac" ]] || continue
+    nft delete element bridge migrant blocked_macs "{ $mac }" 2>/dev/null || true
+  done
+  unblock_macs
 
-  rm -f "/run/migrant/${vm}.iface"
+  rm -f "$state_file" "$legacy_file"
 }
 
 case "$OPERATION" in
-  prepare) vm_block_mac   "$VM_NAME"    # all managed VMs (NI or WG)
+           # wgmark is written only after a fully successful apply; a leftover
+           # one from the previous lifecycle would satisfy tunnel verification
+           # before any rule has been installed.
+  prepare) rm -f "/run/migrant/${VM_NAME}.wgmark"
+           vm_block_mac   "$VM_NAME"    # all managed VMs (NI or WG)
            wg_setup_iface "$VM_NAME" ;; # WG VMs only
-  started) apply_rules    "$VM_NAME" ;; # NI rules + wg_setup_rules; unblock MAC; sentinel
-  release) remove_rules   "$VM_NAME" ;; # wg_teardown if WG; defensive MAC cleanup
+           # Both mutate INPUT, so they take the lifecycle lock. A failure must
+           # still release it, hence the explicit status capture rather than
+           # letting set -e unwind.
+  started) lifecycle_lock
+           apply_rules "$VM_NAME" && rc=0 || rc=$?
+           lifecycle_unlock
+           exit "$rc" ;;
+  release) lifecycle_lock
+           remove_rules "$VM_NAME" && rc=0 || rc=$?
+           lifecycle_unlock
+           exit "$rc" ;;
 esac

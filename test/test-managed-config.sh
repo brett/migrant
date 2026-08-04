@@ -9,7 +9,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # Prerequisites:
 #   - migrant setup has been run (with the updated hooks)
 #   - The base image is cached (or will be downloaded)
-#   - No VM with this name currently exists (the test creates and destroys one)
+#   - No VM named "$VM_NAME" or "$VM_NAME-rl2" exists; the test creates and
+#     destroys both (the second only for the route_localnet refcount)
 #   - NETWORK_ISOLATION not explicitly set to false in the Migrantfile (default is on)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -35,10 +36,17 @@ FAIL=0
 pass() { echo "[PASS] $1"; (( PASS++ )) || true; }
 fail() { echo "[FAIL] $1"; (( FAIL++ )) || true; }
 
+# Set by Part 8, which builds a second VM in a temp directory.
+SECOND_DIR=""
+
 cleanup() {
   # Restore original Migrantfile
   if [[ -f Migrantfile.test-backup ]]; then
     mv Migrantfile.test-backup Migrantfile
+  fi
+  if [[ -n "$SECOND_DIR" && -d "$SECOND_DIR" ]]; then
+    ( cd "$SECOND_DIR" && "$MIGRANT" destroy ) &>/dev/null || true
+    rm -rf "$SECOND_DIR"
   fi
 }
 trap cleanup EXIT
@@ -197,6 +205,34 @@ else
   fail "ACCEPT rule is not before REJECT rule"
 fi
 
+# The DNAT must carry -d 192.168.200.1/32. Unscoped it rewrites the guest's
+# connections to every address on this port and delivers them to the host.
+tap=$(awk -F= '/^tap=/{print $2; exit}' "/run/migrant/${VM_NAME}.state" 2>/dev/null || true)
+dnat_rules=$(sudo iptables -t nat -S PREROUTING 2>/dev/null \
+  | grep -- "--physdev-in ${tap:-__none__} " | grep -- "--dport 8080") || dnat_rules=""
+
+if [[ -z "$dnat_rules" ]]; then
+  fail "no DNAT rule for tcp/8080 on tap ${tap:-unknown}"
+else
+  unscoped=$(grep -vc -- "-d 192.168.200.1/32" <<<"$dnat_rules") || unscoped=0
+  if (( unscoped == 0 )); then
+    pass "allow-host-port DNAT is scoped to the bridge gateway"
+  else
+    fail "$unscoped DNAT rule(s) for tcp/8080 not scoped to 192.168.200.1"
+    echo "$dnat_rules"
+  fi
+fi
+
+# route_localnet is shared by every VM on the bridge, so it is reference
+# counted; .prev holds what the host had before the first reference.
+rlnet_prev=$(sudo cat /run/migrant/route-localnet/.prev 2>/dev/null || true)
+rlnet_now=$(sudo sysctl -n net.ipv4.conf.virbr-migrant.route_localnet 2>/dev/null || true)
+if [[ "$rlnet_now" == 1 ]]; then
+  pass "route_localnet is set while an allow-host-port VM runs"
+else
+  fail "route_localnet is '$rlnet_now', expected 1"
+fi
+
 # Check cmd_status shows host-access
 status_output=$("$MIGRANT" status 2>/dev/null) || true
 if echo "$status_output" | grep -q "allow-host-port tcp/8080"; then
@@ -214,6 +250,28 @@ if sudo iptables -L "$chain" -n &>/dev/null; then
   fail "per-VM INPUT chain still exists after halt"
 else
   pass "per-VM INPUT chain removed after halt"
+fi
+
+if [[ -n "$tap" ]] && sudo iptables -t nat -S PREROUTING 2>/dev/null \
+    | grep -q -- "--physdev-in $tap "; then
+  fail "DNAT for tcp/8080 not cleaned up after halt"
+else
+  pass "DNAT cleaned up after halt"
+fi
+
+# The bridge goes with the network when the last VM stops, taking the sysctl
+# with it; either way the host must not be left more permissive than it was.
+rlnet_after=$(sudo sysctl -n net.ipv4.conf.virbr-migrant.route_localnet 2>/dev/null || echo "absent")
+if [[ "$rlnet_after" == "absent" || "$rlnet_after" == "${rlnet_prev:-0}" ]]; then
+  pass "route_localnet restored to '${rlnet_prev:-0}' after halt (now: $rlnet_after)"
+else
+  fail "route_localnet is '$rlnet_after', expected '${rlnet_prev:-0}'"
+fi
+
+if sudo test -e "/run/migrant/route-localnet/${VM_NAME}"; then
+  fail "route_localnet reference for $VM_NAME survived halt"
+else
+  pass "route_localnet reference released"
 fi
 
 # ============================================================
@@ -258,12 +316,15 @@ else
   fail "allow-lan-host ACCEPT is not before RFC1918 REJECT in FORWARD"
 fi
 
-# Verify the ACCEPT carries the correct conntrack state qualifier.
-if [[ -n "$iface" ]] && sudo iptables -S FORWARD 2>/dev/null \
-    | grep "192.168.1.50/32" | grep -q "ctstate NEW,ESTABLISHED,RELATED"; then
+# Verify the ACCEPT carries the correct conntrack state qualifier. iptables
+# renders the states from a bitmask in its own order, so compare the set.
+ctstate=$(sudo iptables -S FORWARD 2>/dev/null | grep -- "-d 192.168.1.50/32" \
+  | grep -o 'ctstate [A-Z,]*' | head -1 | cut -d' ' -f2) || ctstate=""
+if [[ -n "$iface" && "$(tr ',' '\n' <<<"$ctstate" | sort | paste -sd,)" \
+      == "ESTABLISHED,NEW,RELATED" ]]; then
   pass "allow-lan-host ACCEPT has correct conntrack state"
 else
-  fail "allow-lan-host ACCEPT missing ctstate NEW,ESTABLISHED,RELATED"
+  fail "allow-lan-host ACCEPT has ctstate '${ctstate:-none}', expected NEW+ESTABLISHED+RELATED"
 fi
 
 # Check cmd_status shows allow-lan-host
@@ -373,6 +434,74 @@ else
 fi
 
 # Final cleanup
+"$MIGRANT" destroy
+
+# ============================================================
+# Part 8: route_localnet is released by the last VM, not the first
+# ============================================================
+
+echo "--- test: route_localnet refcount across two VMs ---"
+
+# A second VM in a temp directory, minimal but for the directive under test.
+# Without it a plain set-on-up/clear-on-halt implementation passes Part 3.
+SECOND_DIR=$(mktemp -d)
+SECOND_NAME="${VM_NAME}-rl2"
+cp cloud-init.yml "$SECOND_DIR/cloud-init.yml"
+cat > "$SECOND_DIR/Migrantfile" <<EOF
+VM_NAME="${SECOND_NAME}"
+OS_VARIANT="${OS_VARIANT}"
+RAM_MB=2048
+VCPUS=1
+DISK_GB=${DISK_GB:-10}
+IMAGE_URL="${IMAGE_URL}"
+NETWORKS=("network=migrant")
+HOST_ACCESS=("allow-host-port tcp/8081")
+EOF
+
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+HOST_ACCESS=("allow-host-port tcp/8080")
+EOF
+
+"$MIGRANT" up
+rlnet_prev=$(sudo cat /run/migrant/route-localnet/.prev 2>/dev/null || true)
+( cd "$SECOND_DIR" && "$MIGRANT" up )
+
+# First VM out: the second still holds a reference, so nothing is restored.
+"$MIGRANT" halt
+
+rlnet_mid=$(sudo sysctl -n net.ipv4.conf.virbr-migrant.route_localnet 2>/dev/null || true)
+if [[ "$rlnet_mid" == 1 ]]; then
+  pass "route_localnet held while a second allow-host-port VM runs"
+else
+  fail "route_localnet is '$rlnet_mid' with a VM still using allow-host-port"
+fi
+
+if sudo test -e "/run/migrant/route-localnet/${SECOND_NAME}"; then
+  pass "second VM still holds its reference"
+else
+  fail "second VM's route_localnet reference is missing"
+fi
+
+# Last VM out restores the host.
+( cd "$SECOND_DIR" && "$MIGRANT" halt )
+
+rlnet_end=$(sudo sysctl -n net.ipv4.conf.virbr-migrant.route_localnet 2>/dev/null || echo "absent")
+if [[ "$rlnet_end" == "absent" || "$rlnet_end" == "${rlnet_prev:-0}" ]]; then
+  pass "route_localnet restored once the last VM stopped (now: $rlnet_end)"
+else
+  fail "route_localnet is '$rlnet_end', expected '${rlnet_prev:-0}'"
+fi
+
+if sudo test -e /run/migrant/route-localnet/.prev; then
+  fail "saved route_localnet value survived the last VM"
+else
+  pass "saved route_localnet value cleared"
+fi
+
+( cd "$SECOND_DIR" && "$MIGRANT" destroy )
+rm -rf "$SECOND_DIR"
+SECOND_DIR=""
 "$MIGRANT" destroy
 
 # ============================================================

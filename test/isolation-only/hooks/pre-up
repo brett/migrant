@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Start a host-side IPv6 listener the guest must NOT be able to reach. This
+# fixture is the default config (isolation on, NETWORK_IPV6 unset), where the
+# bridge still carries a ULA — so guest->host IPv6 is reachable at INPUT unless
+# CHAIN6 is installed. Bound to :: so it answers on the migrant ULA too.
+PIDFILE="${MIGRANT_VM_DIR}/.listener6.pid"
+
+if [[ -f "$PIDFILE" ]]; then
+  pid=$(<"$PIDFILE")
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PIDFILE"
+fi
+
+python3 -c "
+import socket, socketserver
+class Server(socketserver.TCPServer):
+    address_family = socket.AF_INET6
+class H(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.wfile.write(b'hello from host over IPv6\n')
+Server(('::', 19999), H).serve_forever()
+" &
+
+echo $! > "$PIDFILE"
