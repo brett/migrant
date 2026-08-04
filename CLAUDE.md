@@ -67,8 +67,14 @@ rules:
   immediately before `sudo -v` tells the user why elevation is needed
 - **`[changed]` marker**: append to any line where an action was taken;
   increment the `changes` counter with `(( changes++ )) || true`
-- **Informational rows** (e.g. `firewall backend:`) report a plain value with no
-  `[changed]` marker — they describe detected state, not an action taken
+- **Plain vs. `[changed]`**: the same row prints a plain value (`ok`, or a
+  detected setting like `firewall backend: iptables`) when host state already
+  matches what's wanted, and switches to `<action> [changed]` only when that
+  row's check actually took action — e.g. `firewall backend:` stays plain when
+  the backend is already `iptables`, but reports `set to iptables (was
+  nftables) [changed]` when it has to fix it. `rp_filter hook: skipped
+  (rp_filter=0)` is the one row that is inherently action-less, since a
+  disabled `rp_filter` means there is nothing to install
 
 ## cmd_status output format
 
@@ -79,9 +85,12 @@ grouped data (tunnel details, loop mount point). Key design rules:
   operationally important first)
 - **Markers**: append `[ERROR]` for broken states, `[WARNING]` for transient or
   degraded states; never use colors (breaks pipes/scripts)
-- **Hints**: only the `crashed` state includes a recovery hint (`note:`
-  sub-field) because the steps are non-obvious; all other action hints are
-  omitted
+- **Hints**: a `note:` sub-field appears wherever a row's state needs
+  explanation the value alone doesn't give — `crashed` (recovery command), a
+  WireGuard tunnel with an invalid key or that isn't actually routing traffic
+  (`tunnel: active [ERROR]` / `tunnel: error [ERROR]`), and hooks present but
+  not executable. Healthy states (`running`, `tunnel: active`, `isolation:
+  enabled`, etc.) never get one
 
 ## Exit codes
 
