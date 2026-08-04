@@ -22,7 +22,8 @@ surface without careful consideration. Key containment properties to preserve
   not the forwarded-traffic rejects
 - IPv6 egress has no routable path by default; `NETWORK_IPV6=nat`
   (`docs/security/ipv6-nat66.md`) opts in and is refused alongside WireGuard.
-  Guest→host IPv6 is blocked at INPUT in *every* IPv6 mode
+  Guest→host IPv6 is blocked at INPUT in every IPv6 mode, when network isolation
+  is active
 - Rules match with `-m physdev`, which only sees bridge ports, and the MAC gate
   matches a source address the guest can change; neither is a substitute for the
   rules themselves
