@@ -60,6 +60,16 @@ Each hook receives these variables in its environment:
 All `Migrantfile` variables (`VM_NAME`, `RAM_MB`, `NETWORKS`, etc.) are also
 present in the environment, since the `Migrantfile` is sourced before hooks run.
 
+## Extending virt-install from pre-up
+
+On first create only, `pre-up` can contribute extra arguments to the
+`virt-install` invocation by writing `$MIGRANT_VM_DIR/.virt-install-extra-args`
+— one argument per line, blank lines ignored. `cmd_up` reads the file
+immediately after `pre-up` exits, appends each line to `virt-install`'s argv,
+and deletes the file. It is not read on the start-existing-VM path, so a hook
+that needs to run on every boot (not just creation) should do that work
+unconditionally in `pre-up` instead of relying on this file.
+
 ## Example: host-side service lifecycle
 
 Start an inference server on the host before the VM boots, stop it when the VM
