@@ -127,9 +127,9 @@ virtlogd sockets, adds your user to the `libvirt` group, detects the host
 firewall backend (iptables or nftables) and updates `/etc/libvirt/network.conf`
 to match, defines the `migrant` NAT network, creates the images directory
 (`/var/lib/libvirt/images`, or `LIBVIRT_IMAGES_DIR` if set) with group-writable
-permissions, installs three libvirt hooks (network isolation and WireGuard
-tunnel management, shared folder loop image mount/unmount, and `rp_filter` for
-the `linux-hardened` kernel), loads `br_netfilter` and sets the
+permissions, installs libvirt hooks (network isolation and WireGuard tunnel
+management, shared folder loop image mount/unmount, and `rp_filter` for the
+`linux-hardened` kernel), loads `br_netfilter` and sets the
 `bridge-nf-call-ip*tables` sysctls that the isolation rules depend on —
 persisting both — creates `/etc/migrant/` for managed VM configs, and installs
 ZSH completions if the destination directory (`/usr/share/zsh/site-functions`,
