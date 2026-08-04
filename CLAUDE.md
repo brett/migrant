@@ -99,6 +99,14 @@ with no sharper category (e.g. VM not running, VM not created).
 - When adding a subcommand: update `usage()`, the `case` statement, the README
   command list, and the `_migrant` ZSH completion function in `cmd_setup`
 
+## docs/ sync
+
+When a change alters behavior documented in `docs/` — especially
+`docs/security/*`, `docs/hooks.md`, and `docs/architecture.md` — update the
+corresponding doc in the same change. These describe enforced behavior
+(isolation guarantees, hook semantics, lifecycle internals), not just narrative,
+so they go stale silently if left behind.
+
 ## Provisioning architecture
 
 cloud-init runs before SSH and cannot be re-run without `destroy` + `up`.
