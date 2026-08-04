@@ -208,8 +208,10 @@ TUNNEL_PORTS=(3000 5432 6379)
 
 Then `migrant tunnel` with no args opens all of them. Ctrl-C closes the session
 and removes the forwards — no persistent state, no firewall rules, no cleanup.
-Internally this just runs `ssh -N -L PORT:127.0.0.1:PORT` using the same
-connection settings as `migrant ssh`.
+Internally this just runs `ssh -N -L PORT:127.0.0.1:PORT` using the same base
+connection settings as `migrant ssh`, plus a few options suited to a long-lived
+background tunnel: connection timeout, keepalives, and exiting if a forward
+fails to bind.
 
 ## storage
 
