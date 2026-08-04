@@ -39,11 +39,13 @@ resolved relative to the `Migrantfile`'s directory, regardless of where
 
 ## Waiting for the VM to be ready
 
-`migrant up` blocks until the VM obtains a DHCP lease (unless
-`AUTOCONNECT=console` is set and no `playbook.yml` is present, in which case it
-attaches the console immediately after the VM starts). If the VM stops running
-while waiting (e.g. due to a crash or misconfiguration), `up` exits with an
-error rather than waiting indefinitely.
+`migrant up` blocks until the VM obtains a DHCP lease. Setting
+`AUTOCONNECT=console` skips this wait and attaches the console immediately after
+the VM starts — except when creating the VM for the first time (not from a
+snapshot) with a `playbook.yml` present, where the normal wait still applies so
+Ansible provisioning can run first. If the VM stops running while waiting (e.g.
+due to a crash or misconfiguration), `up` exits with an error rather than
+waiting indefinitely.
 
 If SSH is configured in `cloud-init.yml` (`ssh_authorized_keys` present), `up`
 additionally waits until SSH is available before returning. This applies both
@@ -70,8 +72,10 @@ AUTOCONNECT=console  # attach serial console immediately after the VM starts
 ```
 
 `AUTOCONNECT=console` skips the IP and SSH waits and attaches as soon as the VM
-starts, so the boot output is visible. If `playbook.yml` is present,
-provisioning runs first and the console attaches afterward.
+starts, so the boot output is visible — see
+[Waiting for the VM to be ready](#waiting-for-the-vm-to-be-ready) above for the
+one case (first creation with `playbook.yml` present) where provisioning still
+runs before the console attaches.
 
 ## Network lifecycle
 
