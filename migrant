@@ -714,13 +714,17 @@ cmd_up() {
     # source may have been rebuilt. Remote images are cached.
     if [[ ! -f "$base_image_path" ]] || [[ "$IMAGE_URL" == file://* ]]; then
       echo "Copying base image..."
+      local image_in_place=false
       if [[ "$IMAGE_URL" == file://* ]]; then
         # Local file — use install instead of curl. Nix store files are
         # read-only (444); curl can't overwrite a read-only destination,
         # and cp preserves the read-only permissions. install -m sets
         # writable permissions so future re-copies succeed.
         local source_path="${IMAGE_URL#file://}"
-        if ! install -m 644 "$source_path" "$base_image_path"; then
+        if [[ "$source_path" -ef "$base_image_path" ]]; then
+          image_in_place=true
+          echo "Base image is already in place."
+        elif ! install -m 644 "$source_path" "$base_image_path"; then
           echo "[ERROR] Failed to copy local base image. Check IMAGE_URL in Migrantfile." >&2
           rm -f "$base_image_path"
           exit 74
@@ -732,7 +736,7 @@ cmd_up() {
       fi
       if ! qemu-img info "$base_image_path" &>/dev/null; then
         echo "[ERROR] Downloaded file is not a valid disk image. Check IMAGE_URL in Migrantfile." >&2
-        rm -f "$base_image_path"
+        [[ "$image_in_place" == true ]] || rm -f "$base_image_path"
         exit 65
       fi
     fi
