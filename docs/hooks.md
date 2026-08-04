@@ -22,9 +22,9 @@ or non-executable hooks are silently skipped.
 ## Hook semantics
 
 Hooks are tied to **state transitions**, not commands. `pre-down` and
-`post-down` fire from every code path that stops the VM — `halt`, `snapshot`,
-`destroy`, and `reset` — so host-side cleanup always happens regardless of which
-command initiated the shutdown.
+`post-down` fire from every normal-lifecycle code path that stops the VM —
+`halt`, `snapshot`, `destroy`, and `reset` — so host-side cleanup always happens
+regardless of which command initiated the shutdown.
 
 | Hook        | When it fires                                                    | Abort on failure? |
 | ----------- | ---------------------------------------------------------------- | ----------------- |
@@ -36,6 +36,14 @@ command initiated the shutdown.
 A `pre-up` hook that exits non-zero aborts `up` before the VM starts. A
 `pre-down` hook that exits non-zero aborts `halt` and `snapshot`, but not
 `destroy` or `reset` — intentional destruction is not blockable by a hook.
+
+**Exception — security kills bypass hooks entirely.** If `up` detects, once the
+VM is running, that its shared folder or WireGuard tunnel isn't actually
+enforcing the isolation it promised (a loop-image mount that doesn't match what
+was recorded, or a tunnel that never came up), it kills the VM immediately with
+`virsh destroy`. Neither `pre-down` nor `post-down` fires — this is a security
+response to a broken isolation guarantee, not a normal shutdown, and the VM must
+not stay alive waiting on a user-defined hook script.
 
 ## Environment variables
 

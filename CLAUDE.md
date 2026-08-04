@@ -71,10 +71,10 @@ rules:
   detected setting like `firewall backend: iptables`) when host state already
   matches what's wanted, and switches to `<action> [changed]` only when that
   row's check actually took action — e.g. `firewall backend:` stays plain when
-  the backend is already `iptables`, but reports `set to iptables (was
-  nftables) [changed]` when it has to fix it. `rp_filter hook: skipped
-  (rp_filter=0)` is the one row that is inherently action-less, since a
-  disabled `rp_filter` means there is nothing to install
+  the backend is already `iptables`, but reports
+  `set to iptables (was nftables) [changed]` when it has to fix it.
+  `rp_filter hook: skipped (rp_filter=0)` is the one row that is inherently
+  action-less, since a disabled `rp_filter` means there is nothing to install
 
 ## cmd_status output format
 
@@ -89,8 +89,8 @@ grouped data (tunnel details, loop mount point). Key design rules:
   explanation the value alone doesn't give — `crashed` (recovery command), a
   WireGuard tunnel with an invalid key or that isn't actually routing traffic
   (`tunnel: active [ERROR]` / `tunnel: error [ERROR]`), and hooks present but
-  not executable. Healthy states (`running`, `tunnel: active`, `isolation:
-  enabled`, etc.) never get one
+  not executable. Healthy states (`running`, `tunnel: active`,
+  `isolation: enabled`, etc.) never get one
 
 ## Exit codes
 
@@ -151,9 +151,18 @@ Known parity exceptions:
 ## Lifecycle hooks
 
 User hooks (`$VM_DIR/hooks/`) are state-transition-based, not command-based.
-`pre-down`/`post-down` must fire from every code path that stops the VM — not
-just `cmd_halt`. When adding a new code path that shuts down or force-stops a
-VM, use `do_graceful_shutdown()` or fire hooks via `run_hook` directly.
+`pre-down`/`post-down` must fire from every code path that stops the VM as part
+of its normal lifecycle — not just `cmd_halt`. When adding a new code path that
+shuts down a VM as part of `halt`/`snapshot`/`destroy`/`reset`, use
+`do_graceful_shutdown()` or fire hooks via `run_hook` directly.
+
+Exception: `verify_shared_folder_mounts` and `verify_wireguard_tunnel` in
+`cmd_up` call `virsh destroy` directly, with no hooks, when a just-started VM
+fails to actually get the isolation it was promised (shared folder mount
+mismatch, tunnel never came up). That is a security response — the VM must die
+immediately, not wait on a user-defined hook script — so it deliberately
+bypasses `pre-down`/`post-down` rather than routing through
+`do_graceful_shutdown()`.
 
 Hooks run as the invoking user, not root. This is by design — same trust
 boundary as the Migrantfile itself.
