@@ -6,6 +6,7 @@ Vagrant is a solid tool, but has some drawbacks for this use case:
 | ----------------------- | -------------------------------- | ---------------------------------------- |
 | Hypervisor              | VirtualBox (userspace)           | KVM (Linux kernel native)                |
 | Shared folders          | `vboxsf` via guest kernel module | `virtiofs` via host daemon               |
+| Guest→host/LAN network  | Off by default (NAT)             | On by default (iptables)                 |
 | Default user privileges | Passwordless sudo (vagrant user) | Configurable via cloud-init              |
 | Rebuild speed           | Slow (full image copy)           | Fast (qcow2 backing file, copy-on-write) |
 | Dependency footprint    | Vagrant + VirtualBox             | libvirt + QEMU (standard Linux stack)    |
@@ -18,3 +19,11 @@ side; the guest interacts with it over a virtio channel without any special
 kernel module. Combined with KVM's smaller hypervisor attack surface compared to
 VirtualBox, this makes `migrant` a better fit for running untrusted or
 autonomous workloads.
+
+Network isolation is the other half of that story. Vagrant + VirtualBox's
+default NAT networking lets a guest reach the host and the LAN with no firewall
+in the way. `migrant` blocks guest-initiated connections to the host and to
+private, shared, and link-local address ranges by default (see
+[Network isolation](security/network-isolation.md)), so a compromised or
+malicious workload can't pivot from the VM onto the host or the local network
+unless a `Migrantfile` explicitly opens an exception.
