@@ -21,7 +21,10 @@ run `migrant` from anywhere (see [MIGRANT_DIR](usage.md#migrant_dir)).
 
 On first `migrant up`, the script:
 
-1. Downloads the base cloud image (once, cached in `/var/lib/libvirt/images/`)
+1. Downloads the base cloud image (once, cached in `/var/lib/libvirt/images/` —
+   or `LIBVIRT_IMAGES_DIR` if set; `file://` image URLs are always re-copied
+   instead of cached, since the source may have been rebuilt, as with a
+   locally-built NixOS image)
 2. Creates a qcow2 disk using the base image as a backing file (copy-on-write —
    fast, no full copy)
 3. Packages your `cloud-init.yml` into a seed ISO
@@ -41,7 +44,9 @@ so the next `migrant up` is fast.
 
 ## Disk images and caching
 
-All VM-related files are stored in `/var/lib/libvirt/images/`:
+All VM-related files are stored in `/var/lib/libvirt/images/`, or
+`LIBVIRT_IMAGES_DIR` if set (e.g. `migrant setup` uses it to pick where the
+images directory is created):
 
 | File       | Example                                  | Purpose                                              |
 | ---------- | ---------------------------------------- | ---------------------------------------------------- |
