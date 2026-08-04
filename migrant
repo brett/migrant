@@ -287,19 +287,55 @@ wait_for_cloud_init() {
   echo "cloud-init done." >&2
 }
 
+# findmnt names the loop device; sysfs holds the image behind it and is
+# readable without root, unlike losetup.
+mount_backing_file() {
+  local dev backing
+  dev=$(findmnt -nro SOURCE "$1" 2>/dev/null) || return 1
+  [[ "$dev" == /dev/loop* ]] || return 1
+  backing="/sys/block/${dev#/dev/}/loop/backing_file"
+  [[ -r "$backing" ]] || return 1
+  # An unlinked backing file is reported with a ' (deleted)' suffix.
+  backing=$(<"$backing")
+  echo "${backing% (deleted)}"
+}
+
+shared_mount_failed() {
+  echo "[ERROR] $1" >&2
+  echo "  The guest would be served an unprotected directory. Halting VM." >&2
+  echo "  Check: cat /run/migrant/hook.log" >&2
+  virsh destroy "$VM_NAME" 2>/dev/null || true
+  exit 70  # EX_SOFTWARE
+}
+
 verify_shared_folder_mounts() {
   shared_folder_isolation_enabled || return 0
-  [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return
-  for shared_folder in "${SHARED_FOLDERS[@]}"; do
-    local host_path
-    host_path=$(shared_folder_host_path "$shared_folder")
-    if ! mountpoint -q "$host_path" 2>/dev/null; then
-      echo "[ERROR] VM started but '$host_path' is not mounted." >&2
-      echo "  The loop hook may have failed." >&2
-      echo "  Check: cat /run/migrant/hook.log" >&2
-      exit 1
+
+  # The loop hook records what it mounted, taken from the domain XML. Reading
+  # SHARED_FOLDERS instead would miss a filesystem added through
+  # .virt-install-extra-args, which is mounted but would never be verified.
+  local record="/run/migrant/${VM_NAME}.shared"
+  if [[ ! -f "$record" ]]; then
+    shared_mount_failed "VM started but the loop hook recorded no shared folder mounts.
+  It is missing or too old to write /run/migrant/<vm>.shared — run 'migrant setup'."
+  fi
+
+  local dir img backing
+  while IFS=$'\t' read -r dir img; do
+    [[ -n "$dir" ]] || continue
+    mountpoint -q "$dir" 2>/dev/null \
+      || shared_mount_failed "VM started but '$dir' is not mounted."
+    findmnt -no OPTIONS "$dir" 2>/dev/null | grep -qw nosymfollow \
+      || shared_mount_failed "'$dir' is mounted without nosymfollow."
+    # Advisory: the hook already refused to start unless the backing matched,
+    # so a host where sysfs will not answer is not worth halting over.
+    backing=$(mount_backing_file "$dir") || backing=""
+    if [[ -z "$backing" ]]; then
+      echo "[WARNING] could not confirm which image backs '$dir'." >&2
+    elif [[ "$backing" != "$img" ]]; then
+      shared_mount_failed "'$dir' is mounted from '$backing', not '$img'."
     fi
-  done
+  done < "$record"
 }
 
 ensure_shared_folder_images() {
@@ -359,13 +395,51 @@ wg_iface_and_table() {
 }
 
 is_valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+  # 10# so a leading zero is read as decimal rather than octal; the digit bound
+  # keeps the arithmetic away from overflow.
+  [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# Echo the canonical dotted-quad form of a strict IPv4 address, or fail. The
+# hook matches its rules by text for -C and -D, so what is stored has to be the
+# form iptables will render back.
+canonical_ipv4() {
+  local ip="$1" o
+  local -a octets=() out=()
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -ra octets <<< "$ip"
+  for o in "${octets[@]}"; do
+    (( 10#$o <= 255 )) || return 1
+    out+=( "$(( 10#$o ))" )
+  done
+  printf '%s.%s.%s.%s' "${out[@]}"
+}
+
+# A shared folder that contains the VM's hooks directory is guest->host code
+# execution: the guest writes hooks/pre-up and migrant runs it, as the invoking
+# user, on the next up.
+validate_shared_folder_paths() {
+  [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return 0
+  local hooks_dir shared_folder host_path prefix
+  hooks_dir=$(realpath -m "$VM_DIR/hooks")
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    host_path=$(realpath -m "$(shared_folder_host_path "$shared_folder")")
+    prefix="${host_path%/}/"
+    if [[ "$hooks_dir" == "$host_path" || "$hooks_dir" == "$prefix"* ]]; then
+      echo "[ERROR] SHARED_FOLDERS entry exposes the VM's hooks directory: $shared_folder" >&2
+      echo "  $host_path contains $hooks_dir, so a guest could write a hook that" >&2
+      echo "  runs on the host at the next 'migrant up'. Share a subdirectory instead." >&2
+      exit 65  # EX_DATAERR
+    fi
+  done
 }
 
 sync_managed_config() {
   # Write all behavioral config to /etc/migrant/${VM_NAME}/ for the qemu and
   # loop hooks to consume. The directory is created only when at least one
   # feature needs it, and removed when empty.
+  validate_shared_folder_paths
+
   local managed_dir="/etc/migrant/${VM_NAME}"
   local needs_dir=false
 
@@ -456,13 +530,14 @@ sync_managed_config() {
           rules_content+="${rule}"$'\n'
           ;;
         allow-lan-host\ *)
-          local host_ip="${rule#allow-lan-host }"
-          if [[ ! "$host_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          local host_ip canonical
+          host_ip="${rule#allow-lan-host }"
+          if ! canonical=$(canonical_ipv4 "$host_ip"); then
             echo "[ERROR] invalid HOST_ACCESS entry: $rule" >&2
             echo "  allow-lan-host requires a numeric IPv4 address." >&2
             exit 65  # EX_DATAERR
           fi
-          rules_content+="${rule}"$'\n'
+          rules_content+="allow-lan-host ${canonical}"$'\n'
           ;;
         *)
           echo "[ERROR] unrecognized HOST_ACCESS directive: $rule" >&2
@@ -512,11 +587,13 @@ sync_wireguard_files() {
     echo "  Edit wireguard.conf and re-run 'migrant up'." >&2
     exit 65  # EX_DATAERR
   fi
-  if [[ ! "$wg_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  local wg_endpoint_canonical
+  if ! wg_endpoint_canonical=$(canonical_ipv4 "$wg_endpoint"); then
     echo "[ERROR] wireguard.conf Endpoint must be a numeric IP, not a hostname ($wg_endpoint)." >&2
     echo "  Edit wireguard.conf and re-run 'migrant up'." >&2
     exit 65  # EX_DATAERR
   fi
+  wg_endpoint="$wg_endpoint_canonical"
 
   # wireguard.conf — raw copy (contains private key; permissions must be tight)
   cp "$wg_src" "$managed_dir/wireguard.conf"
@@ -977,13 +1054,13 @@ cmd_setup() {
   if [[ ! -d /etc/migrant ]]; then
     sudo mkdir -p /etc/migrant
     sudo chown root:libvirt /etc/migrant
-    sudo chmod 2770 /etc/migrant
+    sudo chmod 3770 /etc/migrant
     printf '%-*s%s\n' "$kw" "/etc/migrant:" "created [changed]"
     (( changes++ )) || true
   elif [[ "$(stat -c '%G' /etc/migrant)" != "libvirt" \
-       || "$(stat -c '%a' /etc/migrant)" != "2770" ]]; then
+       || "$(stat -c '%a' /etc/migrant)" != "3770" ]]; then
     sudo chown root:libvirt /etc/migrant
-    sudo chmod 2770 /etc/migrant
+    sudo chmod 3770 /etc/migrant
     printf '%-*s%s\n' "$kw" "/etc/migrant:" "permissions updated [changed]"
     (( changes++ )) || true
   else
@@ -999,24 +1076,70 @@ cmd_setup() {
     current_backend="nftables"  # libvirt default
   fi
 
-  # Detect which firewall system the host actually uses:
-  # - Legacy iptables: has rules in iptables but not in nft
-  # - nftables: nft list ruleset shows tables (ignore libvirt's own)
-  local host_uses_legacy_iptables=false
-  if sudo iptables -S 2>/dev/null | grep -qv '^-P .* ACCEPT$' \
-      && ! sudo nft list ruleset 2>/dev/null | grep -q 'table'; then
-    host_uses_legacy_iptables=true
+  # Isolation needs libvirt's LIBVIRT_INP chain to position its INPUT jump, and
+  # that chain exists only under the iptables backend — under nftables libvirt
+  # filters in its own table and the qemu hook refuses to start the VM.
+  if [[ "$current_backend" == "iptables" ]]; then
+    printf '%-*s%s\n' "$kw" "firewall backend:" "iptables"
+  else
+    # sed exits 0 when it matches nothing, so the append case must be its own
+    # branch rather than a || fallback.
+    if grep -qE '^[[:space:]]*#?[[:space:]]*firewall_backend[[:space:]]*=' "$network_conf" 2>/dev/null; then
+      sudo sed -i 's/^[[:space:]]*#\?[[:space:]]*firewall_backend[[:space:]]*=.*/firewall_backend = "iptables"/' \
+        "$network_conf"
+    else
+      echo 'firewall_backend = "iptables"' | sudo tee -a "$network_conf" > /dev/null
+    fi
+    sudo systemctl restart libvirtd
+    printf '%-*s%s\n' "$kw" "firewall backend:" \
+      "set to iptables (was ${current_backend}) [changed]"
+    printf '  %-*s%s\n' "$skw" "note:" "applies to every libvirt network on this host"
+    (( changes++ )) || true
   fi
 
-  if $host_uses_legacy_iptables && [[ "$current_backend" != "iptables" ]]; then
-    sudo sed -i 's/#\?\s*firewall_backend\s*=\s*"[^"]*"/firewall_backend = "iptables"/' \
-      "$network_conf" 2>/dev/null \
-      || echo 'firewall_backend = "iptables"' | sudo tee -a "$network_conf" > /dev/null
-    sudo systemctl restart libvirtd
-    printf '%-*s%s\n' "$kw" "firewall backend:" "switched to iptables [changed]"
+  # --- bridge netfilter ---
+  # -m physdev matches nothing unless br_netfilter is loaded and bridged traffic
+  # is passed to ip(6)tables, so every isolation rule depends on both.
+  local brnf_probe="/proc/sys/net/bridge/bridge-nf-call-iptables"
+  local brnf_modconf="/etc/modules-load.d/migrant.conf"
+  local brnf_sysctl="/etc/sysctl.d/99-migrant.conf"
+  local brnf_actions=""
+
+  if [[ ! -e "$brnf_probe" ]]; then
+    sudo modprobe br_netfilter 2>/dev/null || true
+    if [[ ! -e "$brnf_probe" ]]; then
+      printf '%-*s%s\n' "$kw" "bridge netfilter:" "unavailable [ERROR]"
+      printf '  %-*s%s\n' "$skw" "note:" "br_netfilter could not be loaded; isolation cannot work"
+      exit 69  # EX_UNAVAILABLE
+    fi
+    brnf_actions="module loaded"
+  fi
+
+  if [[ "$(cat "$brnf_modconf" 2>/dev/null)" != "br_netfilter" ]]; then
+    echo br_netfilter | sudo tee "$brnf_modconf" > /dev/null
+    brnf_actions="${brnf_actions:+${brnf_actions}, }module persisted"
+  fi
+
+  local brnf_key
+  for brnf_key in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+    if [[ "$(cat "/proc/sys/net/bridge/${brnf_key}" 2>/dev/null || echo 0)" != 1 ]]; then
+      sudo sysctl -w "net.bridge.${brnf_key}=1" > /dev/null
+      brnf_actions="${brnf_actions:+${brnf_actions}, }${brnf_key}=1"
+    fi
+  done
+
+  local brnf_want="net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1"
+  if [[ "$(cat "$brnf_sysctl" 2>/dev/null)" != "$brnf_want" ]]; then
+    printf '%s\n' "$brnf_want" | sudo tee "$brnf_sysctl" > /dev/null
+    brnf_actions="${brnf_actions:+${brnf_actions}, }sysctl persisted"
+  fi
+
+  if [[ -n "$brnf_actions" ]]; then
+    printf '%-*s%s\n' "$kw" "bridge netfilter:" "${brnf_actions} [changed]"
     (( changes++ )) || true
   else
-    printf '%-*s%s\n' "$kw" "firewall backend:" "$current_backend"
+    printf '%-*s%s\n' "$kw" "bridge netfilter:" "ok"
   fi
 
   # --- qemu hook (network isolation + WireGuard) ---

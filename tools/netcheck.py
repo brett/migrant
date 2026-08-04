@@ -100,6 +100,11 @@ def test(
 # CLI
 # ---------------------------------------------------------------------------
 
+# RFC1918, so isolation rejects it, and unallocated on any plausible host — a
+# connection that lands here was rewritten to the host rather than sent.
+HOST_PORT_DECOY = "10.255.255.254"
+
+
 def parse_host_port(spec: str) -> tuple[str, int]:
     """Parse 'tcp/9999' or 'udp/9999' into (proto, port).
 
@@ -127,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LAN host IP to probe (skips interactive prompt)")
     p.add_argument("--host-port", metavar="SPEC",
                    help="Host port, e.g. tcp/9999 (skips interactive prompt)")
+    p.add_argument("--host-port-decoy", metavar="IP", default=HOST_PORT_DECOY,
+                   help="Address used to prove --host-port is not redirected from "
+                        f"anywhere but the gateway (default: {HOST_PORT_DECOY})")
     p.add_argument("--peer-ip", metavar="IP",
                    help="Another migrant VM IP to probe (skips interactive prompt)")
     p.add_argument("--ipv6-nat", action="store_true",
@@ -881,16 +889,17 @@ def _iso_rfc1918_192(ctx: Context) -> Result:
 
 @test("Isolation", "IPv6 host reachability (ULA gateway TCP)", expect="PASS")
 def _iso_ipv6_host_tcp(ctx: Context) -> Result:
-    """NAT66's real risk: the host's on-link ULA is locally delivered, so guest->
-    host traffic hits the host INPUT chain, not the FORWARD rejects. Probe a host
-    port that is deliberately listening (started by the VM's pre-up hook and
-    passed via --ipv6-host-port). CONNECTED proves the guest reached a host
-    service over IPv6 — the isolation hole. Any blocked outcome is PASS. A known
-    listener is required so a plain ECONNREFUSED (reached host, nothing bound)
-    can't masquerade as 'safely blocked'.
+    """The host's on-link ULA is locally delivered, so guest->host traffic hits
+    the host INPUT chain, not the FORWARD rejects. Probe a host port that is
+    deliberately listening (started by the VM's pre-up hook and passed via
+    --ipv6-host-port). CONNECTED proves the guest reached a host service over
+    IPv6 — the isolation hole. Any blocked outcome is PASS. A known listener is
+    required so a plain ECONNREFUSED (reached host, nothing bound) can't
+    masquerade as 'safely blocked'.
+
+    Applies in every IPv6 mode, not only NAT66: network.xml declares the ULA and
+    a DHCPv6 range unconditionally.
     """
-    if not ctx.args.ipv6_nat:
-        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
     if not ctx.args.ipv6_host_port:
         return Result("SKIP", "no --ipv6-host-port specified (skipped)")
     try:
@@ -910,14 +919,13 @@ def _iso_ipv6_host_tcp(ctx: Context) -> Result:
 
 @test("Isolation", "IPv6 host reachability (ICMPv6 echo)", expect="PASS")
 def _iso_ipv6_host_icmp(ctx: Context) -> Result:
-    """The IPv4 side rejects ping to the host; NAT66 must not be looser. Echo to
+    """The IPv4 side rejects ping to the host; IPv6 must not be looser. Echo to
     the ULA gateway must be blocked (only NDP/error ICMPv6 is permitted on-link).
+    Applies in every IPv6 mode — the guest holds a ULA regardless of NAT66.
     """
-    if not ctx.args.ipv6_nat:
-        return Result("SKIP", "requires --ipv6-nat (no ULA without NAT66)")
     gw = _ula_gateway(ctx)
     if not gw:
-        return Result("FAIL", "no ULA gateway derivable — NAT66 guest has no ULA")
+        return Result("FAIL", "no ULA gateway derivable — guest has no ULA")
     r = run_tool("ping", ["-6", "-c", "1", "-W", "3", gw], timeout=8)
     if not r.available:
         return Result("SKIP", "ping not found")
@@ -969,16 +977,16 @@ def _primary_iface(vm_ips: dict[str, list[str]]) -> str | None:
     return None
 
 
-@test("Isolation", "IPv6 link-local gateway reachability", expect=None)
+@test("Isolation", "IPv6 link-local gateway reachability", expect="PASS")
 def _iso_ipv6_linklocal(ctx: Context) -> Result:
     """Probe the host's link-local (fe80::) IPv6 address on the VM's bridge segment.
     Link-local traffic does not traverse the FORWARD chain — it arrives at the
-    host's INPUT chain.  Reachability here means the host's ip6tables INPUT
-    rules govern exposure, not the FORWARD isolation rules.
+    host's INPUT chain, so the FORWARD isolation rules do not govern it.
+    Reaching a host service here is an isolation failure, not a diagnostic.
     """
     iface = _primary_iface(ctx.vm_ips)
     if not iface:
-        return Result("INFO", "no non-loopback interface found")
+        return Result("SKIP", "no non-loopback interface found")
 
     # Ping the all-nodes multicast address to populate the neighbor cache.
     run_tool("ping", ["-6", "-c", "2", "-W", "2", f"ff02::1%{iface}"], timeout=8)
@@ -993,13 +1001,16 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
             fe80_neighbors.append(m.group(1))
 
     if not fe80_neighbors:
+        # Inconclusive, not safe: the ULA probe uses a known listener and is the
+        # authoritative guest->host IPv6 check.
         return Result(
-            "INFO",
-            "no fe80 neighbors discovered (neighbor cache empty)",
+            "SKIP",
+            "no fe80 neighbors discovered — inconclusive, see the ULA gateway check",
             detail=neigh_out.strip() or "(empty)",
         )
 
     findings: list[str] = []
+    connected = False
     for addr in fe80_neighbors:
         try:
             scope_id = socket.if_nametoindex(iface)
@@ -1007,6 +1018,7 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
                 sock.settimeout(3)
                 sock.connect((addr, 22, 0, scope_id))
             findings.append(f"{addr} :22 CONNECTED")
+            connected = True
         except ConnectionRefusedError:
             findings.append(f"{addr} :22 REJECTED (host reachable, no SSH listener)")
         except socket.timeout:
@@ -1014,7 +1026,10 @@ def _iso_ipv6_linklocal(ctx: Context) -> Result:
         except OSError as exc:
             findings.append(f"{addr} :22 ERROR:{exc.errno}")
 
-    return Result("INFO", "; ".join(findings), detail=neigh_out.strip())
+    summary = "; ".join(findings)
+    if connected:
+        return Result("FAIL", summary, detail=neigh_out.strip())
+    return Result("PASS", summary, detail=neigh_out.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -1142,6 +1157,34 @@ def _host_port(ctx: Context) -> Result:
         return Result("PASS", f"UDP datagram sent to {ctx.gateway}:{port} without error")
     except OSError as exc:
         return Result("FAIL", f"UDP send failed: {exc}")
+
+
+@test("Host access", "Host port is not redirected from other addresses", expect="PASS")
+def _host_port_scope(ctx: Context) -> Result:
+    """allow-host-port must map the gateway only, not hijack the port.
+
+    An unscoped DNAT rewrites this connection to the host's loopback and it
+    CONNECTS to the same listener the positive test reaches. Scoped, the
+    address is left alone and the isolation rules reject it.
+    """
+    if not ctx.args.host_port:
+        return Result("SKIP", "no --host-port specified (skipped)")
+    try:
+        proto, port = parse_host_port(ctx.args.host_port)
+    except ValueError as exc:
+        return Result("SKIP", str(exc))
+    if proto != "tcp":
+        return Result("SKIP", "only tcp can distinguish reached from rewritten")
+
+    decoy = ctx.args.host_port_decoy
+    outcome = _tcp_probe(decoy, port, timeout=5.0)
+    if outcome == "CONNECTED":
+        return Result(
+            "FAIL",
+            f"connected to {decoy}:{port} — the DNAT is rewriting every "
+            f"destination on this port, not just {ctx.gateway}",
+        )
+    return Result("PASS", f"{outcome} to {decoy}:{port}")
 
 
 # ---------------------------------------------------------------------------
