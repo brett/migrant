@@ -6,9 +6,9 @@ Developer and operator tools for working with migrant-managed VMs.
 
 ## netcheck.py
 
-A network connectivity probe that runs **inside** a migrant-managed VM.
-Use it to verify that isolation and connectivity settings match your
-Migrantfile expectations before handing the VM to an agent.
+A network connectivity probe that runs **inside** a migrant-managed VM. Use it
+to verify that isolation and connectivity settings match your Migrantfile
+expectations before handing the VM to an agent.
 
 Requires Python 3.11+ and `uv`. Both are available on all example VM distros
 (Arch, Debian, Ubuntu) after provisioning.
@@ -45,14 +45,14 @@ Or add a task to your Ansible playbook to provision it automatically.
 
 ### What it checks
 
-| Category    | Tests                                                                                         |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| Inventory   | Interfaces, routing tables, DNS resolvers, gateway                                            |
+| Category    | Tests                                                                                        |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| Inventory   | Interfaces, routing tables, DNS resolvers, gateway                                           |
 | DNS         | Default resolver (A/AAAA), direct queries to 8.8.8.8/1.1.1.1, interception detection, whoami |
-| Internet    | HTTP/HTTPS reachability, IPv6 egress probe, public IP/VPN info, traceroute, MTU               |
-| Isolation   | Gateway ping/TCP, RFC1918 TCP probes, IPv6 host reachability (ULA gateway, `--ipv6-nat`)      |
-| Host access | TCP/UDP connect to a host port (requires `allow-host-port` in Migrantfile)                    |
-| LAN / peer  | Ping and TCP to a LAN host, peer VM ping                                                      |
+| Internet    | HTTP/HTTPS reachability, IPv6 egress probe, public IP/VPN info, traceroute, MTU              |
+| Isolation   | Gateway ping/TCP, RFC1918 TCP probes, IPv6 host reachability (ULA gateway, `--ipv6-nat`)     |
+| Host access | TCP/UDP connect to a host port (requires `allow-host-port` in Migrantfile)                   |
+| LAN / peer  | Ping and TCP to a LAN host, peer VM ping                                                     |
 
-Exit code 0 if all tests produce expected results; 1 if any test with a
-defined expectation produces an unexpected result.
+Exit code 0 if all tests produce expected results; 1 if any test with a defined
+expectation produces an unexpected result.

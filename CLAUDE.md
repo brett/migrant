@@ -9,18 +9,25 @@ below); `test/` and `tools/` are unrelated to VM lifecycle.
 
 ## Purpose
 
-The primary goal is a **secure, ephemeral environment for running coding agents**
-(e.g. Claude Code). The design assumes the agent may be malicious or compromised.
-Changes should preserve or strengthen the isolation boundary between the VM and
-the host — do not introduce features that widen the attack surface without
-careful consideration. Key containment properties to preserve:
+The primary goal is a **secure, ephemeral environment for running coding
+agents** (e.g. Claude Code). The design assumes the agent may be malicious or
+compromised. Changes should preserve or strengthen the isolation boundary
+between the VM and the host — do not introduce features that widen the attack
+surface without careful consideration. Key containment properties to preserve
+(full detail in `docs/security/`):
 
 - KVM hypervisor boundary between guest and host
-- Network isolation (on by default) blocks the VM from reaching the host or LAN; set `NETWORK_ISOLATION=false` to opt out. Forwarded traffic to private, shared (`100.64.0.0/10`) and link-local destinations is rejected; guest→host is the per-VM INPUT chain, not those rejects
-- IPv6 egress has no routable path by default (dropped at the FORWARD chain); `NETWORK_IPV6=nat` opts a VM in to NAT66 egress and is refused alongside WireGuard (IPv6 is not tunnel-routed). Guest→host IPv6 is blocked at INPUT in *every* IPv6 mode: the bridge always carries a ULA and that traffic is delivered locally, so the egress drop never sees it
-- Rules match with `-m physdev`, which only sees bridge ports, and the MAC gate matches a source address the guest can change; neither is a substitute for the rules themselves
-- The shared folder is the only intentional host↔guest data channel; its scope
-  should remain narrow
+- Network isolation (on by default, `docs/security/network-isolation.md`) blocks
+  the VM from reaching the host or LAN; guest→host is the per-VM INPUT chain,
+  not the forwarded-traffic rejects
+- IPv6 egress has no routable path by default; `NETWORK_IPV6=nat`
+  (`docs/security/ipv6-nat66.md`) opts in and is refused alongside WireGuard.
+  Guest→host IPv6 is blocked at INPUT in *every* IPv6 mode
+- Rules match with `-m physdev`, which only sees bridge ports, and the MAC gate
+  matches a source address the guest can change; neither is a substitute for the
+  rules themselves
+- The shared folder (`docs/security/shared-folder-isolation.md`) is the only
+  intentional host↔guest data channel; its scope should remain narrow
 - The VM is designed to be destroyed and rebuilt, not patched in place
 
 ## Code style
@@ -29,7 +36,9 @@ careful consideration. Key containment properties to preserve:
 - Run `shellcheck setup/qemu-hook setup/loop-hook setup/network-hook` after
   changes to any of them — must be clean (`setup/network.xml` and
   `setup/_migrant` are not shell and are not shellchecked)
-- Run `uvx ansible-lint examples/arch/playbook.yml examples/ubuntu/playbook.yml examples/debian/playbook.yml` after changes to any playbook
+- Run
+  `uvx ansible-lint examples/arch/playbook.yml examples/ubuntu/playbook.yml examples/debian/playbook.yml`
+  after changes to any playbook
 - The script uses `set -euo pipefail`; follow these patterns:
   - Empty array expansion: `"${ARRAY[@]+"${ARRAY[@]}"}"`
   - Arithmetic that may evaluate to 0: `(( expr )) || true`
@@ -40,8 +49,8 @@ careful consideration. Key containment properties to preserve:
 ## sudo discipline
 
 VM lifecycle commands (`up`, `halt`, `destroy`, `snapshot`, `status`, etc.) must
-not call `sudo`. All privileged operations belong in `cmd_setup`, which runs once
-and persists results via sentinel files or installed artifacts so lifecycle
+not call `sudo`. All privileged operations belong in `cmd_setup`, which runs
+once and persists results via sentinel files or installed artifacts so lifecycle
 commands can operate unprivileged.
 
 `sudo` is permitted only in convenience wrapper subcommands unrelated to VM
@@ -55,8 +64,8 @@ rules:
 - **`sudo -v` must run before the first `printf`** — this pre-authenticates sudo
   so the password prompt never appears mid-output; the explanatory message
   immediately before `sudo -v` tells the user why elevation is needed
-- **`[changed]` marker**: append to any line where an action was taken; increment
-  the `changes` counter with `(( changes++ )) || true`
+- **`[changed]` marker**: append to any line where an action was taken;
+  increment the `changes` counter with `(( changes++ )) || true`
 - **Informational rows** (e.g. `firewall backend:`) report a plain value with no
   `[changed]` marker — they describe detected state, not an action taken
 
@@ -65,64 +74,69 @@ rules:
 `cmd_status` uses aligned `key: value` pairs with indented sub-fields for
 grouped data (tunnel details, loop mount point). Key design rules:
 
-- **Field order**: name → state → ip → tunnel → snapshot → loop
-  (most operationally important first)
-- **Markers**: append `[ERROR]` for broken states, `[WARNING]` for transient
-  or degraded states; never use colors (breaks pipes/scripts)
-- **Hints**: only the `crashed` state includes a recovery hint (`note:` sub-field)
-  because the steps are non-obvious; all other action hints are omitted
+- **Field order**: name → state → ip → tunnel → snapshot → loop (most
+  operationally important first)
+- **Markers**: append `[ERROR]` for broken states, `[WARNING]` for transient or
+  degraded states; never use colors (breaks pipes/scripts)
+- **Hints**: only the `crashed` state includes a recovery hint (`note:`
+  sub-field) because the steps are non-obvious; all other action hints are
+  omitted
 
 ## Exit codes
 
-Non-zero exits follow sysexits.h semantics. Reserve `1` for runtime state
-errors with no sharper category (e.g. VM not running, VM not created).
+Non-zero exits follow sysexits.h semantics. Reserve `1` for runtime state errors
+with no sharper category (e.g. VM not running, VM not created).
 
 ## README sync
 
 - Command descriptions in `usage()` and in the README command list must be
   **word-for-word identical**
-- When adding a subcommand: update `usage()`, the `case` statement, the
-  README command list, and the `_migrant` ZSH completion function in `cmd_setup`
+- When adding a subcommand: update `usage()`, the `case` statement, the README
+  command list, and the `_migrant` ZSH completion function in `cmd_setup`
 
 ## Provisioning architecture
 
-cloud-init runs before SSH and cannot be re-run without `destroy` + `up`. Ansible
-runs after SSH and can be re-run any time. Prefer Ansible for anything that doesn't
-need to happen before SSH.
+cloud-init runs before SSH and cannot be re-run without `destroy` + `up`.
+Ansible runs after SSH and can be re-run any time. Prefer Ansible for anything
+that doesn't need to happen before SSH.
 
 ## SSH is optional
 
-Not all VMs define `ssh_authorized_keys`. Use `vm_has_ssh()` to check; new features
-should work without SSH where possible. When SSH is required, fail with a clear error.
+Not all VMs define `ssh_authorized_keys`. Use `vm_has_ssh()` to check; new
+features should work without SSH where possible. When SSH is required, fail with
+a clear error.
 
 ## Migrantfile is sourced as bash
 
-`require_config` sources the Migrantfile into the script's process — full bash, but
-no sandboxing. Do not add features that encourage untrusted content in a Migrantfile.
+`require_config` sources the Migrantfile into the script's process — full bash,
+but no sandboxing. Do not add features that encourage untrusted content in a
+Migrantfile.
 
 ## libvirt hook gotcha: never call virsh from within a hook
 
 Calling `virsh` against a domain from its own hook deadlocks (libvirtd holds the
-per-domain lock). Always read domain XML from stdin (`xml=$(cat)`) — the persistent
-file at `/etc/libvirt/qemu/{name}.xml` may not exist during `virt-install`.
+per-domain lock). Always read domain XML from stdin (`xml=$(cat)`) — the
+persistent file at `/etc/libvirt/qemu/{name}.xml` may not exist during
+`virt-install`.
 
 ## iptables in the hook: always use physdev, never -i
 
-Bridged VM traffic arrives on `virbr-migrant`, not the tap port, so `-i vnetN` never
-matches. Use `-m physdev --physdev-in vnetN` for every rule targeting a specific VM's
-tap, across all tables and ip6tables.
+Bridged VM traffic arrives on `virbr-migrant`, not the tap port, so `-i vnetN`
+never matches. Use `-m physdev --physdev-in vnetN` for every rule targeting a
+specific VM's tap, across all tables and ip6tables.
 
 ## Example VM sync
 
-Keep all example VMs in `examples/` in parity — apply equivalent changes to
-all of them. Distro-specific differences (package manager, unit names) are
-expected; structural or behavioural divergence is not.
+Keep all example VMs in `examples/` in parity — apply equivalent changes to all
+of them. Distro-specific differences (package manager, unit names) are expected;
+structural or behavioural divergence is not.
 
 Known parity exceptions:
-- **tmp.mount masked** (`examples/debian/playbook.yml` only): Debian 13 uses tmpfs for `/tmp`; Ubuntu and Arch do not.
-- **`examples/nixos/`**: declarative image build with no `playbook.yml`; see
-  its README for the full list of structural differences from the other
-  examples.
+
+- **tmp.mount masked** (`examples/debian/playbook.yml` only): Debian 13 uses
+  tmpfs for `/tmp`; Ubuntu and Arch do not.
+- **`examples/nixos/`**: declarative image build with no `playbook.yml`; see its
+  README for the full list of structural differences from the other examples.
 
 ## Lifecycle hooks
 
@@ -138,23 +152,24 @@ boundary as the Migrantfile itself.
 
 On the first-create path only, `cmd_up` reads `$VM_DIR/.virt-install-extra-args`
 after `pre-up` fires — one arg per line, appended to `virt-install` argv, then
-deleted. Not read on the start-existing path. Hooks that need per-boot setup should
-do that work unconditionally in `pre-up`; the args file is only for initial
-`virt-install`.
+deleted. Not read on the start-existing path. Hooks that need per-boot setup
+should do that work unconditionally in `pre-up`; the args file is only for
+initial `virt-install`.
 
 ## Managed config pattern
 
-`/etc/migrant/${VM_NAME}/` is the data channel between unprivileged migrant
-and the privileged qemu/loop hooks. `sync_managed_config()` validates and writes
-all behavioral config (network isolation flag, IPv6/NAT66 flag, shared folder
-isolation flag, HOST_ACCESS rules, WireGuard files) before the VM starts. The hooks read these
-files at runtime.
+`/etc/migrant/${VM_NAME}/` is the data channel between unprivileged migrant and
+the privileged qemu/loop hooks. `sync_managed_config()` validates and writes all
+behavioral config (network isolation flag, IPv6/NAT66 flag, shared folder
+isolation flag, HOST_ACCESS rules, WireGuard files) before the VM starts. The
+hooks read these files at runtime.
 
 The VM description tag carries only identity (`managed-by=migrant`). All
 behavioral config comes from managed config files. The hooks fall back to the
 description tag for VMs created before this pattern was introduced.
 
 When adding a new feature that requires privileged enforcement:
+
 1. Add the Migrantfile variable and validation to `sync_managed_config()`
 2. Write the validated data to `/etc/migrant/${VM_NAME}/`
 3. Read it in the appropriate hook (`apply_rules`, `remove_rules`, etc.)
@@ -164,10 +179,10 @@ When adding a new feature that requires privileged enforcement:
 
 `apply_rules` writes each fact — tap, MAC, isolation flag, IPv6 policy, refcount
 taken, host-access entry — *before* installing the rule it describes, and
-`remove_rules` undoes exactly what is recorded. Teardown must
-never re-read `/etc/migrant/`: that holds the current Migrantfile, so a config
-edited between `up` and `halt` would leave whatever the file no longer mentions
-bound to a tap name libvirt hands to the next VM.
+`remove_rules` undoes exactly what is recorded. Teardown must never re-read
+`/etc/migrant/`: that holds the current Migrantfile, so a config edited between
+`up` and `halt` would leave whatever the file no longer mentions bound to a tap
+name libvirt hands to the next VM.
 
 A rule with no record strands. A new key is added to `state_load`'s `case` and
 bumps `STATE_VERSION_CURRENT`; keys are only ever added, never repurposed, so a
