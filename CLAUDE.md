@@ -39,6 +39,7 @@ surface without careful consideration. Key containment properties to preserve
 - Run
   `uvx ansible-lint examples/arch/playbook.yml examples/ubuntu/playbook.yml examples/debian/playbook.yml`
   after changes to any playbook
+- Run `tools/mdformat.sh` after changes to any Markdown file
 - The script uses `set -euo pipefail`; follow these patterns:
   - Empty array expansion: `"${ARRAY[@]+"${ARRAY[@]}"}"`
   - Arithmetic that may evaluate to 0: `(( expr )) || true`

@@ -56,3 +56,16 @@ Or add a task to your Ansible playbook to provision it automatically.
 
 Exit code 0 if all tests produce expected results; 1 if any test with a defined
 expectation produces an unexpected result.
+
+---
+
+## mdformat.sh
+
+Reformats Markdown files in place: prose wrap, table alignment, and ordered-list
+numbering (options live in `.mdformat.toml`). Code fences and `---` breaks are
+left untouched. Requires `uv`.
+
+```bash
+tools/mdformat.sh              # reformat every *.md file in the repo
+tools/mdformat.sh <file...>    # reformat specific files
+```
