@@ -13,23 +13,17 @@ The primary goal is a **secure, ephemeral environment for running coding
 agents** (e.g. Claude Code). The design assumes the agent may be malicious or
 compromised. Changes should preserve or strengthen the isolation boundary
 between the VM and the host — do not introduce features that widen the attack
-surface without careful consideration. Key containment properties to preserve
-(full detail in `docs/security/`):
+surface without careful consideration. Read `docs/security/README.md` and the
+pages it links before touching networking, firewall, or shared-folder code —
+this file only summarizes what's at stake, not the enforcement mechanism:
 
-- KVM hypervisor boundary between guest and host
-- Network isolation (on by default, `docs/security/network-isolation.md`) blocks
-  the VM from reaching the host or LAN; guest→host is the per-VM INPUT chain,
-  not the forwarded-traffic rejects
-- IPv6 egress has no routable path by default; `NETWORK_IPV6=nat`
-  (`docs/security/ipv6-nat66.md`) opts in and is refused alongside WireGuard.
-  Guest→host IPv6 is blocked at INPUT in every IPv6 mode, when network isolation
-  is active
-- Rules match with `-m physdev`, which only sees bridge ports, and the MAC gate
-  matches a source address the guest can change; neither is a substitute for the
-  rules themselves
-- The shared folder (`docs/security/shared-folder-isolation.md`) is the only
-  intentional host↔guest data channel; its scope should remain narrow
-- The VM is designed to be destroyed and rebuilt, not patched in place
+- The KVM hypervisor boundary between guest and host
+- Network isolation, on by default (`docs/security/network-isolation.md`)
+- IPv6 egress, blocked by default; opt-in only via `NETWORK_IPV6=nat`
+  (`docs/security/ipv6-nat66.md`), refused alongside WireGuard
+- The shared folder (`docs/security/shared-folder-isolation.md`), the only
+  intentional host↔guest data channel — its scope should remain narrow
+- The VM being destroyed and rebuilt, not patched in place
 
 ## Code style
 
@@ -120,17 +114,25 @@ a clear error.
 ## Migrantfile is sourced as bash
 
 `require_config` sources the Migrantfile into the script's process — full bash,
-but no sandboxing. Do not add features that encourage untrusted content in a
+but no sandboxing (same trust boundary applies to hooks in `$VM_DIR/hooks/`, see
+`docs/hooks.md`). Do not add features that encourage untrusted content in a
 Migrantfile.
 
-## libvirt hook gotcha: never call virsh from within a hook
+## libvirt hooks are not the same as user lifecycle hooks
+
+`setup/qemu-hook`, `setup/loop-hook`, and `setup/network-hook` are libvirt's own
+hook mechanism — privileged, installed once by `cmd_setup` — unrelated to the
+user-defined `$VM_DIR/hooks/` scripts described in `docs/hooks.md` and the
+"Lifecycle hooks" section of this file. Two gotchas specific to these hooks:
+
+### Never call virsh from within a hook
 
 Calling `virsh` against a domain from its own hook deadlocks (libvirtd holds the
 per-domain lock). Always read domain XML from stdin (`xml=$(cat)`) — the
 persistent file at `/etc/libvirt/qemu/{name}.xml` may not exist during
 `virt-install`.
 
-## iptables in the hook: always use physdev, never -i
+### Always use physdev, never -i
 
 Bridged VM traffic arrives on `virbr-migrant`, not the tap port, so `-i vnetN`
 never matches. Use `-m physdev --physdev-in vnetN` for every rule targeting a
@@ -151,30 +153,18 @@ Known parity exceptions:
 
 ## Lifecycle hooks
 
-User hooks (`$VM_DIR/hooks/`) are state-transition-based, not command-based.
-`pre-down`/`post-down` must fire from every code path that stops the VM as part
-of its normal lifecycle — not just `cmd_halt`. When adding a new code path that
-shuts down a VM as part of `halt`/`snapshot`/`destroy`/`reset`, use
-`do_graceful_shutdown()` or fire hooks via `run_hook` directly.
+See `docs/hooks.md` for user-facing semantics (`$VM_DIR/hooks/`, state
+transitions, environment variables, the extra-args file convention).
+Implementation notes not covered there:
 
-Exception: `verify_shared_folder_mounts` and `verify_wireguard_tunnel` in
-`cmd_up` call `virsh destroy` directly, with no hooks, when a just-started VM
-fails to actually get the isolation it was promised (shared folder mount
-mismatch, tunnel never came up). That is a security response — the VM must die
-immediately, not wait on a user-defined hook script — so it deliberately
-bypasses `pre-down`/`post-down` rather than routing through
-`do_graceful_shutdown()`.
-
-Hooks run as the invoking user, not root. This is by design — same trust
-boundary as the Migrantfile itself.
-
-### Contributing to virt-install from a pre-up hook
-
-On the first-create path only, `cmd_up` reads `$VM_DIR/.virt-install-extra-args`
-after `pre-up` fires — one arg per line, appended to `virt-install` argv, then
-deleted. Not read on the start-existing path. Hooks that need per-boot setup
-should do that work unconditionally in `pre-up`; the args file is only for
-initial `virt-install`.
+- Any new code path that shuts down a VM as part of `halt`/`snapshot`/
+  `destroy`/`reset` must fire `pre-down`/`post-down` — use
+  `do_graceful_shutdown()` or call `run_hook` directly
+- The security-kill exception (docs: "security kills bypass hooks entirely") is
+  implemented in `verify_shared_folder_mounts` and `verify_wireguard_tunnel` in
+  `cmd_up`, which call `virsh destroy` directly
+- `cmd_up` reads `$VM_DIR/.virt-install-extra-args` immediately after `pre-up`
+  exits, on the first-create path only
 
 ## Managed config pattern
 
