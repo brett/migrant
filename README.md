@@ -23,15 +23,13 @@ every line, often redirecting it down another path.
 
 ## Why not Vagrant?
 
-The most important difference is isolation. VirtualBox shared folders require a
-kernel module running inside the guest (`vboxsf`), which increases the attack
-surface between the guest and host. `virtiofs` instead uses a daemon on the host
-side; the guest interacts with it over a virtio channel without any special
-kernel module. Combined with KVM's smaller hypervisor attack surface compared to
-VirtualBox, this makes `migrant` a better fit for running untrusted or
-autonomous workloads.
+The most important difference is isolation. `migrant` offers shared folder and
+networking isolation that is superior to VirtualBox. Combined with KVM's smaller
+hypervisor attack surface, this makes `migrant` a better fit for running
+untrusted or autonomous workloads.
 
-See [docs/comparison.md](docs/comparison.md) for the full comparison table.
+See [docs/comparison.md](docs/comparison.md) for the full comparison, including
+Docker and Docker Sandboxes.
 
 ---
 
@@ -251,7 +249,8 @@ migrant up
 
 Further detail lives in [docs/](docs/):
 
-- [docs/comparison.md](docs/comparison.md) — Why not Vagrant?
+- [docs/comparison.md](docs/comparison.md) — Why not Vagrant, Docker, or Docker
+  Sandboxes?
 - [docs/architecture.md](docs/architecture.md) — How `migrant up`/`destroy`
   work, disk image caching, firmware (BIOS vs UEFI)
 - [docs/usage.md](docs/usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics,
