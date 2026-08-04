@@ -415,9 +415,7 @@ canonical_ipv4() {
   printf '%s.%s.%s.%s' "${out[@]}"
 }
 
-# A shared folder that contains the VM's hooks directory is guest->host code
-# execution: the guest writes hooks/pre-up and migrant runs it, as the invoking
-# user, on the next up.
+# See docs/security/shared-folder-isolation.md, "Restrictions".
 validate_shared_folder_paths() {
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return 0
   local hooks_dir shared_folder host_path prefix
