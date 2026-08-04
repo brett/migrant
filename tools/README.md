@@ -38,6 +38,10 @@ Or add a task to your Ansible playbook to provision it automatically.
 # Supply optional inputs via flags
 ./netcheck.py --lan-ip 192.168.1.50 --host-port tcp/9999 --peer-ip 192.168.200.5
 
+# Override the decoy address used to prove --host-port isn't redirected from
+# anywhere but the gateway (default: 10.255.255.254)
+./netcheck.py --host-port tcp/9999 --host-port-decoy 203.0.113.1
+
 # Verify a NETWORK_IPV6=nat VM: expect IPv6 egress to work, and confirm the host
 # is still unreachable over IPv6 (needs a host listener on the given port).
 ./netcheck.py --no-interactive --ipv6-nat --ipv6-host-port tcp/19999
@@ -45,14 +49,15 @@ Or add a task to your Ansible playbook to provision it automatically.
 
 ### What it checks
 
-| Category    | Tests                                                                                        |
-| ----------- | -------------------------------------------------------------------------------------------- |
-| Inventory   | Interfaces, routing tables, DNS resolvers, gateway                                           |
-| DNS         | Default resolver (A/AAAA), direct queries to 8.8.8.8/1.1.1.1, interception detection, whoami |
-| Internet    | HTTP/HTTPS reachability, IPv6 egress probe, public IP/VPN info, traceroute, MTU              |
-| Isolation   | Gateway ping/TCP, RFC1918 TCP probes, IPv6 host reachability (ULA gateway, `--ipv6-nat`)     |
-| Host access | TCP/UDP connect to a host port (requires `allow-host-port` in Migrantfile)                   |
-| LAN / peer  | Ping and TCP to a LAN host, peer VM ping                                                     |
+| Category           | Tests                                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Inventory          | Interfaces, routing tables, DNS resolvers, gateway                                                                           |
+| DNS                | Default resolver (A/AAAA), direct queries to 8.8.8.8/1.1.1.1, interception detection, whoami                                 |
+| Internet           | HTTP/HTTPS reachability, IPv6 egress probe, public IP/VPN info, traceroute, MTU, ICMP echo                                   |
+| Isolation          | Gateway ping/TCP/port survey, RFC1918 TCP probes, IPv6 host reachability (ULA gateway TCP, ICMPv6, link-local, `--ipv6-nat`) |
+| Exfiltration paths | DNS over TCP, UDP/123 NTP probe, outbound TCP port survey (SSH/SMTP/DoT/git/etc. to 1.1.1.1)                                 |
+| Host access        | TCP/UDP connect to a host port (requires `allow-host-port` in Migrantfile), redirect-scope check (`--host-port-decoy`)       |
+| LAN / peer         | Ping and TCP to a LAN host, peer VM ping                                                                                     |
 
 Exit code 0 if all tests produce expected results; 1 if any test with a defined
 expectation produces an unexpected result.
