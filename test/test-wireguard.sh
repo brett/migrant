@@ -20,8 +20,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # inside 10.0.0.0/8 would be rejected before it was ever encrypted -- failing
 # against a tunnel that works.
 #
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-wireguard.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-wireguard.sh
 #
 # Prerequisites: migrant setup, wireguard-tools, and sudo.
 # No VM with this name may exist -- the test creates and destroys one.

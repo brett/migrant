@@ -6,8 +6,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # port mapping: the guest reaches <ip>:<remote-port> by addressing the bridge
 # gateway on <guest-port>, and by no other route.
 #
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-forward-port.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-forward-port.sh
 #
 # Prerequisites:
 #   - migrant setup has been run (with the updated hooks)

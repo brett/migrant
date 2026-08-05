@@ -7,8 +7,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # to mount, or the mount point is backed by something else, the VM must refuse
 # to start rather than run without nosymfollow and the size cap.
 #
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-shared-folder.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-shared-folder.sh
 #
 # Prerequisites:
 #   - migrant setup has been run (with the updated hooks)

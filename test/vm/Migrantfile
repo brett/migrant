@@ -1,0 +1,21 @@
+# Bare VM for the shell test scripts in test/. Deliberately minimal.
+#
+# Do not add AUTOCONNECT: it parks 'migrant up' in an interactive session, and
+# every test script here calls 'up' and then keeps going, so the run hangs.
+# The example VM directories set it, which is why the tests do not run there.
+#
+# No shared folder and a single NIC — the scripts that need either write their
+# own Migrantfile over this one.
+
+VM_NAME="test-vm"
+OS_VARIANT="archlinux"
+
+RAM_MB=2048
+VCPUS=2
+DISK_GB=10
+
+IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+
+NETWORKS=(
+  "network=migrant"
+)
