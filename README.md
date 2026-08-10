@@ -255,6 +255,7 @@ Further detail lives in [docs/](docs/):
   work, disk image caching, firmware (BIOS vs UEFI)
 - [docs/usage.md](docs/usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics,
   network lifecycle, SSH key management, port tunneling, `storage`
+- [docs/resize.md](docs/resize.md) — Growing the VM's disk with `migrant resize`
 - [docs/hooks.md](docs/hooks.md) — Lifecycle hooks (`pre-up`, `post-up`,
   `pre-down`, `post-down`)
 - [docs/migrating.md](docs/migrating.md) — Migrating existing VMs to the loop

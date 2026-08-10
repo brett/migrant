@@ -8,6 +8,7 @@ for installation and basic usage; the pages here go deeper on specific topics.
   image caching, firmware (BIOS vs UEFI)
 - [usage.md](usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics, network
   lifecycle, SSH key management, port tunneling, `storage`
+- [resize.md](resize.md) — Growing the VM's disk with `migrant resize`
 - [hooks.md](hooks.md) — Lifecycle hooks (`pre-up`, `post-up`, `pre-down`,
   `post-down`)
 - [migrating.md](migrating.md) — Migrating existing VMs to the loop image or to
