@@ -130,11 +130,8 @@ rule_set() {
   esac
 }
 
-# Read the domain XML from stdin. libvirt pipes it to the hook for every
-# operation, so this is always available — unlike the persistent XML file,
-# which may not exist yet when the hook fires during initial virt-install.
-# (Never call virsh here: hooks run while libvirtd holds the per-domain lock,
-# so calling virsh against the same domain deadlocks.)
+# Read from stdin, never call virsh here (CLAUDE.md: "Never call virsh from
+# within a hook").
 xml=$(cat)
 echo "$xml" | grep -q "managed-by=migrant" || exit 0
 
@@ -368,12 +365,8 @@ wg_setup_iface() {
   # main table without interference.
   ip route add default dev "$WG_IFACE" table "$WG_TABLE"
 
-  # For each allow-lan-host IP, add a more-specific /32 route in WG_TABLE
-  # pointing at the host's physical interface rather than the WireGuard tunnel.
-  # Without this, marked packets to LAN IPs match only the default route and
-  # exit via the VPN — the FORWARD ACCEPT fires but the destination never
-  # receives them. A /32 always wins over the default in the same table, so
-  # all other traffic still exits through WireGuard unaffected.
+  # allow-lan-host exclusion routes, one /32 per IP in WG_TABLE (see
+  # docs/security/network-isolation.md, "On a WireGuard VM...").
   ha_parse "$vm"
 
   # forward-port targets need the same exclusion: the mangle mark is applied in
@@ -415,16 +408,14 @@ wg_setup_iface() {
     fi
   done
 
-  # Policy rule: divert marked packets to the WireGuard table. This does not
-  # require the tap interface and is placed here (prepare) so that
-  # verify_wireguard_tunnel can confirm it synchronously after virsh start
-  # returns, with no polling required.
+  # Policy rule diverting marked packets to the WireGuard table (mechanism:
+  # docs/security/wireguard.md, "How it works"). Added here in prepare, ahead
+  # of the tap interface, so verify_wireguard_tunnel can confirm it
+  # synchronously after virsh start returns with no polling required.
   #
-  # Priority 100 places this rule before the main table (32766). WG_TABLE is
-  # not used as the priority: its value is in [0, 2^28-1], which is always
-  # above 32766, so the main table would win and the fwmark rule would never
-  # be reached. The fwmark condition already uniquely identifies this VM's
-  # traffic; a shared low priority is fine for multiple simultaneous VMs.
+  # Priority 100 must be lower than the main table's (32766); WG_TABLE itself
+  # can't be used as the priority since its range ([0, 2^28-1]) always exceeds
+  # 32766.
   ip rule add fwmark "$WG_TABLE" lookup "$WG_TABLE" priority 100
 
   hook_log "$vm" "WireGuard interface up: $WG_IFACE (table $WG_TABLE)"
@@ -441,24 +432,12 @@ wg_setup_rules() {
   # rule that routes marked packets via the WireGuard table was already added in
   # the prepare hook (wg_setup_iface), where it doesn't require the tap interface.
   #
-  # -m physdev --physdev-in is required here instead of plain -i. In iptables
-  # PREROUTING, bridged packets appear to arrive on the bridge device
-  # (virbr-migrant), not the physical tap port (vnet1). physdev matches the
-  # underlying bridge port, which is what uniquely identifies this VM's traffic.
+  # physdev, not -i (CLAUDE.md: "Always use physdev, never -i").
   rule_set iptables mangle PREROUTING append \
     -m physdev --physdev-in "$iface" -j MARK --set-mark "$WG_TABLE"
 
-  # DNS handling — IPs pre-parsed and normalized at sync time.
-  # For each DNS IP:
-  #   1. FORWARD ACCEPT punches through the NI RFC1918 REJECT rules so the
-  #      query can be forwarded through the WireGuard tunnel.
-  #   2. DNAT in nat PREROUTING intercepts all DNS traffic from the VM
-  #      (regardless of the destination the VM chose) and rewrites the
-  #      destination to the configured DNS IP. This forces DNS through the
-  #      tunnel without any configuration inside the VM — the VM continues
-  #      to believe it is talking to 192.168.200.1; conntrack reverses the
-  #      translation on the response. physdev is required for the same
-  #      reason it is required for the mangle mark rule above.
+  # DNS interception (docs/security/wireguard.md, "DNS"). IPs are pre-parsed
+  # and normalized at sync time.
   local dns_ip first_dns=""
   if (( ${#WG_DNS_IPS[@]} > 0 )); then
     for dns_ip in "${WG_DNS_IPS[@]}"; do

@@ -14,18 +14,24 @@ cloud images. The qcow2 is built locally from `flake.nix` instead.
 
 Build the image (first time only, or after changing `flake.nix`):
 
-    cd examples/nixos
-    nix build
+```
+cd examples/nixos
+nix build
+```
 
 Update the SSH key in `cloud-init.yml` to match your managed key:
 
-    migrant pubkey
+```
+migrant pubkey
+```
 
 Copy the output into the `ssh_authorized_keys` field in `cloud-init.yml`.
 
 Start the VM:
 
-    migrant up
+```
+migrant up
+```
 
 ## What's in the image
 
@@ -59,16 +65,18 @@ NixOS is declarative, which changes how provisioning works:
 - **fstab is read-only** — NixOS generates `/etc/fstab` from its configuration,
   so the virtiofs mount uses an explicit `mount -t virtiofs` command in
   cloud-init `runcmd` rather than appending to fstab.
-- **Unnecessary services disabled in the flake** — no systemd masking needed
-  at provision time.
+- **Unnecessary services disabled in the flake** — no systemd masking needed at
+  provision time.
 
 ## Rebuilding the image
 
 If you change `flake.nix`, rebuild and recreate the VM:
 
-    nix build
-    migrant destroy
-    migrant up
+```
+nix build
+migrant destroy
+migrant up
+```
 
-Changes to `cloud-init.yml` also require a destroy/up cycle since
-cloud-init only runs on first boot.
+Changes to `cloud-init.yml` also require a destroy/up cycle since cloud-init
+only runs on first boot.

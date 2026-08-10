@@ -15,11 +15,8 @@ hook_log() {
 
 hook_log "loop-hook start"
 
-# Read the domain XML from stdin. libvirt pipes it to the hook for every
-# operation, so this is always available — unlike the persistent XML file,
-# which may not exist yet when the hook fires during initial virt-install.
-# (Never call virsh here: hooks run while libvirtd holds the per-domain lock,
-# so calling virsh against the same domain deadlocks.)
+# Read from stdin, never call virsh here (CLAUDE.md: "Never call virsh from
+# within a hook").
 local_xml=$(mktemp)
 trap 'rm -f "$local_xml"' EXIT
 cat > "$local_xml"

@@ -452,9 +452,7 @@ forward_port_target_ok() {
   return 0
 }
 
-# A shared folder that contains the VM's hooks directory is guest->host code
-# execution: the guest writes hooks/pre-up and migrant runs it, as the invoking
-# user, on the next up.
+# See docs/security/shared-folder-isolation.md, "Restrictions".
 validate_shared_folder_paths() {
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return 0
   local hooks_dir shared_folder host_path prefix
@@ -1486,7 +1484,6 @@ cmd_reset() {
 }
 
 cmd_resize() {
-  _MIGRANT_TRIGGER="resize"
   if [[ -z "${DISK_GB:-}" ]]; then
     echo "[ERROR] 'DISK_GB' is not set in Migrantfile" >&2
     exit 78
@@ -1845,7 +1842,7 @@ cmd_provision() {
 
   if ! command -v ansible-playbook &>/dev/null; then
     echo "[ERROR] ansible-playbook not found. Install Ansible to use provisioning." >&2
-    exit 127
+    exit 69  # EX_UNAVAILABLE
   fi
 
   local playbook="$VM_DIR/playbook.yml"
