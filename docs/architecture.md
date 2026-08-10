@@ -36,7 +36,12 @@ On first `migrant up`, the script:
    `up` blocks until done and the VM is fully ready when it returns
 
 On subsequent `migrant up` calls, the VM already exists so the script starts it
-with `virsh start`, then waits for SSH if configured.
+with `virsh start`, then waits for SSH if configured. Before starting it, `up`
+reconciles the persistent libvirt definition's memory and vCPU count with
+`RAM_MB` and `VCPUS` — the only point in the lifecycle where `migrant` edits an
+existing domain's definition rather than creating or deleting one. A VM that is
+already running is never modified, only reported on. See
+[resize.md](resize.md#changing-ram-and-vcpus).
 
 Destroying the VM with `migrant destroy` removes the libvirt domain and deletes
 the VM's disk, seed ISO, and any snapshot, leaving the cached base image intact

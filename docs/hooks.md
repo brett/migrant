@@ -37,6 +37,13 @@ A `pre-up` hook that exits non-zero aborts `up` before the VM starts. A
 `pre-down` hook that exits non-zero aborts `halt` and `snapshot`, but not
 `destroy` or `reset` — intentional destruction is not blockable by a hook.
 
+`pre-up` can veto the boot, but not the RAM/vCPU reconciliation that precedes it
+(see [resize.md](resize.md#changing-ram-and-vcpus)). Running order for a stopped
+VM is: reconcile resources → sync managed config → `pre-up` → `virsh start`. So
+a hook that aborts the boot leaves the new resource values already written to
+the domain definition. They take effect on the next successful start; nothing is
+half-applied, and re-running `up` is safe.
+
 **Exception — security kills bypass hooks entirely.** If `up` detects, once the
 VM is running, that its shared folder or WireGuard tunnel isn't actually
 enforcing the isolation it promised (a loop-image mount that doesn't match what

@@ -1,5 +1,9 @@
 # Resizing the disk
 
+Disk size is the one resource that needs its own command. `RAM_MB` and `VCPUS`
+are reconciled automatically by `migrant up` — see
+[Changing RAM and vCPUs](#changing-ram-and-vcpus) at the bottom of this page.
+
 `migrant resize` grows a VM's disk to match `DISK_GB` in the `Migrantfile`. Edit
 the value, then run it against the running VM:
 
@@ -83,3 +87,76 @@ fully grown resizes to a no-op rather than an error.
 | ---- | -------------------------------------------------------------------------- |
 | `78` | `DISK_GB` unset, no `ssh_authorized_keys`, or a requested shrink           |
 | `1`  | VM not running, or the disk's virtual size could not be read from libvirtd |
+
+## Changing RAM and vCPUs
+
+Unlike the disk, `RAM_MB` and `VCPUS` need no separate command. Edit them in the
+`Migrantfile` and run `migrant up`; a stopped VM has its persistent libvirt
+definition brought into line before it starts:
+
+```console
+$ migrant up
+Reconciling resources: RAM 8192 -> 16384 MB, vCPUs 4 -> 6.
+VM 'census' exists but is not running. Starting...
+```
+
+Shrinking is allowed here, and says so:
+
+```console
+$ migrant up
+Reconciling resources: RAM 16384 -> 8192 MB (shrink; Migrantfile is authoritative).
+```
+
+The asymmetry with disk resize is deliberate. Shrinking a disk means shrinking a
+filesystem inside the guest and risks data loss; shrinking RAM or vCPU count
+only edits the domain definition, needs no guest cooperation, and is undone by
+editing the value back.
+
+**The `Migrantfile` is authoritative.** If you changed a VM's memory or CPU
+count by hand with `virsh`, the next `migrant up` reverts it to whatever the
+`Migrantfile` says.
+
+### A running VM is never modified
+
+If the VM is already up, `migrant up` reports the mismatch and changes nothing:
+
+```console
+$ migrant up
+VM 'census' is already running.
+[WARNING] Migrantfile resources differ from the defined VM: RAM 8192 -> 16384 MB.
+  Run 'migrant halt && migrant up' to apply.
+```
+
+Exit status is still `0`, so `migrant up && ...` keeps working.
+
+Raising either value above what the VM booted with requires a reboot regardless
+— the domains `migrant` creates have no memory-hotplug slots and a fixed vCPU
+maximum. Lowering them live would be possible through the balloon driver, but
+applying shrinks immediately while grows waited for a reboot would be more
+confusing than doing neither, and ballooning memory away from a running workload
+is its own hazard.
+
+Nothing surfaces a mismatch until you run `migrant up` — `migrant status` does
+not report it.
+
+### Failures are rolled back
+
+The change takes up to four `virsh` calls (memory maximum, memory current, vCPU
+maximum, vCPU current). If one fails partway, the previous definition is
+restored with `virsh define` and the VM is not started, so it never boots with a
+half-applied configuration.
+
+### Snapshots do not capture resources
+
+`migrant snapshot` saves the disk image only. `migrant reset` therefore rebuilds
+with whatever `RAM_MB` and `VCPUS` say **at reset time**, not the values that
+were in effect when the snapshot was taken.
+
+### Validation
+
+`RAM_MB` must be 1–9999999 (megabytes) and `VCPUS` 1–9999. Anything else exits
+`78` before the VM is touched — including on `migrant reset`, which would
+otherwise tear the VM down and only then discover it could not rebuild it.
+Over-provisioning is not checked here: libvirt permits overcommit, and it
+reports a genuinely impossible allocation better than a guess at host capacity
+would.
