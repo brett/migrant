@@ -400,6 +400,22 @@ is_valid_port() {
   [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
 
+# Usage: is_valid_resource VALUE MAX_DIGITS
+is_valid_resource() {
+  [[ "$1" =~ ^[0-9]{1,$2}$ ]] && (( 10#$1 >= 1 ))
+}
+
+validate_resources() {
+  if ! is_valid_resource "${RAM_MB:-}" 7; then
+    echo "[ERROR] invalid RAM_MB: '${RAM_MB:-}' (expected megabytes, 1-9999999)." >&2
+    exit 78
+  fi
+  if ! is_valid_resource "${VCPUS:-}" 4; then
+    echo "[ERROR] invalid VCPUS: '${VCPUS:-}' (expected 1-9999)." >&2
+    exit 78
+  fi
+}
+
 # Echo the canonical dotted-quad form of a strict IPv4 address, or fail. The
 # hook matches its rules by text for -C and -D, so what is stored has to be the
 # form iptables will render back.
@@ -807,6 +823,7 @@ cmd_up() {
       exit 78
     fi
   done
+  validate_resources
 
   local base_image="${IMAGE_URL##*/}"
 
@@ -836,10 +853,12 @@ cmd_up() {
     state=$(virsh domstate "$VM_NAME")
     if [[ "$state" == "running" ]]; then
       echo "VM '$VM_NAME' is already running."
+      reconcile_domain_resources "$state"
       do_autoconnect
       return
     fi
     check_managed_key_match start
+    reconcile_domain_resources "$state"
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
     sync_managed_config
@@ -1478,6 +1497,9 @@ cmd_reset() {
     echo "  Network may not work after reset. Run 'migrant destroy && migrant up' instead." >&2
   fi
 
+  # Before teardown: cmd_up validates too, but only after the VM is already gone.
+  validate_resources
+
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
   _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
@@ -1589,6 +1611,112 @@ cloud_init_managed_key_material() {
 #   create — first-time VM creation (cloud-init will install the key)
 #   reset  — rebuild from snapshot (key is baked into the snapshot)
 #   start  — starting a stopped VM (key is already installed)
+_domain_resources() {
+  local xml
+  xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME")
+  _RES_MAX_KIB=$(LC_ALL=C awk -F'[<>]' '/<memory /{print $3; exit}' <<<"$xml")
+  _RES_CUR_KIB=$(LC_ALL=C awk -F'[<>]' '/<currentMemory /{print $3; exit}' <<<"$xml")
+  # libvirt omits <currentMemory> when it equals <memory>, and materializes it
+  # again on the next define; absent means equal, not zero.
+  [[ -z "$_RES_CUR_KIB" ]] && _RES_CUR_KIB="$_RES_MAX_KIB"
+  _RES_MAX_VCPUS=$(LC_ALL=C virsh vcpucount "$VM_NAME" --config --maximum)
+  _RES_CUR_VCPUS=$(LC_ALL=C virsh vcpucount "$VM_NAME" --config --active)
+
+  local v
+  for v in "$_RES_MAX_KIB" "$_RES_CUR_KIB" "$_RES_MAX_VCPUS" "$_RES_CUR_VCPUS"; do
+    if [[ ! "$v" =~ ^[0-9]+$ ]]; then
+      echo "[ERROR] could not read current resources for '$VM_NAME'." >&2
+      exit 70  # EX_SOFTWARE
+    fi
+  done
+}
+
+_apply_resources() {
+  local target_kib="$1" target_vcpus="$2"
+
+  # setmem may not exceed setmaxmem, and setvcpus may not exceed its --maximum,
+  # so the direction of the change dictates the order of the two calls.
+  if (( target_kib > _RES_MAX_KIB )); then
+    virsh setmaxmem "$VM_NAME" "${target_kib}KiB" --config || return $?
+    virsh setmem "$VM_NAME" "${target_kib}KiB" --config || return $?
+  else
+    virsh setmem "$VM_NAME" "${target_kib}KiB" --config || return $?
+    virsh setmaxmem "$VM_NAME" "${target_kib}KiB" --config || return $?
+  fi
+
+  if (( target_vcpus > _RES_MAX_VCPUS )); then
+    virsh setvcpus "$VM_NAME" "$target_vcpus" --config --maximum || return $?
+    virsh setvcpus "$VM_NAME" "$target_vcpus" --config || return $?
+  else
+    virsh setvcpus "$VM_NAME" "$target_vcpus" --config || return $?
+    virsh setvcpus "$VM_NAME" "$target_vcpus" --config --maximum || return $?
+  fi
+}
+
+# Bring the domain's persistent RAM/vCPU definition in line with the Migrantfile.
+# Only mutates a shut-off domain; any other state warns and changes nothing,
+# since raising either value above its boot-time maximum needs a reboot anyway.
+reconcile_domain_resources() {
+  local state="$1"
+  # 10# so a leading zero is read as decimal rather than octal, matching
+  # is_valid_resource; bare arithmetic on "08" is a fatal parse error.
+  local target_mb=$(( 10#$RAM_MB ))
+  local target_vcpus=$(( 10#$VCPUS ))
+  local target_kib=$(( target_mb * 1024 ))
+
+  _domain_resources
+
+  local mem_drift=false cpu_drift=false
+  if (( target_kib != _RES_MAX_KIB )) || (( target_kib != _RES_CUR_KIB )); then
+    mem_drift=true
+  fi
+  if (( target_vcpus != _RES_MAX_VCPUS )) || (( target_vcpus != _RES_CUR_VCPUS )); then
+    cpu_drift=true
+  fi
+  if [[ "$mem_drift" == false && "$cpu_drift" == false ]]; then
+    return 0
+  fi
+
+  local changes=()
+  if [[ "$mem_drift" == true ]]; then
+    changes+=("RAM $(( _RES_MAX_KIB / 1024 )) -> ${target_mb} MB")
+  fi
+  if [[ "$cpu_drift" == true ]]; then
+    changes+=("vCPUs ${_RES_MAX_VCPUS} -> ${target_vcpus}")
+  fi
+  local summary
+  summary=$(IFS='|'; echo "${changes[*]}")
+  summary="${summary//|/, }"
+
+  if [[ "$state" != "shut off" ]]; then
+    echo "[WARNING] Migrantfile resources differ from the defined VM: ${summary}." >&2
+    echo "  Run 'migrant halt && migrant up' to apply." >&2
+    return 0
+  fi
+
+  local shrink=""
+  if (( target_kib < _RES_MAX_KIB )) || (( target_vcpus < _RES_MAX_VCPUS )); then
+    shrink=" (shrink; Migrantfile is authoritative)"
+  fi
+  echo "Reconciling resources: ${summary}${shrink}."
+
+  local saved status=0
+  saved=$(mktemp)
+  if ! virsh dumpxml --inactive "$VM_NAME" > "$saved"; then
+    rm -f "$saved"
+    echo "[ERROR] could not capture the current definition of '$VM_NAME'." >&2
+    exit 70  # EX_SOFTWARE
+  fi
+
+  _apply_resources "$target_kib" "$target_vcpus" || status=$?
+  if (( status != 0 )); then
+    virsh define "$saved" >/dev/null \
+      || echo "[ERROR] rollback failed; '$VM_NAME' may be partially reconciled." >&2
+  fi
+  rm -f "$saved"
+  (( status == 0 )) || return "$status"
+}
+
 check_managed_key_match() {
   local context="$1"
   local ci_material
