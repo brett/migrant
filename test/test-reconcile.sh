@@ -247,6 +247,106 @@ else
   fail "VM started despite failed reconcile"
 fi
 
+# --- 7. rollback failure is reported, not swallowed ---------------------------
+# Fail a mutation *and* the 'virsh define' that would undo it.
+cat > fakebin/virsh <<'WRAP'
+#!/usr/bin/env bash
+_is_setvcpus=false
+_is_maximum=false
+for a in "$@"; do
+  [[ "$a" == "setvcpus" ]] && _is_setvcpus=true
+  [[ "$a" == "--maximum" ]] && _is_maximum=true
+  [[ "$a" == "define" ]] && { echo "error: injected define failure" >&2; exit 1; }
+done
+if [[ "$_is_setvcpus" == true && "$_is_maximum" == true ]]; then
+  echo "error: injected failure" >&2
+  exit 9
+fi
+exec /usr/bin/virsh "$@"
+WRAP
+chmod +x fakebin/virsh
+write_migrantfile 4096 4
+set +e
+PATH="$PWD/fakebin:$PATH" timeout 25 "$MIGRANT" up > up.log 2>&1
+set -e
+if grep -q "\[ERROR\] rollback failed" up.log; then
+  pass "a failed rollback is reported"
+else
+  fail "failed rollback was silent: $(cat up.log)"
+fi
+
+# --- 8. unreadable resources exit 70 -----------------------------------------
+# dumpxml succeeds but yields no <memory>, so the parsed value is empty.
+cat > fakebin/virsh <<'WRAP'
+#!/usr/bin/env bash
+for a in "$@"; do
+  [[ "$a" == "dumpxml" ]] && { echo "<domain></domain>"; exit 0; }
+done
+exec /usr/bin/virsh "$@"
+WRAP
+chmod +x fakebin/virsh
+write_migrantfile 2048 2
+set +e
+PATH="$PWD/fakebin:$PATH" timeout 25 "$MIGRANT" up > up.log 2>&1
+rc=$?
+set -e
+if (( rc == 70 )) && grep -q 'could not read current resources' up.log; then
+  pass "unparseable resources exit 70"
+else
+  fail "unreadable resources: status=$rc output=$(cat up.log)"
+fi
+rm -rf fakebin
+
+# --- 9. a paused VM is warned about, never mutated ----------------------------
+# cmd_up only special-cases "running", so a paused domain reaches
+# reconcile_domain_resources; the "shut off" guard is what stops the mutation.
+virsh destroy "$VM" >/dev/null 2>&1 || true
+write_migrantfile 1024 1
+run_up >/dev/null 2>&1 || true
+virsh suspend "$VM" >/dev/null 2>&1 || true
+if [[ "$(virsh domstate "$VM")" == "paused" ]]; then
+  before_mem=$(mem_kib); before_cpu=$(vcpus)
+  write_migrantfile 8192 4
+  set +e
+  timeout 25 "$MIGRANT" up > up.log 2>&1
+  set -e
+  if grep -q '\[WARNING\] Migrantfile resources differ' up.log; then
+    pass "paused VM warns"
+  else
+    fail "paused VM did not warn: $(cat up.log)"
+  fi
+  if [[ "$(mem_kib)" == "$before_mem" && "$(vcpus)" == "$before_cpu" ]]; then
+    pass "paused VM definition untouched"
+  else
+    fail "paused VM was mutated: '$(mem_kib)' / '$(vcpus)'"
+  fi
+else
+  fail "could not pause the VM (state=$(virsh domstate "$VM"))"
+fi
+virsh destroy "$VM" >/dev/null 2>&1 || true
+
+# --- 10. reset validates before it destroys anything --------------------------
+# cmd_reset tears the VM down and only then calls cmd_up, so an invalid value
+# must be rejected before teardown or a working VM is lost with no rebuild.
+# LIBVIRT_IMAGES_DIR redirects the snapshot stub away from the real images dir.
+mkdir -p images
+: > "images/${VM}-snapshot.qcow2"
+write_migrantfile 16GB 2
+set +e
+LIBVIRT_IMAGES_DIR="$PWD/images" timeout 25 "$MIGRANT" reset > reset.log 2>&1
+rc=$?
+set -e
+if (( rc == 78 )) && grep -q "\[ERROR\] invalid RAM_MB" reset.log; then
+  pass "reset rejects an invalid RAM_MB with exit 78"
+else
+  fail "reset: status=$rc output=$(cat reset.log)"
+fi
+if virsh dominfo "$VM" &>/dev/null; then
+  pass "reset left the VM defined rather than destroying it"
+else
+  fail "reset destroyed the VM before validating"
+fi
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 (( FAIL == 0 ))
