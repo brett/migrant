@@ -50,6 +50,15 @@ before the first run; migrant refuses to start when it does not match
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is consumed
   on read, absent file is a no-op
+- **test-reconcile.sh** — `RAM_MB`/`VCPUS` reconciliation on `up`: grow, shrink,
+  the warning a running or paused VM gets instead of a change, validation
+  rejections, rollback after an injected mid-sequence `virsh` failure, and that
+  `reset` refuses a bad value without destroying the VM first
+
+`test-reconcile.sh` is the exception to the above — run it from anywhere
+(`test/test-reconcile.sh`). Reconciliation happens before `virsh start`, so it
+defines its own diskless domain from XML and needs no VM directory, base image,
+or `sudo`.
 
 ### `vm/` — the directory the scripts run from
 
