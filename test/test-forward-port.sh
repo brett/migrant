@@ -15,7 +15,12 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 #   - No VM with this name currently exists (the test creates and destroys one)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MIGRANT="$(cd "$SCRIPT_DIR/.." && pwd)/migrant"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MIGRANT="$REPO_DIR/migrant"
+
+WANT_VERSION="$(sed -n 's/^STATE_VERSION_CURRENT=//p' "$REPO_DIR/setup/qemu-hook")"
+[[ "$WANT_VERSION" =~ ^[0-9]+$ ]] \
+  || { echo "[FAIL] cannot read STATE_VERSION_CURRENT from setup/qemu-hook" >&2; exit 1; }
 
 [[ -f Migrantfile ]] || { echo "[FAIL] run from a VM directory" >&2; exit 1; }
 # shellcheck source=/dev/null
@@ -111,10 +116,10 @@ else
 fi
 
 # --- the teardown record ---
-if grep -qx "version=2" "$STATE" 2>/dev/null; then
-  pass "state record is version 2"
+if grep -qx "version=$WANT_VERSION" "$STATE" 2>/dev/null; then
+  pass "state record is version $WANT_VERSION"
 else
-  fail "state version is '$(sed -n 's/^version=//p' "$STATE" 2>/dev/null)', expected 2"
+  fail "state version is '$(sed -n 's/^version=//p' "$STATE" 2>/dev/null)', expected $WANT_VERSION (installed hook may be stale)"
 fi
 if grep -qx "forward_port=tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}" "$STATE" 2>/dev/null; then
   pass "state records the forward-port tuple"
