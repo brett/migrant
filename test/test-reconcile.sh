@@ -61,7 +61,11 @@ NETWORKS=()
 EOF
 }
 
+# Undefine first: the XML carries no <uuid>, so redefining over a domain libvirt
+# has already assigned one to fails on the name.
 define_domain() {
+  virsh destroy "$VM" &>/dev/null || true
+  virsh undefine "$VM" &>/dev/null || true
   cat > dom.xml <<EOF
 <domain type='kvm'>
   <name>$VM</name>
@@ -148,7 +152,7 @@ fi
 virsh destroy "$VM" >/dev/null 2>&1 || true
 write_migrantfile 1024 1
 run_up; out="$UP_OUT"
-if grep -q 'shrink; Migrantfile is authoritative' <<<"$out"; then
+if grep -q 'RAM 2048 -> 1024 MB (shrink), vCPUs 2 -> 1 (shrink); Migrantfile is authoritative' <<<"$out"; then
   pass "shrink is called out explicitly"
 else
   fail "shrink not announced: $out"
@@ -346,6 +350,34 @@ if virsh dominfo "$VM" &>/dev/null; then
 else
   fail "reset destroyed the VM before validating"
 fi
+
+# --- 11. a mixed grow/shrink marks only the resource that shrank --------------
+# The shrink note used to be an OR across both resources, so growing RAM while
+# dropping a vCPU labelled the whole line — and the RAM increase — a shrink.
+define_domain 1024 4
+write_migrantfile 2048 2
+run_up; out="$UP_OUT"
+if grep -q 'RAM 1024 -> 2048 MB, vCPUs 4 -> 2 (shrink); Migrantfile is authoritative' <<<"$out"; then
+  pass "only the shrinking resource carries the mark"
+else
+  fail "mixed grow/shrink mislabelled: $out"
+fi
+assert_state 2097152 2 "mixed grow/shrink applied to persistent definition"
+
+# --- 12. drift in the current value is reported against the current value -----
+# Drift is detected against maximum *or* current, but the announcement used to
+# name the maximum — so a domain whose current allocation alone had drifted
+# printed "RAM 4096 -> 4096 MB" while performing a real change.
+define_domain 4096 2
+virsh setmem "$VM" 2097152KiB --config > /dev/null
+write_migrantfile 4096 2
+run_up; out="$UP_OUT"
+if grep -q 'Reconciling resources: RAM 2048 -> 4096 MB\.' <<<"$out"; then
+  pass "announcement names the current allocation, not the maximum"
+else
+  fail "expected 'RAM 2048 -> 4096 MB': $out"
+fi
+assert_state 4194304 2 "current memory raised to the maximum"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

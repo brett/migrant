@@ -100,11 +100,14 @@ Reconciling resources: RAM 8192 -> 16384 MB, vCPUs 4 -> 6.
 VM 'census' exists but is not running. Starting...
 ```
 
-Shrinking is allowed here, and says so:
+Shrinking is allowed here, and says so. The mark sits on the resource that
+shrank, so a run that grows one and shrinks the other reads correctly:
 
 ```console
 $ migrant up
-Reconciling resources: RAM 16384 -> 8192 MB (shrink; Migrantfile is authoritative).
+Reconciling resources: RAM 16384 -> 8192 MB (shrink); Migrantfile is authoritative.
+$ migrant up
+Reconciling resources: RAM 8192 -> 16384 MB, vCPUs 6 -> 4 (shrink); Migrantfile is authoritative.
 ```
 
 The asymmetry with disk resize is deliberate. Shrinking a disk means shrinking a
@@ -129,6 +132,10 @@ VM 'census' is already running.
 
 Exit status is still `0`, so `migrant up && ...` keeps working.
 
+The state is checked twice — once when `up` decides what to do, and again in the
+moment before the first `virsh` call — so a VM that something else starts
+partway through is warned about rather than reconciled behind libvirt's back.
+
 Raising either value above what the VM booted with requires a reboot regardless
 — the domains `migrant` creates have no memory-hotplug slots and a fixed vCPU
 maximum. Lowering them live would be possible through the balloon driver, but
@@ -142,9 +149,10 @@ not report it.
 ### Failures are rolled back
 
 The change takes up to four `virsh` calls (memory maximum, memory current, vCPU
-maximum, vCPU current). If one fails partway, the previous definition is
-restored with `virsh define` and the VM is not started, so it never boots with a
-half-applied configuration.
+maximum, vCPU current), and only the resource that actually drifted is touched.
+If one fails partway, the previous definition is restored with `virsh define`
+and the VM is not started, so it never boots with a half-applied configuration.
+Ctrl-C or a `SIGTERM` mid-sequence restores it the same way.
 
 ### Snapshots do not capture resources
 
