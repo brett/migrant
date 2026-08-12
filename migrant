@@ -859,6 +859,15 @@ cmd_up() {
       do_autoconnect
       return
     fi
+    # A paused domain is already active: taps, rules, and mounts are in place and
+    # the up hooks fired when it first started. It needs unfreezing, not starting.
+    if [[ "$state" == "paused" ]]; then
+      echo "VM '$VM_NAME' is paused. Resuming..."
+      reconcile_domain_resources "$state"
+      virsh resume "$VM_NAME"
+      do_autoconnect
+      return
+    fi
     check_managed_key_match start
     reconcile_domain_resources "$state"
     echo "VM '$VM_NAME' exists but is not running. Starting..."

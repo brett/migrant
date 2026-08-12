@@ -301,9 +301,9 @@ else
 fi
 rm -rf fakebin
 
-# --- 9. a paused VM is warned about, never mutated ----------------------------
-# cmd_up only special-cases "running", so a paused domain reaches
-# reconcile_domain_resources; the "shut off" guard is what stops the mutation.
+# --- 9. a paused VM is resumed, warned about, and never mutated ---------------
+# A paused domain is already active, so the "shut off" guard stops the mutation
+# and 'up' resumes it. 'virsh start' is the wrong verb here and errors outright.
 virsh destroy "$VM" >/dev/null 2>&1 || true
 write_migrantfile 1024 1
 run_up >/dev/null 2>&1 || true
@@ -313,6 +313,7 @@ if [[ "$(virsh domstate "$VM")" == "paused" ]]; then
   write_migrantfile 8192 4
   set +e
   timeout 25 "$MIGRANT" up > up.log 2>&1
+  rc=$?
   set -e
   if grep -q '\[WARNING\] Migrantfile resources differ' up.log; then
     pass "paused VM warns"
@@ -323,6 +324,16 @@ if [[ "$(virsh domstate "$VM")" == "paused" ]]; then
     pass "paused VM definition untouched"
   else
     fail "paused VM was mutated: '$(mem_kib)' / '$(vcpus)'"
+  fi
+  if (( rc == 0 )) && grep -q "is paused. Resuming" up.log; then
+    pass "paused VM is resumed rather than started"
+  else
+    fail "paused VM not resumed (status=$rc): $(cat up.log)"
+  fi
+  if [[ "$(virsh domstate "$VM")" == "running" ]]; then
+    pass "paused VM is running afterward"
+  else
+    fail "paused VM left in state '$(virsh domstate "$VM")'"
   fi
 else
   fail "could not pause the VM (state=$(virsh domstate "$VM"))"
