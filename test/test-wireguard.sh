@@ -334,7 +334,42 @@ fi
 "$MIGRANT" destroy
 
 # ============================================================
-# Part 3: refusals and partial failure
+# Part 3: allow-lan-host and forward-port sharing a target host
+# ============================================================
+echo "--- test: allow-lan-host and forward-port entries naming the same target host ---"
+# wg_setup_iface excludes every allow-lan-host and forward-port target from the
+# tunnel with a /32 route in $WG_TABLE (docs/security/network-isolation.md,
+# "On a WireGuard VM..."). allow-lan-host plus two forward-port rules on
+# different ports of the same host -- the ordinary way to expose more than one
+# port on a target already reachable via allow-lan-host -- names that address
+# three times. If the exclusion list isn't deduplicated first, the second and
+# third `ip route add` for the same /32 in the same table fail, and since this
+# runs under the hook's `set -euo pipefail`, wg_setup_iface aborts and the VM
+# never starts.
+write_conf "$VM_KEY"
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+HOST_ACCESS=(
+  "allow-lan-host ${PEER_IP}"
+  "forward-port tcp/8080 ${PEER_IP}:80"
+  "forward-port tcp/8443 ${PEER_IP}:443"
+)
+EOF
+if timeout 90 "$MIGRANT" up >/dev/null 2>&1; then
+  pass "up succeeds with allow-lan-host and two forward-port entries naming the same target host"
+  n=$(ip route show table "$WG_TABLE" 2>/dev/null | grep -c "^${PEER_IP}") || n=0
+  if (( n == 1 )); then
+    pass "table $WG_TABLE holds exactly one exclusion route for $PEER_IP"
+  else
+    fail "table $WG_TABLE holds $n exclusion route(s) for $PEER_IP, expected 1"
+  fi
+else
+  fail "up failed with allow-lan-host and two forward-port entries naming the same target host (duplicate /32 exclusion route in \$WG_TABLE?)"
+fi
+virsh dominfo "$VM_NAME" &>/dev/null && "$MIGRANT" destroy 2>/dev/null >/dev/null || true
+
+# ============================================================
+# Part 4: refusals and partial failure
 # ============================================================
 echo "--- test: refusals ---"
 try_refused() {  # try_refused <label> <grep pattern>

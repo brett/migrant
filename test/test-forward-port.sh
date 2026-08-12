@@ -6,6 +6,10 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # port mapping: the guest reaches <ip>:<remote-port> by addressing the bridge
 # gateway on <guest-port>, and by no other route.
 #
+# Two rules target the same host on different ports -- the ordinary way to
+# expose more than one service on one machine -- to prove they install,
+# resolve, and tear down independently rather than colliding.
+#
 # Run from test/vm, the bare fixture these scripts are built for:
 #   cd test/vm && ../test-forward-port.sh
 #
@@ -34,6 +38,8 @@ TARGET_IP=10.99.0.2
 DECOY_IP=10.99.0.3          # routed, nothing listening
 TARGET_PORT=11434
 GUEST_PORT=18080            # deliberately different from the remote port
+SECOND_TARGET_PORT=11435    # a second service on the same target host
+SECOND_GUEST_PORT=18081     # forwarded by a second forward-port rule
 GATEWAY=192.168.200.1
 STATE="/run/migrant/${VM_NAME}.state"
 
@@ -57,7 +63,9 @@ trap cleanup EXIT
 cp Migrantfile Migrantfile.test-backup
 
 echo "=== forward-port test ==="
-echo "VM: $VM_NAME   mapping: ${GATEWAY}:${GUEST_PORT} -> ${TARGET_IP}:${TARGET_PORT}"
+echo "VM: $VM_NAME"
+echo "  mapping 1: ${GATEWAY}:${GUEST_PORT} -> ${TARGET_IP}:${TARGET_PORT}"
+echo "  mapping 2: ${GATEWAY}:${SECOND_GUEST_PORT} -> ${TARGET_IP}:${SECOND_TARGET_PORT}"
 echo ""
 
 if virsh dominfo "$VM_NAME" &>/dev/null; then
@@ -81,19 +89,29 @@ sudo ip netns exec "$NS" ip link set lo up
 sudo ip netns exec "$NS" ip addr add "$TARGET_IP/24" dev "$VETH_NS"
 sudo ip netns exec "$NS" ip link set "$VETH_NS" up
 sudo ip netns exec "$NS" ip route add default via "$HOST_IP"
+# Two listeners, since the test forwards two different ports on the same host.
 sudo ip netns exec "$NS" python3 -c "
-import socketserver
+import socketserver, threading
 class H(socketserver.StreamRequestHandler):
     def handle(self): self.wfile.write(b'hello from the namespace\n')
-socketserver.TCPServer(('', $TARGET_PORT), H).serve_forever()
+class S(socketserver.ThreadingTCPServer): allow_reuse_address = True
+for port in ($TARGET_PORT, $SECOND_TARGET_PORT):
+    threading.Thread(target=S(('', port), H).serve_forever, daemon=True).start()
+import time
+while True: time.sleep(3600)
 " &
 sleep 1
-sudo ip netns exec "$NS" ss -lnt 2>/dev/null | grep -q ":$TARGET_PORT" \
-  || { echo "[FAIL] target listener did not start" >&2; exit 1; }
+for p in "$TARGET_PORT" "$SECOND_TARGET_PORT"; do
+  sudo ip netns exec "$NS" ss -lnt 2>/dev/null | grep -q ":$p" \
+    || { echo "[FAIL] target listener on port $p did not start" >&2; exit 1; }
+done
 
 cat > Migrantfile <<EOF
 $(cat Migrantfile.test-backup)
-HOST_ACCESS=("forward-port tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}")
+HOST_ACCESS=(
+  "forward-port tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}"
+  "forward-port tcp/${SECOND_GUEST_PORT} ${TARGET_IP}:${SECOND_TARGET_PORT}"
+)
 EOF
 
 "$MIGRANT" up
@@ -109,8 +127,9 @@ expect() {  # expect <want> <host> <port> <label>
 
 # --- managed config ---
 ha="/etc/migrant/${VM_NAME}/host-access"
-if grep -qx "forward-port tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}" "$ha" 2>/dev/null; then
-  pass "host-access holds the canonical directive"
+if grep -qx "forward-port tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}" "$ha" 2>/dev/null \
+    && grep -qx "forward-port tcp/${SECOND_GUEST_PORT} ${TARGET_IP}:${SECOND_TARGET_PORT}" "$ha" 2>/dev/null; then
+  pass "host-access holds both canonical directives"
 else
   fail "host-access content wrong"; cat "$ha" 2>/dev/null || true
 fi
@@ -121,51 +140,61 @@ if grep -qx "version=$WANT_VERSION" "$STATE" 2>/dev/null; then
 else
   fail "state version is '$(sed -n 's/^version=//p' "$STATE" 2>/dev/null)', expected $WANT_VERSION (installed hook may be stale)"
 fi
-if grep -qx "forward_port=tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}" "$STATE" 2>/dev/null; then
-  pass "state records the forward-port tuple"
+if grep -qx "forward_port=tcp/${GUEST_PORT} ${TARGET_IP}:${TARGET_PORT}" "$STATE" 2>/dev/null \
+    && grep -qx "forward_port=tcp/${SECOND_GUEST_PORT} ${TARGET_IP}:${SECOND_TARGET_PORT}" "$STATE" 2>/dev/null; then
+  pass "state records both forward-port tuples"
 else
-  fail "state has no forward_port tuple"; cat "$STATE" 2>/dev/null || true
+  fail "state is missing a forward_port tuple"; cat "$STATE" 2>/dev/null || true
 fi
 
 # --- rules. iptables re-renders from a bitmask, so match on fields, not on the
 # order they were written in.
 tap=$(awk -F= '/^tap=/{print $2; exit}' "$STATE" 2>/dev/null || true)
-dnat=$(sudo iptables -t nat -S PREROUTING 2>/dev/null | grep -- "--physdev-in ${tap:-__none__} " | grep -- "--dport $GUEST_PORT") || dnat=""
-if [[ -n "$dnat" ]] && grep -q -- "-d ${GATEWAY}/32" <<<"$dnat" \
-    && grep -q -- "--to-destination ${TARGET_IP}:${TARGET_PORT}" <<<"$dnat"; then
-  pass "DNAT is scoped to the gateway and points at the target"
-else
-  fail "DNAT wrong or missing"; echo "${dnat:-none}"
-fi
+check_rules() {  # check_rules <guest-port> <target-port> <label>
+  local gp="$1" tp="$2" label="$3" dnat acc
+  dnat=$(sudo iptables -t nat -S PREROUTING 2>/dev/null | grep -- "--physdev-in ${tap:-__none__} " | grep -- "--dport $gp") || dnat=""
+  if [[ -n "$dnat" ]] && grep -q -- "-d ${GATEWAY}/32" <<<"$dnat" \
+      && grep -q -- "--to-destination ${TARGET_IP}:${tp}" <<<"$dnat"; then
+    pass "$label: DNAT is scoped to the gateway and points at the target"
+  else
+    fail "$label: DNAT wrong or missing"; echo "${dnat:-none}"
+  fi
 
-acc=$(sudo iptables -S FORWARD 2>/dev/null | grep -- "--physdev-in ${tap:-__none__} " | grep -- "--ctorigdstport $GUEST_PORT") || acc=""
-if [[ -n "$acc" ]] && grep -q -- "--ctorigdst $GATEWAY" <<<"$acc" \
-    && grep -q -- "-d ${TARGET_IP}/32" <<<"$acc" \
-    && ! grep -q 'RELATED' <<<"$acc"; then
-  pass "FORWARD ACCEPT matches the conntrack original destination, without RELATED"
-else
-  fail "FORWARD ACCEPT wrong or missing"; echo "${acc:-none}"
-fi
+  acc=$(sudo iptables -S FORWARD 2>/dev/null | grep -- "--physdev-in ${tap:-__none__} " | grep -- "--ctorigdstport $gp") || acc=""
+  if [[ -n "$acc" ]] && grep -q -- "--ctorigdst $GATEWAY" <<<"$acc" \
+      && grep -q -- "-d ${TARGET_IP}/32" <<<"$acc" \
+      && ! grep -q 'RELATED' <<<"$acc"; then
+    pass "$label: FORWARD ACCEPT matches the conntrack original destination, without RELATED"
+  else
+    fail "$label: FORWARD ACCEPT wrong or missing"; echo "${acc:-none}"
+  fi
+}
+check_rules "$GUEST_PORT" "$TARGET_PORT" "first mapping"
+check_rules "$SECOND_GUEST_PORT" "$SECOND_TARGET_PORT" "second mapping"
 
-# --- behaviour: one port, one way in ---
+# --- behaviour: one port, one way in -- for both mappings ---
 expect CONNECTED "$GATEWAY" "$GUEST_PORT" "gateway:$GUEST_PORT reaches the target"
 expect BLOCKED "$TARGET_IP" "$TARGET_PORT" "target:$TARGET_PORT direct, bypassing the gateway"
 expect BLOCKED "$TARGET_IP" 22 "target:22, an unmapped port on the target"
 expect BLOCKED "$DECOY_IP" "$GUEST_PORT" "$DECOY_IP:$GUEST_PORT, another address on the guest port"
 expect BLOCKED "$GATEWAY" "$TARGET_PORT" "gateway:$TARGET_PORT, the remote port is not also open"
+expect CONNECTED "$GATEWAY" "$SECOND_GUEST_PORT" "gateway:$SECOND_GUEST_PORT reaches the second mapping's target"
+expect BLOCKED "$TARGET_IP" "$SECOND_TARGET_PORT" "target:$SECOND_TARGET_PORT direct, bypassing the gateway"
+expect BLOCKED "$GATEWAY" "$SECOND_TARGET_PORT" "gateway:$SECOND_TARGET_PORT, the second mapping's remote port is not also open"
 
 "$MIGRANT" halt
 
 # --- teardown ---
 if [[ -n "$tap" ]] && sudo iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--physdev-in $tap "; then
-  fail "DNAT survived halt"
+  fail "a DNAT rule survived halt"
 else
-  pass "DNAT removed on halt"
+  pass "both DNAT rules removed on halt"
 fi
-if [[ -n "$tap" ]] && sudo iptables -S FORWARD 2>/dev/null | grep -q -- "--ctorigdstport $GUEST_PORT"; then
-  fail "FORWARD ACCEPT survived halt"
+if [[ -n "$tap" ]] && sudo iptables -S FORWARD 2>/dev/null \
+    | grep -qE -- "--ctorigdstport ($GUEST_PORT|$SECOND_GUEST_PORT)"; then
+  fail "a FORWARD ACCEPT rule survived halt"
 else
-  pass "FORWARD ACCEPT removed on halt"
+  pass "both FORWARD ACCEPT rules removed on halt"
 fi
 if [[ -f "$STATE" ]]; then
   fail "state record survived halt"

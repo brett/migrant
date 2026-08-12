@@ -28,18 +28,21 @@ before the first run; migrant refuses to start when it does not match
 - **test-wireguard.sh** — WireGuard mode against a peer in a network namespace,
   with keys generated per run. Proves the tunnel carries the traffic by having
   the peer report the source address it saw, checks the per-tap marks and DNS
-  interception, the allow-lan-host exclusion, teardown, and that a bad key
-  leaves nothing behind. Needs `sudo`, wireguard-tools, and working DNS. The VM
-  must not order sshd behind `time-sync.target`: a tunnelled guest never
-  completes an NTP sync, so `systemd-time-wait-sync` blocks the whole boot past
-  migrant's SSH wait. `test/vm/cloud-init.yml` masks the NTP units in `bootcmd`
-  to prevent this — it cannot be done from a playbook, which runs after SSH
+  interception, the allow-lan-host exclusion, teardown, that allow-lan-host and
+  forward-port entries naming the same target host don't collide in the
+  exclusion-route table, and that a bad key leaves nothing behind. Needs `sudo`,
+  wireguard-tools, and working DNS. The VM must not order sshd behind
+  `time-sync.target`: a tunnelled guest never completes an NTP sync, so
+  `systemd-time-wait-sync` blocks the whole boot past migrant's SSH wait.
+  `test/vm/cloud-init.yml` masks the NTP units in `bootcmd` to prevent this — it
+  cannot be done from a playbook, which runs after SSH
 - **test-multi-nic.sh** — a VM with two NICs: every per-tap rule reaches every
   tap, the shared per-VM chain is filled once rather than once per tap, and
   teardown clears both. Needs `sudo` to read the rules
 - **test-forward-port.sh** — the `forward-port` directive: the mapping reaches
-  the target through the gateway and by no other route. Needs `sudo` to stand up
-  a routed target in a network namespace
+  the target through the gateway and by no other route, and two rules forwarding
+  different ports to the same target host install, resolve, and tear down
+  independently. Needs `sudo` to stand up a routed target in a network namespace
 - **test-shared-folder.sh** — shared folder isolation: the loop image is mounted
   with `nosymfollow` and recorded, and the VM refuses to start when the image
   will not mount or the mount point is backed by something else. Needs `sudo` to
