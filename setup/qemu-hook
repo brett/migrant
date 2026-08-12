@@ -395,11 +395,15 @@ wg_setup_iface() {
         "host-access: $host_ip is inside the tunnel's AllowedIPs but routes via $route_dev; if another machine holds that address there, traffic reaches it instead"
     fi
     if [[ -n "$route_dev" ]]; then
+      # replace, not add: allow-lan-host and forward-port can name the same
+      # host, and two forward-port entries commonly do (different ports, one
+      # target), so excl is not deduplicated. A second add for the same /32
+      # would fail under set -e; replace establishes the route either way.
       if [[ -n "$route_via" ]]; then
-        ip route add "${host_ip}/32" via "$route_via" dev "$route_dev" \
+        ip route replace "${host_ip}/32" via "$route_via" dev "$route_dev" \
           table "$WG_TABLE"
       else
-        ip route add "${host_ip}/32" dev "$route_dev" table "$WG_TABLE"
+        ip route replace "${host_ip}/32" dev "$route_dev" table "$WG_TABLE"
       fi
       hook_log "$vm" "host-access: exclusion route $host_ip via $route_dev"
     else
