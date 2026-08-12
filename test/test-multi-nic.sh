@@ -11,8 +11,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # that recreates them for every NIC would flush the first tap's work and leave
 # duplicate ACCEPTs behind.
 #
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-multi-nic.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-multi-nic.sh
 #
 # Prerequisites:
 #   - migrant setup has been run

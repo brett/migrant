@@ -20,8 +20,8 @@ export LIBVIRT_DEFAULT_URI="qemu:///system"
 # inside 10.0.0.0/8 would be rejected before it was ever encrypted -- failing
 # against a tunnel that works.
 #
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-wireguard.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-wireguard.sh
 #
 # Prerequisites: migrant setup, wireguard-tools, and sudo.
 # No VM with this name may exist -- the test creates and destroys one.
@@ -61,10 +61,16 @@ cleanup() {
   set +e
   if [[ -n "${WG_TEST_KEEP:-}" ]]; then
     echo ""
-    echo "WG_TEST_KEEP set — leaving the VM, the peer namespace and wireguard.conf in place."
+    echo "WG_TEST_KEEP set — leaving the VM, the peer namespace, its MASQUERADE rule"
+    echo "and wireguard.conf in place. The next run refuses to start until that file"
+    echo "is gone, so clean up before rerunning."
     echo "  guest console:  virsh console $VM_NAME     (login migrant / migrant)"
     echo "  peer:           sudo ip netns exec $NS wg show"
-    echo "  clean up with:  $MIGRANT destroy; sudo ip netns del $NS; sudo ip link del $VETH_HOST"
+    echo "  clean up with:  $MIGRANT destroy"
+    echo "                  sudo ip netns del $NS"
+    echo "                  sudo iptables -t nat -D POSTROUTING -s ${PEER_IP}/32 ! -o $VETH_HOST -j MASQUERADE"
+    echo "                  sudo ip link del $VETH_HOST"
+    echo "                  rm wireguard.conf"
     [[ -f Migrantfile.test-backup ]] && mv Migrantfile.test-backup Migrantfile
     return 0
   fi

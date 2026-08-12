@@ -1,0 +1,26 @@
+#cloud-config
+# Replace the key below with the output of 'migrant pubkey' before running the
+# tests — migrant refuses to start when it does not match ~/.ssh/migrant.pub.
+users:
+  - name: migrant
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: "migrant"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
+
+bootcmd:
+  # sshd is ordered behind time-sync.target via pacman-init.service. A WireGuard
+  # or otherwise isolated guest never reaches an NTP server, so
+  # systemd-time-wait-sync blocks the whole boot past migrant's SSH wait and the
+  # test times out. kvm-clock already keeps the guest synchronized from the host.
+  #
+  # This cannot live in a playbook: Ansible runs after SSH, which is the thing
+  # being blocked, so the masking would only take effect on a second boot that
+  # never happens — the tests create a fresh VM and destroy it.
+  - systemctl mask --now systemd-time-wait-sync.service systemd-timesyncd.service
+
+# No packages and no playbook.yml: the shell tests probe with bash's /dev/tcp
+# and never run netcheck.py, so nothing needs installing and Ansible never runs.

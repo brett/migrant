@@ -3,8 +3,8 @@ set -euo pipefail
 export LIBVIRT_DEFAULT_URI="qemu:///system"
 
 # Integration test for the .virt-install-extra-args file convention.
-# Run from a VM directory that has a working Migrantfile + cloud-init.yml:
-#   cd examples/arch && ../../test/test-extra-args.sh
+# Run from test/vm, the bare fixture these scripts are built for:
+#   cd test/vm && ../test-extra-args.sh
 #
 # Verifies that a pre-up hook can contribute args to virt-install by writing
 # to $VM_DIR/.virt-install-extra-args, and that the file is consumed (deleted)
