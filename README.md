@@ -191,7 +191,7 @@ Run commands from the project directory containing `Migrantfile`, or set
 migrant setup              # One-time host setup: configures libvirt networking and installs firewall hooks
 
 # Lifecycle
-migrant up                 # Create the VM if it does not exist, or start it if stopped; reconciles RAM_MB/VCPUS with the Migrantfile before starting a stopped VM; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
+migrant up                 # Create the VM if it does not exist, or start it if stopped; warns if RAM_MB/VCPUS differ from the defined VM; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
 migrant halt               # Gracefully shut down the VM
 migrant destroy            # Stop and permanently delete the VM, its disk, and any snapshots
 migrant status             # Show the VM's current state and snapshot availability

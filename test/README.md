@@ -50,15 +50,16 @@ before the first run; migrant refuses to start when it does not match
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is consumed
   on read, absent file is a no-op
-- **test-reconcile.sh** — `RAM_MB`/`VCPUS` reconciliation on `up`: grow, shrink,
-  a mixed grow/shrink marking only the resource that shrank, drift in the
-  current allocation rather than the maximum, the warning a running or paused VM
-  gets instead of a change, a paused VM being resumed rather than started,
-  validation rejections, rollback after an injected mid-sequence `virsh`
-  failure, and that `reset` refuses a bad value without destroying the VM first
+- **test-resources.sh** — `RAM_MB`/`VCPUS` drift warnings on `up`: the warning a
+  stopped, running, or paused VM gets, that the domain definition is never
+  modified, drift in the current allocation rather than the maximum, silence
+  when the two agree, degrading to no warning when the domain cannot be read, a
+  paused VM being resumed rather than started, validation rejections, and that
+  `reset` refuses an invalid or incomplete `Migrantfile` without destroying the
+  VM first
 
-`test-reconcile.sh` is the exception to the above — run it from anywhere
-(`test/test-reconcile.sh`). Reconciliation happens before `virsh start`, so it
+`test-resources.sh` is the exception to the above — run it from anywhere
+(`test/test-resources.sh`). The drift check happens before `virsh start`, so it
 defines its own diskless domain from XML and needs no VM directory, base image,
 or `sudo`.
 

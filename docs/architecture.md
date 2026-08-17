@@ -39,11 +39,9 @@ On subsequent `migrant up` calls, the VM already exists so the script starts it
 with `virsh start`, then waits for SSH if configured. A paused domain is resumed
 with `virsh resume` instead: it is already active, with its taps, firewall
 rules, and mounts in place and its `pre-up`/`post-up` hooks long since fired, so
-it needs unfreezing rather than starting. Before starting it, `up` reconciles
-the persistent libvirt definition's memory and vCPU count with `RAM_MB` and
-`VCPUS` — the only point in the lifecycle where `migrant` edits an existing
-domain's definition rather than creating or deleting one. A VM that is already
-running is never modified, only reported on. See
+it needs unfreezing rather than starting. `up` also compares the domain's
+defined memory and vCPU count against `RAM_MB` and `VCPUS` and warns on a
+mismatch; it never edits an existing domain's definition. See
 [resize.md](resize.md#changing-ram-and-vcpus).
 
 Destroying the VM with `migrant destroy` removes the libvirt domain and deletes
