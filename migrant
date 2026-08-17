@@ -1628,8 +1628,8 @@ cloud_init_managed_key_material() {
 # allocation, reading each as both its current value and its ceiling.
 # Usage: _domain_resources max_kib_var cur_kib_var max_vcpus_var cur_vcpus_var
 #
-# Returns non-zero instead of exiting when anything is unreadable. The only
-# caller warns, so a libvirt hiccup must not take 'up' down on a healthy VM.
+# Returns non-zero instead of exiting when anything is unreadable. Both callers
+# only report, so a libvirt hiccup must not take 'up' down on a healthy VM.
 _domain_resources() {
   local -n _dr_max_kib=$1 _dr_cur_kib=$2 _dr_max_vcpus=$3 _dr_cur_vcpus=$4
   local xml
@@ -1639,8 +1639,12 @@ _domain_resources() {
   # libvirt omits <currentMemory> when it equals <memory>, and materializes it
   # again on the next define; absent means equal, not zero.
   [[ -n "$_dr_cur_kib" ]] || _dr_cur_kib="$_dr_max_kib"
-  _dr_max_vcpus=$(LC_ALL=C virsh vcpucount "$VM_NAME" --config --maximum 2>/dev/null) || return 1
-  _dr_cur_vcpus=$(LC_ALL=C virsh vcpucount "$VM_NAME" --config --active 2>/dev/null) || return 1
+
+  # <vcpu[ >] so <vcpupin>, <vcpusched> and the per-CPU <vcpus> block do not match.
+  _dr_max_vcpus=$(LC_ALL=C awk -F'[<>]' '/<vcpu[ >]/{print $3; exit}' <<<"$xml")
+  # current= is omitted when it equals the ceiling, as <currentMemory> is above.
+  _dr_cur_vcpus=$(LC_ALL=C sed -n "s/.*<vcpu[ >][^>]*current=['\"]\([0-9]\{1,\}\)['\"].*/\1/p" <<<"$xml" | head -1)
+  [[ -n "$_dr_cur_vcpus" ]] || _dr_cur_vcpus="$_dr_max_vcpus"
 
   local v
   for v in "$_dr_max_kib" "$_dr_cur_kib" "$_dr_max_vcpus" "$_dr_cur_vcpus"; do
@@ -1648,34 +1652,53 @@ _domain_resources() {
   done
 }
 
-# Warn when the Migrantfile's RAM_MB/VCPUS no longer match the defined domain.
-# Reporting only: RAM and vCPUs are fixed at create time like every other
-# machine parameter, so applying a change means rebuilding the VM. Never fails
-# 'up' — an unreadable domain just means no warning.
-warn_domain_resource_drift() {
+# Compare the Migrantfile's RAM_MB/VCPUS against the defined domain, populating
+# two display strings and a description of just the resources that drifted.
+# Usage: resource_drift defined_var wanted_var summary_var
+#
+# Returns 0 on drift, 1 when the two agree, 2 when the domain is unreadable, and
+# 3 when RAM_MB/VCPUS are unusable — 'status' reports without validating first.
+resource_drift() {
+  local -n _rd_defined=$1 _rd_wanted=$2 _rd_summary=$3
   local max_kib cur_kib max_vcpus cur_vcpus
-  _domain_resources max_kib cur_kib max_vcpus cur_vcpus || return 0
+  _domain_resources max_kib cur_kib max_vcpus cur_vcpus || return 2
+
+  # Report the allocation the VM actually has, not its ceiling. Drift can sit in
+  # either, and naming the ceiling renders a real difference as "2048 vs 2048 MB".
+  local defined_mb=$(( cur_kib / 1024 ))
+  _rd_defined="${defined_mb} MB, ${cur_vcpus} vCPUs"
+
+  is_valid_resource "${RAM_MB:-}" 7 && is_valid_resource "${VCPUS:-}" 4 || return 3
 
   # 10# so a leading zero is read as decimal rather than octal, matching
   # is_valid_resource; bare arithmetic on "08" is a fatal parse error.
   local target_mb=$(( 10#$RAM_MB ))
   local target_vcpus=$(( 10#$VCPUS ))
   local target_kib=$(( target_mb * 1024 ))
+  _rd_wanted="${target_mb} MB, ${target_vcpus} vCPUs"
 
-  # Report the allocation the VM actually has, not its ceiling. Drift can sit in
-  # either, and naming the ceiling renders a real difference as "2048 vs 2048 MB".
   local changes=()
   if (( target_kib != max_kib )) || (( target_kib != cur_kib )); then
-    changes+=("RAM ${target_mb} MB requested, $(( cur_kib / 1024 )) MB defined")
+    changes+=("RAM ${target_mb} MB requested, ${defined_mb} MB defined")
   fi
   if (( target_vcpus != max_vcpus )) || (( target_vcpus != cur_vcpus )); then
     changes+=("vCPUs ${target_vcpus} requested, ${cur_vcpus} defined")
   fi
-  (( ${#changes[@]} > 0 )) || return 0
+  (( ${#changes[@]} > 0 )) || return 1
 
-  local summary
-  summary=$(IFS='|'; echo "${changes[*]}")
-  summary="${summary//|/, }"
+  _rd_summary=$(IFS='|'; echo "${changes[*]}")
+  _rd_summary="${_rd_summary//|/, }"
+}
+
+# Warn when the Migrantfile's RAM_MB/VCPUS no longer match the defined domain.
+# Reporting only: RAM and vCPUs are fixed at create time like every other
+# machine parameter, so applying a change means rebuilding the VM. Never fails
+# 'up' — an unreadable domain just means no warning.
+warn_domain_resource_drift() {
+  # shellcheck disable=SC2034  # defined/wanted are written through namerefs
+  local defined wanted summary
+  resource_drift defined wanted summary || return 0
+
   echo "[WARNING] Migrantfile resources differ from the defined VM: ${summary}." >&2
   echo "  Run 'migrant destroy && migrant up' to rebuild with the new values," >&2
   echo "  or 'migrant reset' to rebuild from the snapshot." >&2
@@ -2098,6 +2121,25 @@ cmd_status() {
   fi
 
   if [[ -n "$state" ]]; then
+    # No case for 2: an unreadable domain drops the row rather than reporting
+    # what it could not confirm.
+    # shellcheck disable=SC2034  # res_summary is written through a nameref
+    local res_defined res_wanted res_summary res_rc=0
+    resource_drift res_defined res_wanted res_summary || res_rc=$?
+    case "$res_rc" in
+      0)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined [WARNING]"
+        printf '  %-*s%s\n' "$sw" 'note:' "Migrantfile wants $res_wanted — rebuild to apply"
+        ;;
+      1)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined"
+        ;;
+      3)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined [WARNING]"
+        printf '  %-*s%s\n' "$sw" 'note:' 'RAM_MB/VCPUS missing or invalid in Migrantfile'
+        ;;
+    esac
+
     local btime
     btime=$(stat --format='%W' "$DISK_PATH" 2>/dev/null || true)
     if [[ -n "$btime" && "$btime" != "0" ]]; then

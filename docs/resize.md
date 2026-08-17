@@ -111,8 +111,23 @@ VM 'census' is already running.
 ```
 
 The warning is reporting only, in every VM state, and exit status stays `0` so
-`migrant up && ...` keeps working. Nothing else surfaces the mismatch —
-`migrant status` does not report it.
+`migrant up && ...` keeps working.
+
+`migrant status` carries the same mismatch, for when you are not running `up`:
+
+```console
+$ migrant status
+name:       census
+state:      running
+ip:         192.168.100.42
+resources:  8192 MB, 4 vCPUs [WARNING]
+  note:     Migrantfile wants 16384 MB, 4 vCPUs — rebuild to apply
+```
+
+The row reports what the domain actually has. With no mismatch it prints the
+same values unmarked, and it is dropped entirely when the domain cannot be read.
+Unlike `up`, `status` reports without validating, so a `RAM_MB` that `up` would
+reject is flagged in the `note:` rather than exiting.
 
 Changing the values by hand with `virsh setmaxmem`/`setvcpus --config` works and
 is not overridden; the warning simply clears once the domain matches the

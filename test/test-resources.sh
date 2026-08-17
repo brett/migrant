@@ -393,6 +393,98 @@ else
   fail "reset destroyed the VM before checking cloud-init.yml"
 fi
 
+# --- 10. the drift check costs exactly one virsh call -------------------------
+# The check runs on every 'up' against an existing VM, so its cost lands on the
+# most common invocation there is. The inactive XML carries both allocations and
+# both ceilings, so the two 'vcpucount' forks it replaced were pure overhead.
+virsh destroy "$VM" >/dev/null 2>&1 || true
+define_domain 1024 1
+write_migrantfile 2048 2
+mkdir -p fakebin
+cat > fakebin/virsh <<'WRAP'
+#!/usr/bin/env bash
+echo "$*" >> "$VIRSH_LOG"
+exec /usr/bin/virsh "$@"
+WRAP
+chmod +x fakebin/virsh
+: > virsh.log
+set +e
+VIRSH_LOG="$PWD/virsh.log" PATH="$PWD/fakebin:$PATH" timeout 25 "$MIGRANT" up > up.log 2>&1
+set -e
+dumps=$(grep -c 'dumpxml' virsh.log || true)
+counts=$(grep -c 'vcpucount' virsh.log || true)
+if (( dumps == 1 )) && (( counts == 0 )); then
+  pass "the drift check makes one virsh call"
+else
+  fail "drift check made $dumps dumpxml and $counts vcpucount calls"
+fi
+rm -rf fakebin
+
+# --- 11. status carries the same drift ----------------------------------------
+# 'up' is the command you run after editing the Migrantfile; 'status' is where
+# you look when you are not running anything. Drift has to be visible in both.
+virsh destroy "$VM" >/dev/null 2>&1 || true
+define_domain 4096 2
+
+write_migrantfile 4096 2
+out=$("$MIGRANT" status 2>&1)
+if grep -qE '^resources: +4096 MB, 2 vCPUs$' <<<"$out"; then
+  pass "status reports matching resources with no marker"
+else
+  fail "status (no drift): $out"
+fi
+
+write_migrantfile 8192 4
+out=$("$MIGRANT" status 2>&1)
+if grep -qE '^resources: +4096 MB, 2 vCPUs \[WARNING\]$' <<<"$out" \
+    && grep -q 'note: *Migrantfile wants 8192 MB, 4 vCPUs — rebuild to apply' <<<"$out"; then
+  pass "status flags drift and names what the Migrantfile wants"
+else
+  fail "status (drift): $out"
+fi
+
+keys=$(grep -oE '^[a-z]+:' <<<"$out" | tr -d ':' | paste -sd' ')
+if [[ "$keys" == *"state resources"* ]]; then
+  pass "status prints resources directly after state"
+else
+  fail "status field order: $keys"
+fi
+
+# The row names the allocation, not the ceiling, for the same reason the
+# warning does.
+virsh setmem "$VM" 2097152KiB --config > /dev/null
+write_migrantfile 4096 2
+out=$("$MIGRANT" status 2>&1)
+if grep -qE '^resources: +2048 MB, 2 vCPUs \[WARNING\]$' <<<"$out"; then
+  pass "status names the current allocation, not the maximum"
+else
+  fail "status (current vs maximum): $out"
+fi
+
+# 'status' reports without validating, so it reaches the comparison with values
+# 'up' would have rejected. It says so and still exits 0.
+define_domain 4096 2
+write_migrantfile 16GB 2
+set +e
+out=$("$MIGRANT" status 2>&1); rc=$?
+set -e
+if (( rc == 0 )) && grep -q 'RAM_MB/VCPUS missing or invalid in Migrantfile' <<<"$out"; then
+  pass "status reports an unusable RAM_MB without failing"
+else
+  fail "status (invalid RAM_MB): status=$rc output=$out"
+fi
+
+# No domain, nothing to compare against: the row is dropped entirely.
+virsh destroy "$VM" >/dev/null 2>&1 || true
+virsh undefine "$VM" >/dev/null 2>&1 || true
+write_migrantfile 4096 2
+out=$("$MIGRANT" status 2>&1)
+if grep -q 'resources:' <<<"$out"; then
+  fail "status printed a resources row for an undefined domain: $out"
+else
+  pass "status omits the resources row when no domain exists"
+fi
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 (( FAIL == 0 ))

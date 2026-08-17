@@ -54,9 +54,10 @@ before the first run; migrant refuses to start when it does not match
   stopped, running, or paused VM gets, that the domain definition is never
   modified, drift in the current allocation rather than the maximum, silence
   when the two agree, degrading to no warning when the domain cannot be read, a
-  paused VM being resumed rather than started, validation rejections, and that
+  paused VM being resumed rather than started, validation rejections, that
   `reset` refuses an invalid or incomplete `Migrantfile` without destroying the
-  VM first
+  VM first, that the check costs exactly one `virsh` call, and the matching
+  `resources:` row in `status`
 
 `test-resources.sh` is the exception to the above — run it from anywhere
 (`test/test-resources.sh`). The drift check happens before `virsh start`, so it

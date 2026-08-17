@@ -41,7 +41,8 @@ with `virsh resume` instead: it is already active, with its taps, firewall
 rules, and mounts in place and its `pre-up`/`post-up` hooks long since fired, so
 it needs unfreezing rather than starting. `up` also compares the domain's
 defined memory and vCPU count against `RAM_MB` and `VCPUS` and warns on a
-mismatch; it never edits an existing domain's definition. See
+mismatch, as does `migrant status`; neither edits an existing domain's
+definition. Both read the comparison out of one `virsh dumpxml --inactive`. See
 [resize.md](resize.md#changing-ram-and-vcpus).
 
 Destroying the VM with `migrant destroy` removes the libvirt domain and deletes

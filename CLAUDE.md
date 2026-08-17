@@ -76,16 +76,16 @@ rules:
 `cmd_status` uses aligned `key: value` pairs with indented sub-fields for
 grouped data (tunnel details, loop mount point). Key design rules:
 
-- **Field order**: name → state → ip → tunnel → snapshot → loop (most
-  operationally important first)
+- **Field order**: name → state → ip → resources → tunnel → snapshot → loop
+  (most operationally important first)
 - **Markers**: append `[ERROR]` for broken states, `[WARNING]` for transient or
   degraded states; never use colors (breaks pipes/scripts)
 - **Hints**: a `note:` sub-field appears wherever a row's state needs
   explanation the value alone doesn't give — `crashed` (recovery command), a
   WireGuard tunnel with an invalid key or that isn't actually routing traffic
-  (`tunnel: active [ERROR]` / `tunnel: error [ERROR]`), and hooks present but
-  not executable. Healthy states (`running`, `tunnel: active`,
-  `isolation: enabled`, etc.) never get one
+  (`tunnel: active [ERROR]` / `tunnel: error [ERROR]`), hooks present but not
+  executable, and `resources:` differing from the Migrantfile. Healthy states
+  (`running`, `tunnel: active`, `isolation: enabled`, etc.) never get one
 
 ## Exit codes
 
