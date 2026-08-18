@@ -50,6 +50,19 @@ before the first run; migrant refuses to start when it does not match
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is consumed
   on read, absent file is a no-op
+- **test-resources.sh** — `RAM_MB`/`VCPUS` drift warnings on `up`: the warning a
+  stopped, running, or paused VM gets, that the domain definition is never
+  modified, drift in the current allocation rather than the maximum, silence
+  when the two agree, degrading to no warning when the domain cannot be read, a
+  paused VM being resumed rather than started, validation rejections, that
+  `reset` refuses an invalid or incomplete `Migrantfile` without destroying the
+  VM first, that the check costs exactly one `virsh` call, and the matching
+  `resources:` row in `status`
+
+`test-resources.sh` is the exception to the above — run it from anywhere
+(`test/test-resources.sh`). The drift check happens before `virsh start`, so it
+defines its own diskless domain from XML and needs no VM directory, base image,
+or `sudo`.
 
 ### `vm/` — the directory the scripts run from
 

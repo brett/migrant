@@ -191,7 +191,7 @@ Run commands from the project directory containing `Migrantfile`, or set
 migrant setup              # One-time host setup: configures libvirt networking and installs firewall hooks
 
 # Lifecycle
-migrant up                 # Create the VM if it does not exist, or start it if stopped; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
+migrant up                 # Create the VM if it does not exist, or start it if stopped; warns if RAM_MB/VCPUS differ from the defined VM; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
 migrant halt               # Gracefully shut down the VM
 migrant destroy            # Stop and permanently delete the VM, its disk, and any snapshots
 migrant status             # Show the VM's current state and snapshot availability
@@ -255,7 +255,8 @@ Further detail lives in [docs/](docs/):
   work, disk image caching, firmware (BIOS vs UEFI)
 - [docs/usage.md](docs/usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics,
   network lifecycle, SSH key management, port tunneling, `storage`
-- [docs/resize.md](docs/resize.md) — Growing the VM's disk with `migrant resize`
+- [docs/resize.md](docs/resize.md) — Growing the VM's disk with
+  `migrant resize`; changing RAM and vCPUs via `migrant up`
 - [docs/hooks.md](docs/hooks.md) — Lifecycle hooks (`pre-up`, `post-up`,
   `pre-down`, `post-down`)
 - [docs/migrating.md](docs/migrating.md) — Migrating existing VMs to the loop

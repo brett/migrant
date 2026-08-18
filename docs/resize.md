@@ -1,5 +1,9 @@
 # Resizing the disk
 
+Disk size is the one machine parameter that can be changed in place. For
+`RAM_MB` and `VCPUS`, see [Changing RAM and vCPUs](#changing-ram-and-vcpus) at
+the bottom of this page.
+
 `migrant resize` grows a VM's disk to match `DISK_GB` in the `Migrantfile`. Edit
 the value, then run it against the running VM:
 
@@ -83,3 +87,63 @@ fully grown resizes to a no-op rather than an error.
 | ---- | -------------------------------------------------------------------------- |
 | `78` | `DISK_GB` unset, no `ssh_authorized_keys`, or a requested shrink           |
 | `1`  | VM not running, or the disk's virtual size could not be read from libvirtd |
+
+## Changing RAM and vCPUs
+
+`RAM_MB` and `VCPUS` are fixed when the VM is created. Editing them in the
+`Migrantfile` does not change a VM that already exists — rebuild it to apply the
+new values:
+
+```console
+$ migrant destroy && migrant up     # discards the disk
+$ migrant reset                     # rebuilds from the snapshot
+```
+
+`migrant up` warns when the two disagree, so an edit you forgot to apply does
+not stay invisible:
+
+```console
+$ migrant up
+VM 'census' is already running.
+[WARNING] Migrantfile resources differ from the defined VM: RAM 16384 MB requested, 8192 MB defined.
+  Run 'migrant destroy && migrant up' to rebuild with the new values,
+  or 'migrant reset' to rebuild from the snapshot.
+```
+
+The warning is reporting only, in every VM state, and exit status stays `0` so
+`migrant up && ...` keeps working.
+
+`migrant status` carries the same mismatch, for when you are not running `up`:
+
+```console
+$ migrant status
+name:       census
+state:      running
+ip:         192.168.100.42
+resources:  8192 MB, 4 vCPUs [WARNING]
+  note:     Migrantfile wants 16384 MB, 4 vCPUs — rebuild to apply
+```
+
+The row reports what the domain actually has. With no mismatch it prints the
+same values unmarked, and it is dropped entirely when the domain cannot be read.
+Unlike `up`, `status` reports without validating, so a `RAM_MB` that `up` would
+reject is flagged in the `note:` rather than exiting.
+
+Changing the values by hand with `virsh setmaxmem`/`setvcpus --config` works and
+is not overridden; the warning simply clears once the domain matches the
+`Migrantfile` again.
+
+### Snapshots do not capture resources
+
+`migrant snapshot` saves the disk image only. `migrant reset` therefore rebuilds
+with whatever `RAM_MB` and `VCPUS` say **at reset time**, not the values that
+were in effect when the snapshot was taken.
+
+### Validation
+
+`RAM_MB` must be 1–9999999 (megabytes) and `VCPUS` 1–9999. Anything else exits
+`78` before the VM is touched — including on `migrant reset`, which validates
+the whole `Migrantfile` before teardown rather than discovering after it that
+the VM cannot be rebuilt. Over-provisioning is not checked here: libvirt permits
+overcommit, and it reports a genuinely impossible allocation better than a guess
+at host capacity would.

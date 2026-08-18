@@ -41,7 +41,8 @@ Setup:
 
 Lifecycle:
   up                  Create the VM if it does not exist, or start it if stopped;
-                      runs Ansible provisioning (if playbook.yml exists) on first
+                      warns if RAM_MB/VCPUS differ from the defined VM; runs
+                      Ansible provisioning (if playbook.yml exists) on first
                       create; waits until the VM is fully ready; connects
                       automatically if AUTOCONNECT is set in the Migrantfile
   halt                Gracefully shut down the VM
@@ -398,6 +399,41 @@ is_valid_port() {
   # 10# so a leading zero is read as decimal rather than octal; the digit bound
   # keeps the arithmetic away from overflow.
   [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# Usage: is_valid_resource VALUE MAX_DIGITS
+is_valid_resource() {
+  [[ "$1" =~ ^[0-9]{1,$2}$ ]] && (( 10#$1 >= 1 ))
+}
+
+validate_resources() {
+  if ! is_valid_resource "${RAM_MB:-}" 7; then
+    echo "[ERROR] invalid RAM_MB: '${RAM_MB:-}' (expected megabytes, 1-9999999)." >&2
+    exit 78
+  fi
+  if ! is_valid_resource "${VCPUS:-}" 4; then
+    echo "[ERROR] invalid VCPUS: '${VCPUS:-}' (expected 1-9999)." >&2
+    exit 78
+  fi
+}
+
+# Everything cmd_up needs before it will build a VM. cmd_reset calls this
+# before teardown: it destroys the domain and only then rebuilds through
+# cmd_up, so a config error caught later takes out a working VM — along with
+# the MAC addresses cmd_reset collected to hand the rebuild.
+validate_vm_config() {
+  if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
+    echo "[ERROR] No cloud-init.yml found in $VM_DIR" >&2
+    exit 78
+  fi
+  local var
+  for var in VM_NAME RAM_MB VCPUS DISK_GB IMAGE_URL OS_VARIANT; do
+    if [[ -z "${!var:-}" ]]; then
+      echo "[ERROR] '$var' is not set in Migrantfile" >&2
+      exit 78
+    fi
+  done
+  validate_resources
 }
 
 # Echo the canonical dotted-quad form of a strict IPv4 address, or fail. The
@@ -796,17 +832,7 @@ verify_wireguard_tunnel() {
 cmd_up() {
   _MIGRANT_TRIGGER="${_MIGRANT_TRIGGER:-up}"
 
-  if [[ ! -f "$CLOUD_INIT_FILE" ]]; then
-    echo "[ERROR] No cloud-init.yml found in $VM_DIR" >&2
-    exit 78
-  fi
-
-  for var in VM_NAME RAM_MB VCPUS DISK_GB IMAGE_URL OS_VARIANT; do
-    if [[ -z "${!var:-}" ]]; then
-      echo "[ERROR] '$var' is not set in Migrantfile" >&2
-      exit 78
-    fi
-  done
+  validate_vm_config
 
   local base_image="${IMAGE_URL##*/}"
 
@@ -836,10 +862,21 @@ cmd_up() {
     state=$(virsh domstate "$VM_NAME")
     if [[ "$state" == "running" ]]; then
       echo "VM '$VM_NAME' is already running."
+      warn_domain_resource_drift
+      do_autoconnect
+      return
+    fi
+    # A paused domain is already active: taps, rules, and mounts are in place and
+    # the up hooks fired when it first started. It needs unfreezing, not starting.
+    if [[ "$state" == "paused" ]]; then
+      echo "VM '$VM_NAME' is paused. Resuming..."
+      warn_domain_resource_drift
+      virsh resume "$VM_NAME"
       do_autoconnect
       return
     fi
     check_managed_key_match start
+    warn_domain_resource_drift
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
     sync_managed_config
@@ -1478,6 +1515,9 @@ cmd_reset() {
     echo "  Network may not work after reset. Run 'migrant destroy && migrant up' instead." >&2
   fi
 
+  # Before teardown: cmd_up validates too, but only after the VM is already gone.
+  validate_vm_config
+
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
   _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
@@ -1582,6 +1622,86 @@ vm_has_ssh() {
 cloud_init_managed_key_material() {
   grep -E '^\s*-?\s*(ssh|ecdsa|sk)-' "$CLOUD_INIT_FILE" \
     | awk '$NF == "migrant" { print $(NF-1); exit }'
+}
+
+# Populate four caller variables with the domain's persistent RAM/vCPU
+# allocation, reading each as both its current value and its ceiling.
+# Usage: _domain_resources max_kib_var cur_kib_var max_vcpus_var cur_vcpus_var
+#
+# Returns non-zero instead of exiting when anything is unreadable. Both callers
+# only report, so a libvirt hiccup must not take 'up' down on a healthy VM.
+_domain_resources() {
+  local -n _dr_max_kib=$1 _dr_cur_kib=$2 _dr_max_vcpus=$3 _dr_cur_vcpus=$4
+  local xml
+  xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME" 2>/dev/null) || return 1
+  _dr_max_kib=$(LC_ALL=C awk -F'[<>]' '/<memory /{print $3; exit}' <<<"$xml")
+  _dr_cur_kib=$(LC_ALL=C awk -F'[<>]' '/<currentMemory /{print $3; exit}' <<<"$xml")
+  # libvirt omits <currentMemory> when it equals <memory>, and materializes it
+  # again on the next define; absent means equal, not zero.
+  [[ -n "$_dr_cur_kib" ]] || _dr_cur_kib="$_dr_max_kib"
+
+  # <vcpu[ >] so <vcpupin>, <vcpusched> and the per-CPU <vcpus> block do not match.
+  _dr_max_vcpus=$(LC_ALL=C awk -F'[<>]' '/<vcpu[ >]/{print $3; exit}' <<<"$xml")
+  # current= is omitted when it equals the ceiling, as <currentMemory> is above.
+  _dr_cur_vcpus=$(LC_ALL=C sed -n "s/.*<vcpu[ >][^>]*current=['\"]\([0-9]\{1,\}\)['\"].*/\1/p" <<<"$xml" | head -1)
+  [[ -n "$_dr_cur_vcpus" ]] || _dr_cur_vcpus="$_dr_max_vcpus"
+
+  local v
+  for v in "$_dr_max_kib" "$_dr_cur_kib" "$_dr_max_vcpus" "$_dr_cur_vcpus"; do
+    [[ "$v" =~ ^[0-9]+$ ]] || return 1
+  done
+}
+
+# Compare the Migrantfile's RAM_MB/VCPUS against the defined domain, populating
+# two display strings and a description of just the resources that drifted.
+# Usage: resource_drift defined_var wanted_var summary_var
+#
+# Returns 0 on drift, 1 when the two agree, 2 when the domain is unreadable, and
+# 3 when RAM_MB/VCPUS are unusable — 'status' reports without validating first.
+resource_drift() {
+  local -n _rd_defined=$1 _rd_wanted=$2 _rd_summary=$3
+  local max_kib cur_kib max_vcpus cur_vcpus
+  _domain_resources max_kib cur_kib max_vcpus cur_vcpus || return 2
+
+  # Report the allocation the VM actually has, not its ceiling. Drift can sit in
+  # either, and naming the ceiling renders a real difference as "2048 vs 2048 MB".
+  local defined_mb=$(( cur_kib / 1024 ))
+  _rd_defined="${defined_mb} MB, ${cur_vcpus} vCPUs"
+
+  is_valid_resource "${RAM_MB:-}" 7 && is_valid_resource "${VCPUS:-}" 4 || return 3
+
+  # 10# so a leading zero is read as decimal rather than octal, matching
+  # is_valid_resource; bare arithmetic on "08" is a fatal parse error.
+  local target_mb=$(( 10#$RAM_MB ))
+  local target_vcpus=$(( 10#$VCPUS ))
+  local target_kib=$(( target_mb * 1024 ))
+  _rd_wanted="${target_mb} MB, ${target_vcpus} vCPUs"
+
+  local changes=()
+  if (( target_kib != max_kib )) || (( target_kib != cur_kib )); then
+    changes+=("RAM ${target_mb} MB requested, ${defined_mb} MB defined")
+  fi
+  if (( target_vcpus != max_vcpus )) || (( target_vcpus != cur_vcpus )); then
+    changes+=("vCPUs ${target_vcpus} requested, ${cur_vcpus} defined")
+  fi
+  (( ${#changes[@]} > 0 )) || return 1
+
+  _rd_summary=$(IFS='|'; echo "${changes[*]}")
+  _rd_summary="${_rd_summary//|/, }"
+}
+
+# Warn when the Migrantfile's RAM_MB/VCPUS no longer match the defined domain.
+# Reporting only: RAM and vCPUs are fixed at create time like every other
+# machine parameter, so applying a change means rebuilding the VM. Never fails
+# 'up' — an unreadable domain just means no warning.
+warn_domain_resource_drift() {
+  # shellcheck disable=SC2034  # defined/wanted are written through namerefs
+  local defined wanted summary
+  resource_drift defined wanted summary || return 0
+
+  echo "[WARNING] Migrantfile resources differ from the defined VM: ${summary}." >&2
+  echo "  Run 'migrant destroy && migrant up' to rebuild with the new values," >&2
+  echo "  or 'migrant reset' to rebuild from the snapshot." >&2
 }
 
 # Verify the host-side managed key matches what is in cloud-init.yml.
@@ -2001,6 +2121,25 @@ cmd_status() {
   fi
 
   if [[ -n "$state" ]]; then
+    # No case for 2: an unreadable domain drops the row rather than reporting
+    # what it could not confirm.
+    # shellcheck disable=SC2034  # res_summary is written through a nameref
+    local res_defined res_wanted res_summary res_rc=0
+    resource_drift res_defined res_wanted res_summary || res_rc=$?
+    case "$res_rc" in
+      0)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined [WARNING]"
+        printf '  %-*s%s\n' "$sw" 'note:' "Migrantfile wants $res_wanted — rebuild to apply"
+        ;;
+      1)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined"
+        ;;
+      3)
+        printf '%-*s%s\n' "$w" 'resources:' "$res_defined [WARNING]"
+        printf '  %-*s%s\n' "$sw" 'note:' 'RAM_MB/VCPUS missing or invalid in Migrantfile'
+        ;;
+    esac
+
     local btime
     btime=$(stat --format='%W' "$DISK_PATH" 2>/dev/null || true)
     if [[ -n "$btime" && "$btime" != "0" ]]; then
