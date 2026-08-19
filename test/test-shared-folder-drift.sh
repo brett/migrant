@@ -120,7 +120,10 @@ else
 fi
 
 # --- 2. matching path: silent, VM starts ---------------------------------------
+# mkdir: 'up' does not create this directory for an existing domain (only
+# first-create does, via virt-install); a real 'mv' would carry it along.
 virsh destroy "$VM" >/dev/null 2>&1 || true
+mkdir -p "$WORK/workspace"
 define_domain "$WORK/workspace" workspace
 write_migrantfile '"workspace:workspace"'
 run_up; out="$UP_OUT"
