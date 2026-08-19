@@ -46,6 +46,51 @@ To opt out of the loop image and use a plain host directory instead, set
 pre-loop-image behaviour (no size cap, no symlink protection) and is appropriate
 only if you trust the VM's workload.
 
+## Multiple shared folders
+
+`SHARED_FOLDERS` is an array — a `Migrantfile` can define more than one entry,
+each backed by its own loop image (`<name>.img`, sized independently by
+`SHARED_FOLDER_SIZE_GB`) and mounted at whatever guest path its `fstab` entry
+names. Each gets the same `nosymfollow` and size-cap protections as the default
+`workspace` share.
+
+### Example: persisting Claude Code conversation history across rebuilds
+
+`migrant destroy && migrant up` gives you a clean VM, which also means losing
+any in-progress Claude Code conversation — the transcripts `claude --resume`
+reads live under `~/.claude/projects/` in the guest. A second shared folder
+scoped to just that directory lets transcripts survive the rebuild without
+carrying along the rest of `~/.claude` (OAuth credentials in
+`.credentials.json`, and unrelated caches that can run into the hundreds of MB).
+Login state isn't covered by this — `~/.claude.json` lives directly under the
+guest's home directory, not under `~/.claude/`, so it isn't reachable by a share
+rooted there; re-authenticating after a rebuild is the trade-off.
+
+`Migrantfile`:
+
+```bash
+SHARED_FOLDERS=(
+  "workspace:workspace"
+  "claude-projects:claude-projects"
+)
+```
+
+`cloud-init.yml`, alongside the existing `workspace` mount:
+
+```yaml
+runcmd:
+  - mkdir -p /home/migrant/.claude/projects
+  - echo "claude-projects /home/migrant/.claude/projects virtiofs defaults 0 0" >> /etc/fstab
+```
+
+Weigh this against the project's threat model before using it: the point of
+`destroy && up` is that a compromised or misbehaving agent is wiped, not patched
+in place (see `docs/security/README.md`). Conversation transcripts are content
+the model reads back in on resume, so anything prompt-injected into a transcript
+during a compromised session carries forward into the rebuilt VM right along
+with the legitimate history. Treat this as an opt-in convenience for trusted
+sessions, not a default.
+
 ## Restrictions
 
 A shared folder may not contain the VM directory's `hooks/`. Hooks run on the
