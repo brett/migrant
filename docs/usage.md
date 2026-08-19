@@ -128,10 +128,11 @@ client to refuse the connection.
 ### Managed SSH key (recommended)
 
 migrant can manage a dedicated passphrase-less SSH key at `~/.ssh/migrant`,
-shared across all VMs that use it. This is detected automatically: if
-`cloud-init.yml` contains a key whose comment is `migrant`, migrant uses
-`~/.ssh/migrant` exclusively for SSH connections (`IdentitiesOnly=yes`). Set
-`MIGRANT_KEY_PATH` to use a different path.
+shared across all VMs that use it. `cloud-init.yml` never has to contain this
+key's material directly — write the `__MIGRANT_PUBKEY__` placeholder in its
+place, and `migrant up` substitutes the real public key at build time. This is
+what makes a Migrant VM directory shareable through git: nobody's personal key
+material has to live in the repo, and each clone fills in its own.
 
 First-time setup:
 
@@ -139,13 +140,11 @@ First-time setup:
 migrant pubkey    # generates ~/.ssh/migrant if needed; prints the public key
 ```
 
-Paste the output into `cloud-init.yml` under `ssh_authorized_keys`:
-
 ```yaml
 users:
   - name: migrant
     ssh_authorized_keys:
-      - ssh-ed25519 AAAA... migrant
+      - __MIGRANT_PUBKEY__
 ```
 
 Then create the VM:
@@ -155,11 +154,36 @@ migrant up
 migrant ssh       # uses ~/.ssh/migrant automatically
 ```
 
-migrant verifies at `up` time that the key in `cloud-init.yml` matches
+`migrant up` errors if the placeholder is present but `~/.ssh/migrant.pub` does
+not exist yet — run `migrant pubkey` first. If `~/.ssh/migrant` is lost after a
+VM has already been built, run `migrant pubkey` to regenerate it and rebuild
+with `migrant destroy && migrant up`.
+
+#### Overriding the key path
+
+- `SSH_KEY_PATH` in the Migrantfile sets the managed key path for that one VM,
+  in place of the `~/.ssh/migrant` default — useful when a shared, git-tracked
+  Migrantfile should use a key other than your global one.
+- `MIGRANT_KEY_PATH` (env var) overrides both the default and `SSH_KEY_PATH` for
+  a single invocation, without editing the Migrantfile.
+
+#### A literal key still works
+
+`cloud-init.yml` can carry a literal key instead of the placeholder — useful for
+a VM directory you don't intend to share:
+
+```yaml
+users:
+  - name: migrant
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA... migrant
+```
+
+migrant verifies at `up` time that a literal `migrant`-tagged key matches
 `~/.ssh/migrant.pub` and errors early if not, since a mismatch would mean the VM
-boots with a key the host cannot use. If `~/.ssh/migrant` is ever lost, run
-`migrant pubkey` to regenerate it, update `cloud-init.yml`, and rebuild with
-`migrant destroy && migrant up`.
+boots with a key the host cannot use. This check does not apply to the
+placeholder form: the substitution always uses whatever key is current at build
+time, so there is nothing to have drifted from.
 
 ### Manual key management
 

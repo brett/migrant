@@ -27,7 +27,9 @@ On first `migrant up`, the script:
    locally-built NixOS image)
 2. Creates a qcow2 disk using the base image as a backing file (copy-on-write —
    fast, no full copy)
-3. Packages your `cloud-init.yml` into a seed ISO
+3. Packages your `cloud-init.yml` into a seed ISO, substituting the
+   `__MIGRANT_PUBKEY__` placeholder (if present) with the managed key's public
+   half — see [Managed SSH key](usage.md#managed-ssh-key-recommended)
 4. Calls `virt-install` to define and start the VM
 5. cloud-init runs inside the VM on first boot to create users, configure SSH
    keys, and mount shared folders

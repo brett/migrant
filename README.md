@@ -162,18 +162,13 @@ on Arch Linux, Ubuntu, and Debian Trixie. They use both provisioning methods:
 The `cloud-init.yml` also contains the equivalent cloud-init-only setup
 commented out, as a reference for using either approach.
 
-First, generate the managed SSH key and add it to `cloud-init.yml` (required for
-Ansible provisioning):
+First, generate the managed SSH key (required for Ansible provisioning) —
+`cloud-init.yml` already references it via the `__MIGRANT_PUBKEY__` placeholder,
+which `migrant up` fills in automatically:
 
 ```bash
 cd examples/ubuntu
 migrant pubkey    # generates ~/.ssh/migrant if needed; prints the public key
-```
-
-Paste the output into `cloud-init.yml` under `ssh_authorized_keys`. The comment
-must remain `migrant` so migrant recognises it. Then:
-
-```bash
 migrant up        # creates VM, runs cloud-init + Ansible; blocks until ready
 migrant ssh
 ```

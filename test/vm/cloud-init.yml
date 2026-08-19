@@ -1,6 +1,6 @@
 #cloud-config
-# Replace the key below with the output of 'migrant pubkey' before running the
-# tests — migrant refuses to start when it does not match ~/.ssh/migrant.pub.
+# Run 'migrant pubkey' before running the tests, to generate ~/.ssh/migrant if
+# it does not exist yet — 'up' fills in the placeholder below from it.
 users:
   - name: migrant
     groups: [wheel]
@@ -9,7 +9,7 @@ users:
     lock_passwd: false
     plain_text_passwd: "migrant"
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
+      - __MIGRANT_PUBKEY__
 
 bootcmd:
   # sshd is ordered behind time-sync.target via pacman-init.service. A WireGuard

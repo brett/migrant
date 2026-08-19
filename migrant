@@ -98,6 +98,11 @@ require_config() {
   SEED_ISO="$IMAGES_DIR/${VM_NAME}-seed.iso"
   SNAPSHOT_PATH="$IMAGES_DIR/${VM_NAME}-snapshot.qcow2"
 
+  # See docs/usage.md, "Overriding the key path".
+  if [[ -n "${SSH_KEY_PATH:-}" && -z "${MIGRANT_KEY_PATH:-}" ]]; then
+    MANAGED_KEY_PATH="$(expand_home "$SSH_KEY_PATH")"
+  fi
+
   # Default HOST_ACCESS to an empty array if not set in the Migrantfile.
   if [[ -z "${HOST_ACCESS+x}" ]]; then
     HOST_ACCESS=()
@@ -1008,7 +1013,7 @@ cmd_up() {
   # shellcheck disable=SC2064
   trap "rm -rf '$cloud_init_dir'" EXIT
 
-  cp "$CLOUD_INIT_FILE" "$cloud_init_dir/user-data"
+  render_user_data "$cloud_init_dir/user-data"
   cat > "$cloud_init_dir/meta-data" <<EOF
 instance-id: ${VM_NAME}
 local-hostname: ${VM_NAME}
@@ -1665,11 +1670,52 @@ vm_has_ssh() {
   grep -q 'ssh_authorized_keys' "$CLOUD_INIT_FILE"
 }
 
+# Copy CLOUD_INIT_FILE to $1 for the cloud-init seed ISO, substituting the
+# __MIGRANT_PUBKEY__ placeholder (if present) with the managed key's public
+# half. See docs/usage.md, "Managed SSH key (recommended)".
+# Usage: render_user_data output_path
+render_user_data() {
+  local out_path="$1"
+  if ! grep -q '__MIGRANT_PUBKEY__' "$CLOUD_INIT_FILE"; then
+    cp "$CLOUD_INIT_FILE" "$out_path"
+    return
+  fi
+
+  if [[ ! -f "${MANAGED_KEY_PATH}.pub" ]]; then
+    echo "[ERROR] cloud-init.yml uses the __MIGRANT_PUBKEY__ placeholder but" >&2
+    echo "  ${MANAGED_KEY_PATH}.pub was not found." >&2
+    echo "  Run 'migrant pubkey' to generate it, then re-run 'migrant up'." >&2
+    exit 66
+  fi
+
+  local pubkey_line content
+  pubkey_line=$(<"${MANAGED_KEY_PATH}.pub")
+  content=$(<"$CLOUD_INIT_FILE")
+  # Bash substitution, not sed: base64 key material can contain '/', which
+  # would collide with a sed delimiter.
+  printf '%s\n' "${content//__MIGRANT_PUBKEY__/$pubkey_line}" > "$out_path"
+}
+
 # Print the key material (base64 field) of the first key in cloud-init.yml
 # whose comment is "migrant". Prints nothing if no such key is present.
 cloud_init_managed_key_material() {
+  # grep exits 1 (pipeline failure under pipefail) when cloud-init.yml has no
+  # key line at all, e.g. an SSH-less VM or the __MIGRANT_PUBKEY__ placeholder
+  # — an absent key is exactly this function's "nothing to report" case, not
+  # an error, so it must not trip 'set -e' at the call sites that assign its
+  # output (var=$(cloud_init_managed_key_material)).
   grep -E '^\s*-?\s*(ssh|ecdsa|sk)-' "$CLOUD_INIT_FILE" \
-    | awk '$NF == "migrant" { print $(NF-1); exit }'
+    | awk '$NF == "migrant" { print $(NF-1); exit }' || true
+}
+
+# True if cloud-init.yml sets up SSH access via the migrant-managed key —
+# either a literal 'migrant'-tagged key line, or the __MIGRANT_PUBKEY__
+# placeholder (which cloud_init_managed_key_material cannot see: there is no
+# literal key material in the file to report until render_user_data fills it
+# in at 'up' time).
+cloud_init_uses_managed_key() {
+  grep -q '__MIGRANT_PUBKEY__' "$CLOUD_INIT_FILE" \
+    || [[ -n "$(cloud_init_managed_key_material)" ]]
 }
 
 # Populate four caller variables with the domain's persistent RAM/vCPU
@@ -1864,10 +1910,7 @@ build_ssh_opts() {
   # that SSH emits when UserKnownHostsFile=/dev/null absorbs the ephemeral key.
   _opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
-  local managed_material
-  managed_material=$(cloud_init_managed_key_material)
-
-  if [[ -n "$managed_material" ]]; then
+  if cloud_init_uses_managed_key; then
     if [[ ! -f "$MANAGED_KEY_PATH" ]]; then
       echo "[ERROR] cloud-init.yml references a managed SSH key but ~/.ssh/migrant not found." >&2
       echo "  Restore the key file, or update cloud-init.yml and rebuild with" >&2
@@ -1878,13 +1921,18 @@ build_ssh_opts() {
       echo "[ERROR] ~/.ssh/migrant.pub not found. Re-run 'ssh-keygen' to regenerate the pair." >&2
       exit 66
     fi
-    local host_material
-    host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
-    if [[ "$managed_material" != "$host_material" ]]; then
-      echo "[ERROR] the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
-      echo "  Update cloud-init.yml with 'migrant pubkey' and rebuild with" >&2
-      echo "  'migrant destroy && migrant up'." >&2
-      exit 78
+    # See docs/usage.md, "A literal key still works".
+    local managed_material
+    managed_material=$(cloud_init_managed_key_material)
+    if [[ -n "$managed_material" ]]; then
+      local host_material
+      host_material=$(awk '{print $2}' "${MANAGED_KEY_PATH}.pub")
+      if [[ "$managed_material" != "$host_material" ]]; then
+        echo "[ERROR] the managed key in cloud-init.yml does not match ~/.ssh/migrant.pub." >&2
+        echo "  Update cloud-init.yml with 'migrant pubkey' and rebuild with" >&2
+        echo "  'migrant destroy && migrant up'." >&2
+        exit 78
+      fi
     fi
     _opts+=(-i "$MANAGED_KEY_PATH" -o IdentitiesOnly=yes)
   else
@@ -2039,7 +2087,7 @@ cmd_provision() {
 
   local ansible_args=(-i "${ip}," -u "$user")
   ansible_args+=(--ssh-extra-args="${ssh_opts[*]}")
-  if [[ -n "$(cloud_init_managed_key_material)" ]]; then
+  if cloud_init_uses_managed_key; then
     ansible_args+=(--private-key "$MANAGED_KEY_PATH")
   fi
 

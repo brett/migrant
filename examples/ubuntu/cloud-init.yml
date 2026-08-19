@@ -7,7 +7,7 @@ users:
     lock_passwd: false
     plain_text_passwd: "migrant"
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/11hxpeV5+xvp0dpMbLF2yGAdc8wDwETCWIeiMsFoZ migrant
+      - __MIGRANT_PUBKEY__
 
 # Package installation and software setup are handled by Ansible (playbook.yml).
 # To provision without Ansible, remove playbook.yml and uncomment the blocks below.

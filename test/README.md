@@ -15,9 +15,9 @@ leaves `migrant up` sitting in an interactive session — each script calls `up`
 and then keeps going, so the run hangs. The examples also provision a full
 toolchain over Ansible, which adds minutes to a test that only needs SSH.
 
-Replace the key in `test/vm/cloud-init.yml` with the output of `migrant pubkey`
-before the first run; migrant refuses to start when it does not match
-`~/.ssh/migrant.pub`.
+Run `migrant pubkey` before the first run, to generate `~/.ssh/migrant` if it
+does not exist yet — `test/vm/cloud-init.yml` references it via the
+`__MIGRANT_PUBKEY__` placeholder, which `up` fills in automatically.
 
 - **test-hooks.sh** — lifecycle hook execution, ordering, and environment
   variables
@@ -72,11 +72,29 @@ before the first run; migrant refuses to start when it does not match
   entry that actually drifted is reported when there is more than one, the check
   applies the same with `SHARED_FOLDER_ISOLATION=false`, degrading to no error
   when the domain cannot be read, and the matching `loop:` row in `status`
+- **test-ssh-key-path.sh** — the `SSH_KEY_PATH` Migrantfile variable and its
+  precedence against the `MIGRANT_KEY_PATH` env var, via `migrant pubkey`
+- **test-managed-key-placeholder.sh** — the `__MIGRANT_PUBKEY__` placeholder in
+  `cloud-init.yml`: `up` errors before building the seed ISO when the managed
+  key does not exist yet, substitutes the real public key into the seed ISO when
+  it does, and a literal key (no placeholder) still passes through unmodified.
+  `virt-install` is shadowed on `PATH` so this never boots a VM
+- **test-managed-key-ssh-opts.sh** — `build_ssh_opts` and `cmd_provision`
+  recognizing the placeholder the same way they recognize a literal
+  `migrant`-tagged key: `-i $MANAGED_KEY_PATH`/`IdentitiesOnly=yes` for `ssh`
+  and `tunnel`, `--private-key` for `provision`, a missing key erroring instead
+  of silently falling back to agent keys, and a non-managed key correctly
+  leaving the agent in charge. `virsh`, `ssh`, and `ansible-playbook` are all
+  shadowed on `PATH`
 
-`test-resources.sh` and `test-shared-folder-drift.sh` are the exception to the
-above — run them from anywhere (e.g. `test/test-resources.sh`). Both checks
-happen before `virsh start`, so they define their own diskless domain from XML
-and need no VM directory, base image, or `sudo`.
+`test-resources.sh`, `test-shared-folder-drift.sh`, `test-ssh-key-path.sh`,
+`test-managed-key-placeholder.sh`, and `test-managed-key-ssh-opts.sh` are the
+exception to the above — run them from anywhere (e.g. `test/test-resources.sh`).
+None of them boot a real, working VM: the first two check drift before
+`virsh start` against a diskless domain defined from XML, `test-ssh-key-path.sh`
+only exercises `migrant pubkey`, and the other two shadow
+`virsh`/`ssh`/`virt-install` on `PATH` to stop short of a real boot. None need a
+VM directory, base image, or `sudo`.
 
 ### `vm/` — the directory the scripts run from
 

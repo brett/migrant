@@ -19,13 +19,12 @@ cd examples/nixos
 nix build
 ```
 
-Update the SSH key in `cloud-init.yml` to match your managed key:
+Generate the managed SSH key — `cloud-init.yml` already references it via the
+`__MIGRANT_PUBKEY__` placeholder, which `migrant up` fills in automatically:
 
 ```
 migrant pubkey
 ```
-
-Copy the output into the `ssh_authorized_keys` field in `cloud-init.yml`.
 
 Start the VM:
 
