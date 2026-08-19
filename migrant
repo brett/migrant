@@ -221,7 +221,12 @@ shared_folder_host_path() {
 # this entry. Echoes nothing when the entry has no third field.
 shared_folder_size_gb() {
   local rest="${1#*:}"  # strip host_path:, leaving guest_tag[:size_gb]
-  [[ "$rest" == *:* ]] && echo "${rest#*:}"
+  # if/fi, not '[[ ]] && echo': the two-field case (no override) is the common
+  # one, and a bare '&&' would make this function's exit status the failed
+  # test — fatal under set -e for every caller assigning its output.
+  if [[ "$rest" == *:* ]]; then
+    echo "${rest#*:}"
+  fi
 }
 
 wait_for_shutdown() {
