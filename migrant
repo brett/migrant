@@ -441,6 +441,7 @@ validate_vm_config() {
     fi
   done
   validate_resources
+  validate_shared_folder_paths
 }
 
 # Echo the canonical dotted-quad form of a strict IPv4 address, or fail. The
@@ -537,7 +538,6 @@ sync_managed_config() {
   # Write all behavioral config to /etc/migrant/${VM_NAME}/ for the qemu and
   # loop hooks to consume. The directory is created only when at least one
   # feature needs it, and removed when empty.
-  validate_shared_folder_paths
 
   local managed_dir="/etc/migrant/${VM_NAME}"
   local needs_dir=false
@@ -2002,6 +2002,7 @@ cmd_mount() {
     return
   fi
 
+  validate_shared_folder_paths
   ensure_shared_folder_images
 
   local vm_running=false
