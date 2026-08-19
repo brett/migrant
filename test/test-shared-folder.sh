@@ -261,6 +261,12 @@ SHARED_FOLDERS=(
 SHARED_FOLDER_SIZE_GB=1
 EOF
 
+# Part 1 left the domain defined (only halted), and --filesystem args are
+# only added to a domain at virt-install time, on first create — the same
+# reason Part 4 destroys before adding its extra-args filesystem. Without
+# this, 'up' just restarts the existing (workspace-only) domain and 'sized'
+# is never attached, though its image still gets created on disk regardless.
+"$MIGRANT" destroy 2>/dev/null || true
 "$MIGRANT" up
 
 img_size_gb() { du --apparent-size -b "$1" | cut -f1 | awk '{ print $1 / 1024 / 1024 / 1024 }'; }
