@@ -886,6 +886,10 @@ cmd_up() {
   done
 
   if virsh dominfo "$VM_NAME" &>/dev/null; then
+    # One dumpxml call for every drift/path check below, not one per check.
+    local domain_xml
+    domain_xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME" 2>/dev/null) || domain_xml=""
+
     local current_base
     current_base=$(qemu-img info "$DISK_PATH" 2>/dev/null \
         | grep '^backing file:' | cut -d' ' -f3- || true)
@@ -902,7 +906,7 @@ cmd_up() {
     state=$(virsh domstate "$VM_NAME")
     if [[ "$state" == "running" ]]; then
       echo "VM '$VM_NAME' is already running."
-      warn_domain_resource_drift
+      warn_domain_resource_drift "$domain_xml"
       do_autoconnect
       return
     fi
@@ -910,13 +914,14 @@ cmd_up() {
     # the up hooks fired when it first started. It needs unfreezing, not starting.
     if [[ "$state" == "paused" ]]; then
       echo "VM '$VM_NAME' is paused. Resuming..."
-      warn_domain_resource_drift
+      warn_domain_resource_drift "$domain_xml"
       virsh resume "$VM_NAME"
       do_autoconnect
       return
     fi
     check_managed_key_match start
-    warn_domain_resource_drift
+    check_shared_folder_paths "$domain_xml"
+    warn_domain_resource_drift "$domain_xml"
     echo "VM '$VM_NAME' exists but is not running. Starting..."
     ensure_shared_folder_images
     sync_managed_config
@@ -1668,15 +1673,16 @@ cloud_init_managed_key_material() {
 }
 
 # Populate four caller variables with the domain's persistent RAM/vCPU
-# allocation, reading each as both its current value and its ceiling.
-# Usage: _domain_resources max_kib_var cur_kib_var max_vcpus_var cur_vcpus_var
+# allocation, reading each as both its current value and its ceiling, from
+# already-fetched dumpxml output.
+# Usage: _domain_resources xml max_kib_var cur_kib_var max_vcpus_var cur_vcpus_var
 #
 # Returns non-zero instead of exiting when anything is unreadable. Both callers
 # only report, so a libvirt hiccup must not take 'up' down on a healthy VM.
 _domain_resources() {
-  local -n _dr_max_kib=$1 _dr_cur_kib=$2 _dr_max_vcpus=$3 _dr_cur_vcpus=$4
-  local xml
-  xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME" 2>/dev/null) || return 1
+  local xml="$1"
+  local -n _dr_max_kib=$2 _dr_cur_kib=$3 _dr_max_vcpus=$4 _dr_cur_vcpus=$5
+  [[ -n "$xml" ]] || return 1
   _dr_max_kib=$(LC_ALL=C awk -F'[<>]' '/<memory /{print $3; exit}' <<<"$xml")
   _dr_cur_kib=$(LC_ALL=C awk -F'[<>]' '/<currentMemory /{print $3; exit}' <<<"$xml")
   # libvirt omits <currentMemory> when it equals <memory>, and materializes it
@@ -1695,16 +1701,28 @@ _domain_resources() {
   done
 }
 
+# Print the source directory virt-install baked into the domain's <filesystem>
+# element for guest tag $2, given dumpxml output $1. Prints nothing when no
+# virtiofs filesystem targets that tag.
+# Usage: virtiofs_source_dir xml guest_tag
+virtiofs_source_dir() {
+  LC_ALL=C awk -v tag="$2" -F"'" '
+    /<source dir=/ { src = $2 }
+    /<target dir=/ && $2 == tag { print src; exit }
+  ' <<<"$1"
+}
+
 # Compare the Migrantfile's RAM_MB/VCPUS against the defined domain, populating
 # two display strings and a description of just the resources that drifted.
-# Usage: resource_drift defined_var wanted_var summary_var
+# Usage: resource_drift xml defined_var wanted_var summary_var
 #
 # Returns 0 on drift, 1 when the two agree, 2 when the domain is unreadable, and
 # 3 when RAM_MB/VCPUS are unusable — 'status' reports without validating first.
 resource_drift() {
-  local -n _rd_defined=$1 _rd_wanted=$2 _rd_summary=$3
+  local xml="$1"
+  local -n _rd_defined=$2 _rd_wanted=$3 _rd_summary=$4
   local max_kib cur_kib max_vcpus cur_vcpus
-  _domain_resources max_kib cur_kib max_vcpus cur_vcpus || return 2
+  _domain_resources "$xml" max_kib cur_kib max_vcpus cur_vcpus || return 2
 
   # Report the allocation the VM actually has, not its ceiling. Drift can sit in
   # either, and naming the ceiling renders a real difference as "2048 vs 2048 MB".
@@ -1737,14 +1755,47 @@ resource_drift() {
 # Reporting only: RAM and vCPUs are fixed at create time like every other
 # machine parameter, so applying a change means rebuilding the VM. Never fails
 # 'up' — an unreadable domain just means no warning.
+# Usage: warn_domain_resource_drift xml
 warn_domain_resource_drift() {
   # shellcheck disable=SC2034  # defined/wanted are written through namerefs
   local defined wanted summary
-  resource_drift defined wanted summary || return 0
+  resource_drift "$1" defined wanted summary || return 0
 
   echo "[WARNING] Migrantfile resources differ from the defined VM: ${summary}." >&2
   echo "  Run 'migrant destroy && migrant up' to rebuild with the new values," >&2
   echo "  or 'migrant reset' to rebuild from the snapshot." >&2
+}
+
+# See docs/security/shared-folder-isolation.md, "Path drift after moving the
+# VM directory". Degrades to no error instead of exiting when the domain is
+# unreadable, matching warn_domain_resource_drift.
+# Usage: check_shared_folder_paths xml
+check_shared_folder_paths() {
+  local xml="$1"
+  [[ -n "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] || return 0
+  [[ -n "$xml" ]] || return 0
+
+  local drifted=() shared_folder
+  for shared_folder in "${SHARED_FOLDERS[@]}"; do
+    local guest_tag host_path defined_dir
+    guest_tag="${shared_folder#*:}"
+    guest_tag="${guest_tag%%:*}"
+    host_path=$(shared_folder_host_path "$shared_folder")
+    defined_dir=$(virtiofs_source_dir "$xml" "$guest_tag")
+    # No matching device yet (e.g. entry added after the VM was built) is a
+    # different, pre-existing condition this check does not cover.
+    [[ -n "$defined_dir" ]] || continue
+    [[ "$defined_dir" == "$host_path" ]] \
+      || drifted+=("'$guest_tag' expects $host_path but the VM was built with $defined_dir")
+  done
+  (( ${#drifted[@]} > 0 )) || return 0
+
+  local summary
+  summary=$(IFS='|'; echo "${drifted[*]}")
+  echo "[ERROR] VM '$VM_NAME' shared folder path drift: ${summary//|/, }." >&2
+  echo "  The VM directory likely moved since 'up'. Run 'migrant destroy' first," >&2
+  echo "  then 'migrant up' to rebuild." >&2
+  exit 78
 }
 
 # Verify the host-side managed key matches what is in cloud-init.yml.
@@ -2087,6 +2138,7 @@ cmd_unmount() {
 
 cmd_status() {
   local state=""
+  local domain_xml=""
   local w=12  # top-level key column width
   local sw=10 # sub-field key column width (w - 2 for the indent)
 
@@ -2097,6 +2149,8 @@ cmd_status() {
     printf '%-*s%s\n' "$w" 'state:' 'not created'
   else
     state=$(virsh domstate "$VM_NAME")
+    # One dumpxml call for every drift check below, not one per check.
+    domain_xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME" 2>/dev/null) || domain_xml=""
 
     case "$state" in
       running)
@@ -2138,7 +2192,7 @@ cmd_status() {
     # what it could not confirm.
     # shellcheck disable=SC2034  # res_summary is written through a nameref
     local res_defined res_wanted res_summary res_rc=0
-    resource_drift res_defined res_wanted res_summary || res_rc=$?
+    resource_drift "$domain_xml" res_defined res_wanted res_summary || res_rc=$?
     case "$res_rc" in
       0)
         printf '%-*s%s\n' "$w" 'resources:' "$res_defined [WARNING]"
@@ -2225,7 +2279,19 @@ cmd_status() {
       host_path=$(shared_folder_host_path "$shared_folder")
       local img_path="${host_path%/}.img"
       [[ -f "$img_path" ]] || continue
-      printf '%-*s%s\n' "$w" 'loop:' "$img_path"
+
+      local guest_tag defined_dir
+      guest_tag="${shared_folder#*:}"
+      guest_tag="${guest_tag%%:*}"
+      defined_dir=""
+      [[ -n "$domain_xml" ]] && defined_dir=$(virtiofs_source_dir "$domain_xml" "$guest_tag")
+
+      if [[ -n "$defined_dir" && "$defined_dir" != "$host_path" ]]; then
+        printf '%-*s%s\n' "$w" 'loop:' "$img_path [ERROR]"
+        printf '  %-*s%s\n' "$sw" 'note:' "VM was built with $defined_dir — destroy and rebuild"
+      else
+        printf '%-*s%s\n' "$w" 'loop:' "$img_path"
+      fi
       if mountpoint -q "$host_path" 2>/dev/null; then
         printf '  %-*s%s\n' "$sw" 'mount:' "$host_path"
       else

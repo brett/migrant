@@ -66,11 +66,17 @@ before the first run; migrant refuses to start when it does not match
   `reset` refuses an invalid or incomplete `Migrantfile` without destroying the
   VM first, that the check costs exactly one `virsh` call, and the matching
   `resources:` row in `status`
+- **test-shared-folder-drift.sh** — `SHARED_FOLDERS` path drift on `up` and
+  `status`: a moved VM directory is caught and refuses to start (exit 78) with
+  the entry and both paths named, a matching path starts silently, only the
+  entry that actually drifted is reported when there is more than one, the check
+  applies the same with `SHARED_FOLDER_ISOLATION=false`, degrading to no error
+  when the domain cannot be read, and the matching `loop:` row in `status`
 
-`test-resources.sh` is the exception to the above — run it from anywhere
-(`test/test-resources.sh`). The drift check happens before `virsh start`, so it
-defines its own diskless domain from XML and needs no VM directory, base image,
-or `sudo`.
+`test-resources.sh` and `test-shared-folder-drift.sh` are the exception to the
+above — run them from anywhere (e.g. `test/test-resources.sh`). Both checks
+happen before `virsh start`, so they define their own diskless domain from XML
+and need no VM directory, base image, or `sudo`.
 
 ### `vm/` — the directory the scripts run from
 

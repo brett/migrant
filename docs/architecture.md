@@ -45,6 +45,14 @@ mismatch, as does `migrant status`; neither edits an existing domain's
 definition. Both read the comparison out of one `virsh dumpxml --inactive`. See
 [resize.md](resize.md#changing-ram-and-vcpus).
 
+`up` also compares each `SHARED_FOLDERS` entry's current host path against the
+directory `virt-install` baked into the domain's `<filesystem>` element at
+create time — a mismatch means the VM directory moved (e.g. `mv`) since it was
+built. Unlike the RAM/vCPU check, this is not a warn-and-proceed: it refuses to
+start with exit 78, since continuing would either fail in `virtiofsd` or mount
+whatever now happens to sit at the stale path. See
+[shared-folder-isolation.md](security/shared-folder-isolation.md).
+
 Destroying the VM with `migrant destroy` removes the libvirt domain and deletes
 the VM's disk, seed ISO, and any snapshot, leaving the cached base image intact
 so the next `migrant up` is fast.

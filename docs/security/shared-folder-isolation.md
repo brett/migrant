@@ -25,6 +25,21 @@ bare host directory with neither `nosymfollow` nor the size cap. `migrant up`
 re-checks once the VM is running and halts it if what is mounted is not what the
 hook recorded.
 
+## Path drift after moving the VM directory
+
+The share's host directory is baked into the domain at `virt-install` time as an
+absolute path, so moving the VM directory (`mv ~/vm/foo ~/vm/bar`) after `up`
+strands it. `migrant up` detects this — comparing the `Migrantfile`'s current
+`SHARED_FOLDERS` path against what the domain was built with — and refuses to
+start with `[ERROR] ... shared folder path drift` rather than let `virtiofsd`
+fail on the stale path, or worse, silently serve whatever a directory of the
+same name at the old location happens to still hold. This check applies
+regardless of `SHARED_FOLDER_ISOLATION`, since the path is baked in either way.
+The fix is the same as a `RAM_MB`/`VCPUS` mismatch:
+`migrant destroy && migrant up` to rebuild against the current location.
+`migrant status` surfaces the same drift on the `loop:` row without requiring an
+`up` attempt.
+
 ## Accessing the workspace while the VM is halted
 
 The loop image is mounted automatically by the QEMU hook when the VM starts, and
