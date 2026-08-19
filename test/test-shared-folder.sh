@@ -58,6 +58,12 @@ cleanup() {
   virsh dominfo "$VM_NAME" &>/dev/null && "$MIGRANT" destroy 2>/dev/null || true
   rm -f "$EXTRA_IMG" "$SIZED_IMG"
   rmdir "$EXTRA_WS" "$SIZED_WS" 2>/dev/null || true
+  # A directory placed at $IMG to force a truncate failure (below) is only
+  # ever empty, so this is a no-op unless that test was interrupted before
+  # its own cleanup ran — never remove a real workspace.img this way. One
+  # chain, not a bare '[[ ]] &&' statement: under set -e a false test here
+  # would otherwise abort the trap itself.
+  [[ -d "$IMG" ]] && rmdir "$IMG" 2>/dev/null || true
   if [[ -f Migrantfile.test-backup ]]; then
     mv Migrantfile.test-backup Migrantfile
   fi
@@ -314,6 +320,46 @@ fi
 "$MIGRANT" destroy
 rm -f "$SIZED_IMG"
 rmdir "$SIZED_WS" 2>/dev/null || true
+reset_migrantfile
+
+# ============================================================
+# Part 1c: a failed image allocation leaves nothing behind
+# ============================================================
+# truncate can still fail for real reasons even once SHARED_FOLDERS values
+# are validated — disk full, EFBIG, permissions. A directory sitting at the
+# image path forces that failure deterministically, without depending on
+# host filesystem size limits. mkfs.ext4 failure already had rm-on-failure
+# cleanup; truncate's failure didn't, and a leftover empty image from a
+# crash confuses every later 'up' with a false size-drift NOTE instead of
+# a clean error — which is exactly what happened testing this feature.
+
+echo "--- test: failed image allocation is cleaned up ---"
+
+rm -f "$IMG"
+mkdir "$IMG"
+set +e
+out=$("$MIGRANT" up 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] failed to allocate $IMG at 1G" <<<"$out" && (( rc == 74 )); then
+  pass "a truncate failure is reported with exit 74"
+else
+  fail "truncate failure: status=$rc output=$out"
+fi
+
+if [[ -d "$IMG" ]]; then
+  pass "the directory blocking the image path is untouched (not silently deleted)"
+else
+  fail "\$IMG was removed even though it was never a file this code created"
+fi
+
+if [[ "$(virsh domstate "$VM_NAME" 2>/dev/null || true)" == "running" ]]; then
+  fail "VM is running despite a failed shared folder image allocation"
+  "$MIGRANT" halt
+else
+  pass "VM is not running after a failed image allocation"
+fi
+
+rmdir "$IMG"
 reset_migrantfile
 
 # ============================================================

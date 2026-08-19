@@ -51,7 +51,10 @@ before the first run; migrant refuses to start when it does not match
   pairing a size with `SHARED_FOLDER_ISOLATION=false`, and that two shares in
   one Migrantfile get independently sized images, the correct `guest_tag` in the
   domain XML for a 3-field entry, and are both recorded and torn down on halt.
-  Needs `sudo` to stage a foreign mount
+  Also covers a failed image allocation (`truncate`, forced by putting a
+  directory at the image path) reporting a clean error and leaving nothing
+  behind, rather than a corrupt image that confuses the next `up`. Needs `sudo`
+  to stage a foreign mount
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is consumed
   on read, absent file is a no-op
