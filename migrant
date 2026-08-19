@@ -69,8 +69,6 @@ Access:
   ip [-6]             Print the VM's IPv4 address (what SSH uses). With -6,
                       print the IPv6 (ULA) address when NETWORK_IPV6=nat is set
   pubkey              Generate the managed SSH key if needed and print its public key
-  tz [zone]           Sync the host timezone to the VM, or set an explicit zone
-                      (e.g. America/New_York); defaults to the host timezone
 
 Diagnostics:
   storage             List IMAGES_DIR contents grouped by base images and VMs,
@@ -1871,37 +1869,6 @@ cmd_ip() {
   get_vm_ip_or_die
 }
 
-cmd_tz() {
-  require_running
-  local tz="${1:-}"
-  if [[ -z "$tz" ]]; then
-    tz=$(readlink -f /etc/localtime || true)
-    tz=${tz##*/zoneinfo/}
-    if [[ "$tz" == /* ]]; then
-      tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
-    fi
-  fi
-  if [[ -z "$tz" ]]; then
-    echo "[ERROR] Could not determine host timezone." >&2
-    exit 1
-  fi
-local user ssh_opts ip
-  resolve_ssh_conn user ssh_opts ip
-  # SC2029: $tz intentionally expands on the client side.
-  # shellcheck disable=SC2029
-  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" test -f "/usr/share/zoneinfo/$tz"; then
-    echo "[ERROR] Unknown timezone: $tz" >&2
-    exit 64
-  fi
-  # shellcheck disable=SC2029
-  if ! ssh "${ssh_opts[@]}" "${user}@${ip}" \
-      sudo ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime; then
-    echo "[ERROR] Failed to set timezone in VM." >&2
-    exit 1
-  fi
-  echo "timezone: $tz"
-}
-
 cmd_ssh() {
   require_running
   local user ssh_opts ip
@@ -2421,7 +2388,6 @@ case "$SUBCOMMAND" in
   tunnel)       require_config; cmd_tunnel "${@:2}" ;;
   pubkey)       require_config; cmd_pubkey ;;
   ip)           require_config; cmd_ip ;;
-  tz)           require_config; cmd_tz "${2:-}" ;;
   status)       require_config; cmd_status ;;
   mount)        require_config; cmd_mount ;;
   unmount)      require_config; cmd_unmount ;;

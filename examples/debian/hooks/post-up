@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Example post-up hook: log VM readiness with timestamp.
+# Example post-up hook: sync the host timezone into the VM.
 # Runs after the VM is fully ready (IP assigned, SSH available, provisioned).
 #
 # Available environment variables:
@@ -10,5 +10,14 @@
 #   MIGRANT_VM_IP     — VM IP address
 #
 # All Migrantfile variables (VM_NAME, RAM_MB, NETWORKS, etc.) are also present.
+#
+# Assumes the host is Arch Linux, where /etc/localtime is a symlink into the
+# zoneinfo tree. The guest is systemd-based, so timedatectl applies it.
+# MIGRANT_DIR points 'migrant ssh' at this VM regardless of the hook's cwd.
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${MIGRANT_VM_NAME} is ready at ${MIGRANT_VM_IP}"
+set -euo pipefail
+
+tz=$(readlink -f /etc/localtime)
+tz=${tz##*/zoneinfo/}
+
+MIGRANT_DIR="$MIGRANT_VM_DIR" migrant ssh -- sudo timedatectl set-timezone "$tz"

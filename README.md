@@ -210,7 +210,6 @@ migrant tunnel [PORT...]   # Open SSH local-forwards from host to VM. Without ar
 migrant console            # Open a serial console session (exit with Ctrl+])
 migrant ip [-6]            # Print the VM's IPv4 address (what SSH uses). With -6, print the IPv6 (ULA) address when NETWORK_IPV6=nat is set
 migrant pubkey             # Generate the managed SSH key if needed and print its public key
-migrant tz [zone]          # Sync the host timezone to the VM, or set an explicit zone (e.g. America/New_York); defaults to the host timezone
 
 # Diagnostics
 migrant storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile

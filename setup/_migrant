@@ -19,7 +19,6 @@ _migrant() {
     "console:Open a serial console session"
     "ip:Print the VM's IPv4 address, or (-6) its IPv6 address"
     "pubkey:Generate the managed SSH key if needed and print its public key"
-    "tz:Sync the host timezone to the VM, or set an explicit zone"
     "storage:List IMAGES_DIR contents grouped by base images and VMs"
     "wg:Show live WireGuard interface status, including transfer stats and latest handshake"
     "dominfo:Show detailed libvirt domain info for the VM"
