@@ -28,6 +28,8 @@ source Migrantfile
 
 WS="$PWD/workspace"
 IMG="$PWD/workspace.img"
+SIZED_WS="$PWD/sized"
+SIZED_IMG="$PWD/sized.img"
 EXTRA_WS="$PWD/extrafs"
 EXTRA_IMG="$PWD/extrafs.img"
 RECORD="/run/migrant/${VM_NAME}.shared"
@@ -54,8 +56,8 @@ cleanup() {
     rm -f "$TEST_HOOK"
   fi
   virsh dominfo "$VM_NAME" &>/dev/null && "$MIGRANT" destroy 2>/dev/null || true
-  rm -f "$EXTRA_IMG"
-  rmdir "$EXTRA_WS" 2>/dev/null || true
+  rm -f "$EXTRA_IMG" "$SIZED_IMG"
+  rmdir "$EXTRA_WS" "$SIZED_WS" 2>/dev/null || true
   if [[ -f Migrantfile.test-backup ]]; then
     mv Migrantfile.test-backup Migrantfile
   fi
@@ -92,11 +94,94 @@ if virsh dominfo "$VM_NAME" &>/dev/null; then
   "$MIGRANT" destroy 2>/dev/null || true
 fi
 
-cat > Migrantfile <<EOF
+reset_migrantfile() {
+  cat > Migrantfile <<EOF
 $(cat Migrantfile.test-backup)
 SHARED_FOLDERS=("workspace:workspace")
 SHARED_FOLDER_SIZE_GB=1
 EOF
+}
+reset_migrantfile
+
+# ============================================================
+# Part 0: per-entry size validation (no VM needed)
+# ============================================================
+# Validation runs in sync_managed_config, before virt-install, so a bad
+# value never reaches the point of creating a domain.
+
+echo "--- test: per-entry size validation ---"
+
+for bad in 5GB 3x 0 -1 999999; do
+  cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("workspace:workspace:$bad")
+EOF
+  set +e
+  out=$("$MIGRANT" up 2>&1); rc=$?
+  set -e
+  if grep -q "\[ERROR\] invalid size in SHARED_FOLDERS entry: workspace:workspace:$bad" <<<"$out" \
+      && (( rc == 65 )); then
+    pass "rejects per-entry size '$bad' with exit 65"
+  else
+    fail "per-entry size '$bad': status=$rc output=$out"
+    "$MIGRANT" destroy 2>/dev/null || true
+  fi
+done
+
+# A valid first entry must not short-circuit validation of the rest of the
+# array — the loop has to keep checking every entry, not just the first.
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=(
+  "workspace:workspace:5"
+  "sized:sized:5GB"
+)
+EOF
+set +e
+out=$("$MIGRANT" up 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] invalid size in SHARED_FOLDERS entry: sized:sized:5GB" <<<"$out" \
+    && (( rc == 65 )); then
+  pass "rejects an invalid size in a later entry despite a valid first entry"
+else
+  fail "mixed valid/invalid entries: status=$rc output=$out"
+  "$MIGRANT" destroy 2>/dev/null || true
+fi
+
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("workspace:workspace:5")
+SHARED_FOLDER_ISOLATION=false
+EOF
+set +e
+out=$("$MIGRANT" up 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] SHARED_FOLDERS entry has a size limit but SHARED_FOLDER_ISOLATION=false" <<<"$out" \
+    && (( rc == 65 )); then
+  pass "rejects a per-entry size with SHARED_FOLDER_ISOLATION=false"
+else
+  fail "size + SHARED_FOLDER_ISOLATION=false: status=$rc output=$out"
+  "$MIGRANT" destroy 2>/dev/null || true
+fi
+
+for bad in 5GB 3x 0 -1; do
+  cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("workspace:workspace")
+SHARED_FOLDER_SIZE_GB=$bad
+EOF
+  set +e
+  out=$("$MIGRANT" up 2>&1); rc=$?
+  set -e
+  if grep -q "\[ERROR\] invalid SHARED_FOLDER_SIZE_GB: '$bad'" <<<"$out" && (( rc == 65 )); then
+    pass "rejects SHARED_FOLDER_SIZE_GB=$bad with exit 65"
+  else
+    fail "SHARED_FOLDER_SIZE_GB=$bad: status=$rc output=$out"
+    "$MIGRANT" destroy 2>/dev/null || true
+  fi
+done
+
+reset_migrantfile
 
 # ============================================================
 # Part 1: the loop image is mounted, recorded, and torn down
@@ -151,6 +236,85 @@ if [[ -f "$RECORD" ]]; then
 else
   pass "mount record removed on halt"
 fi
+
+# ============================================================
+# Part 1b: a per-entry size override is independent of the global default
+# ============================================================
+# Two shares in the same Migrantfile, only one with an override, so a bug
+# that applied the override to every entry (or the default to the
+# overridden one) shows up as an equal, not merely wrong, image size.
+
+echo "--- test: per-entry size override ---"
+
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=(
+  "workspace:workspace"
+  "sized:sized:2"
+)
+SHARED_FOLDER_SIZE_GB=1
+EOF
+
+"$MIGRANT" up
+
+img_size_gb() { du --apparent-size -b "$1" | cut -f1 | awk '{ print $1 / 1024 / 1024 / 1024 }'; }
+
+if [[ "$(img_size_gb "$IMG")" == "1" ]]; then
+  pass "workspace.img stays at the global default (1G)"
+else
+  fail "workspace.img is $(img_size_gb "$IMG")G, expected 1G"
+fi
+
+if [[ "$(img_size_gb "$SIZED_IMG")" == "2" ]]; then
+  pass "sized.img uses its own per-entry size (2G), not the global default"
+else
+  fail "sized.img is $(img_size_gb "$SIZED_IMG")G, expected 2G"
+fi
+
+if mountpoint -q "$SIZED_WS" 2>/dev/null; then
+  pass "sized share is mounted alongside workspace"
+else
+  fail "sized share is not mounted"
+fi
+
+# The loop hook mounts by matching <source dir>, never <target dir>, so the
+# mount succeeding above proves nothing about guest_tag parsing. Only the
+# domain XML shows whether the third field leaked into the tag — the bug
+# fixed alongside per-entry sizing had "sized:sized:2" registering a
+# virtiofs target of "2" instead of "sized".
+if virsh dumpxml --inactive "$VM_NAME" 2>/dev/null \
+    | grep -A2 "<source dir='$SIZED_WS'/>" \
+    | grep -q "<target dir='sized'/>"; then
+  pass "guest_tag for a 3-field entry is the middle field, not the size"
+else
+  fail "domain XML target for $SIZED_WS is not 'sized': $(virsh dumpxml --inactive "$VM_NAME" 2>/dev/null | grep -B2 -A2 "$SIZED_WS")"
+fi
+
+if grep -qx "$(printf '%s\t%s' "$SIZED_WS" "$SIZED_IMG")" "$RECORD" 2>/dev/null; then
+  pass "record names the sized share alongside workspace"
+else
+  fail "record does not name $SIZED_WS"
+  cat "$RECORD" 2>/dev/null || true
+fi
+
+"$MIGRANT" halt
+
+if mountpoint -q "$WS" 2>/dev/null || mountpoint -q "$SIZED_WS" 2>/dev/null; then
+  fail "a share is still mounted after halt with two shares configured"
+else
+  pass "both shares unmounted after halt"
+fi
+
+if [[ -f "$RECORD" ]]; then
+  fail "mount record survived halt with two shares configured"
+else
+  pass "mount record removed after halt with two shares configured"
+fi
+
+"$MIGRANT" destroy
+rm -f "$SIZED_IMG"
+rmdir "$SIZED_WS" 2>/dev/null || true
+reset_migrantfile
 
 # ============================================================
 # Part 2: an unmountable image refuses to start

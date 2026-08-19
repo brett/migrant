@@ -12,10 +12,11 @@ directory. This provides two protections:
   safe due to its `pivot_root` sandbox, but this protects all other host
   processes.
 
-- **Disk exhaustion prevention**: the image has a fixed size set by
-  `SHARED_FOLDER_SIZE_GB` in the `Migrantfile` (default: 10 GB). The guest
-  cannot write more than this cap. The image is sparse — actual host disk usage
-  starts at ~67 MB and grows with contents; the full cap is never paid upfront.
+- **Disk exhaustion prevention**: the image has a fixed size, set per entry in
+  `SHARED_FOLDERS` — see "Multiple shared folders" below (default: 10 GB if
+  unspecified). The guest cannot write more than this cap. The image is sparse —
+  actual host disk usage starts at ~67 MB and grows with contents; the full cap
+  is never paid upfront.
 
 Both protections are enforced rather than assumed. If the image is missing,
 fails to mount, or the mount point turns out to be backed by something other
@@ -49,10 +50,21 @@ only if you trust the VM's workload.
 ## Multiple shared folders
 
 `SHARED_FOLDERS` is an array — a `Migrantfile` can define more than one entry,
-each backed by its own loop image (`<name>.img`, sized independently by
-`SHARED_FOLDER_SIZE_GB`) and mounted at whatever guest path its `fstab` entry
-names. Each gets the same `nosymfollow` and size-cap protections as the default
-`workspace` share.
+each backed by its own loop image (`<name>.img`) and mounted at whatever guest
+path its `fstab` entry names. Each gets the same `nosymfollow` and size-cap
+protections as the default `workspace` share, and `migrant` requires no code
+changes to support an additional one.
+
+Size each entry with a third, colon-separated field:
+`"host_path:guest_tag:size_gb"`. This only applies to loop-image-backed shares —
+pairing a size with `SHARED_FOLDER_ISOLATION=false` is a validation error, since
+a plain host directory has no image to size.
+
+Older `Migrantfile`s may instead set `SHARED_FOLDER_SIZE_GB` once, applying it
+to every entry that omits the third field. That form still works and is not
+going away, but the per-entry field is the current way to size a share — it lets
+shares with different needs coexist without one setting having to fit all of
+them, which is the more common case once there's more than one.
 
 ### Example: persisting Claude Code conversation history across rebuilds
 
@@ -66,12 +78,15 @@ Login state isn't covered by this — `~/.claude.json` lives directly under the
 guest's home directory, not under `~/.claude/`, so it isn't reachable by a share
 rooted there; re-authenticating after a rebuild is the trade-off.
 
+Transcripts are small, so the example gives this share its own low cap rather
+than reusing `workspace`'s:
+
 `Migrantfile`:
 
 ```bash
 SHARED_FOLDERS=(
-  "workspace:workspace"
-  "claude-projects:claude-projects"
+  "workspace:workspace:10"
+  "claude-projects:claude-projects:2"
 )
 ```
 

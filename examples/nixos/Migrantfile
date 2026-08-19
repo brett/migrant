@@ -16,11 +16,16 @@ DISK_GB=20
 # curl supports file:// protocol, so migrant handles this transparently.
 IMAGE_URL="file://$(realpath "$VM_DIR/result/nixos-base.qcow2")"
 
-# Shared folders — format is "host_absolute_or_relative_path:guest_tag"
+# Shared folders — format is "host_absolute_or_relative_path:guest_tag[:size_gb]"
 # The guest_tag is what you mount inside the VM, e.g.:
 #   sudo mount -t virtiofs workspace /home/migrant/workspace
+# size_gb creates a sparse ext4 loop image of that size — it starts at ~67 MB
+# on disk and grows with contents up to the cap. Add workspace.img (or *.img)
+# to .gitignore to avoid committing it. See
+# docs/security/shared-folder-isolation.md for SHARED_FOLDER_ISOLATION=false
+# (a plain host directory, no cap).
 SHARED_FOLDERS=(
-  "workspace:workspace"
+  "workspace:workspace:10"
 )
 
 # Network — one entry per NIC, using virt-install --network syntax

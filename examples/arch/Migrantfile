@@ -13,23 +13,22 @@ DISK_GB=20
 # Base image
 IMAGE_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 
-# Shared folders — format is "host_absolute_or_relative_path:guest_tag"
+# Shared folders — format is "host_absolute_or_relative_path:guest_tag[:size_gb]"
 # The guest_tag is what you mount inside the VM, e.g.:
 #   sudo mount -t virtiofs workspace /home/migrant/workspace
+# size_gb creates a sparse ext4 loop image of that size — it starts at ~67 MB
+# on disk and grows with contents up to the cap. Add workspace.img (or *.img)
+# to .gitignore to avoid committing it. See
+# docs/security/shared-folder-isolation.md for SHARED_FOLDER_ISOLATION=false
+# (a plain host directory, no cap).
 SHARED_FOLDERS=(
-  "workspace:workspace"
+  "workspace:workspace:10"
 )
 
 # Network — one entry per NIC, using virt-install --network syntax
 NETWORKS=(
   "network=migrant"
 )
-
-# Shared folder loop image size in gigabytes. A sparse ext4 image of this size
-# is created the first time 'migrant up' or 'migrant mount' is run. The
-# image starts at ~67 MB on disk and grows with contents up to this cap.
-# Add workspace.img (or *.img) to .gitignore to avoid committing it.
-SHARED_FOLDER_SIZE_GB=10
 
 # Set to false to share a plain host directory instead of a loop image.
 # The loop image is on by default: it caps how much the VM can write to the

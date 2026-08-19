@@ -45,8 +45,13 @@ before the first run; migrant refuses to start when it does not match
   independently. Needs `sudo` to stand up a routed target in a network namespace
 - **test-shared-folder.sh** — shared folder isolation: the loop image is mounted
   with `nosymfollow` and recorded, and the VM refuses to start when the image
-  will not mount or the mount point is backed by something else. Needs `sudo` to
-  stage a foreign mount
+  will not mount or the mount point is backed by something else. Also covers
+  per-entry `SHARED_FOLDERS` size overrides — validation of the size value
+  (including that one bad entry is still caught behind a valid one) and of
+  pairing a size with `SHARED_FOLDER_ISOLATION=false`, and that two shares in
+  one Migrantfile get independently sized images, the correct `guest_tag` in the
+  domain XML for a 3-field entry, and are both recorded and torn down on halt.
+  Needs `sudo` to stage a foreign mount
 - **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
   pre-up hook contributes args to virt-install on first create, file is consumed
   on read, absent file is a no-op

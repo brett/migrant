@@ -212,9 +212,16 @@ shared_folder_isolation_enabled() {
 }
 
 shared_folder_host_path() {
-  local p="${1%%:*}"          # strip :guest_tag suffix, leaving only the host path
+  local p="${1%%:*}"          # strip :guest_tag[:size_gb] suffix, leaving only the host path
   [[ "$p" != /* ]] && p="$VM_DIR/$p"  # resolve relative paths against the VM directory
   echo "$p"
+}
+
+# Optional third ":size_gb" field, overriding SHARED_FOLDER_SIZE_GB for just
+# this entry. Echoes nothing when the entry has no third field.
+shared_folder_size_gb() {
+  local rest="${1#*:}"  # strip host_path:, leaving guest_tag[:size_gb]
+  [[ "$rest" == *:* ]] && echo "${rest#*:}"
 }
 
 wait_for_shutdown() {
@@ -346,19 +353,21 @@ ensure_shared_folder_images() {
     echo "  Run 'migrant setup' first, then re-run this command." >&2
     exit 1
   fi
-  local size_gb="${SHARED_FOLDER_SIZE_GB:-10}"
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
     local host_path
     host_path=$(shared_folder_host_path "$shared_folder")
     local img_path="${host_path%/}.img"
+    local size_gb
+    size_gb="$(shared_folder_size_gb "$shared_folder")"
+    size_gb="${size_gb:-${SHARED_FOLDER_SIZE_GB:-10}}"
     if [[ -f "$img_path" ]]; then
       local actual_size
       actual_size=$(du --apparent-size -b "$img_path" 2>/dev/null | cut -f1 || echo 0)
       local expected_size=$(( size_gb * 1024 * 1024 * 1024 ))
       if (( actual_size != expected_size )); then
         echo "[NOTE] $img_path is $(( actual_size / 1024 / 1024 / 1024 ))G" \
-          "but SHARED_FOLDER_SIZE_GB=${size_gb}." >&2
-        echo "  To resize: halt the VM, back up workspace/ contents," \
+          "but the configured size is ${size_gb}G." >&2
+        echo "  To resize: halt the VM, back up ${host_path##*/}/ contents," \
           "run 'rm $img_path', then 'migrant up'." >&2
       fi
     else
@@ -486,10 +495,11 @@ forward_port_target_ok() {
   return 0
 }
 
-# See docs/security/shared-folder-isolation.md, "Restrictions".
+# See docs/security/shared-folder-isolation.md, "Restrictions" and
+# "Multiple shared folders".
 validate_shared_folder_paths() {
   [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]] && return 0
-  local hooks_dir shared_folder host_path prefix
+  local hooks_dir shared_folder host_path prefix entry_size
   hooks_dir=$(realpath -m "$VM_DIR/hooks")
   for shared_folder in "${SHARED_FOLDERS[@]}"; do
     host_path=$(realpath -m "$(shared_folder_host_path "$shared_folder")")
@@ -500,7 +510,27 @@ validate_shared_folder_paths() {
       echo "  runs on the host at the next 'migrant up'. Share a subdirectory instead." >&2
       exit 65  # EX_DATAERR
     fi
+
+    entry_size=$(shared_folder_size_gb "$shared_folder")
+    if [[ -n "$entry_size" ]]; then
+      if ! shared_folder_isolation_enabled; then
+        echo "[ERROR] SHARED_FOLDERS entry has a size limit but SHARED_FOLDER_ISOLATION=false: $shared_folder" >&2
+        echo "  Per-entry sizes only apply to loop-image-backed shares. Remove the" >&2
+        echo "  ':$entry_size', or drop SHARED_FOLDER_ISOLATION=false." >&2
+        exit 65  # EX_DATAERR
+      fi
+      if ! is_valid_resource "$entry_size" 5; then
+        echo "[ERROR] invalid size in SHARED_FOLDERS entry: $shared_folder" >&2
+        echo "  expected gigabytes, 1-99999 (e.g. 'name:tag:5')." >&2
+        exit 65  # EX_DATAERR
+      fi
+    fi
   done
+
+  if [[ -n "${SHARED_FOLDER_SIZE_GB:-}" ]] && ! is_valid_resource "$SHARED_FOLDER_SIZE_GB" 5; then
+    echo "[ERROR] invalid SHARED_FOLDER_SIZE_GB: '${SHARED_FOLDER_SIZE_GB}' (expected gigabytes, 1-99999)." >&2
+    exit 65  # EX_DATAERR
+  fi
 }
 
 sync_managed_config() {
@@ -981,7 +1011,10 @@ EOF
   local has_shared_folders=false
 
   for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
-    local host_path guest_tag="${shared_folder##*:}"
+    local host_path guest_tag
+    # Middle field: strip host_path:, then strip any trailing :size_gb.
+    guest_tag="${shared_folder#*:}"
+    guest_tag="${guest_tag%%:*}"
     host_path=$(shared_folder_host_path "$shared_folder")
     mkdir -p "$host_path"
     extra_args+=(--filesystem "source=$host_path,target=$guest_tag,driver.type=virtiofs")
