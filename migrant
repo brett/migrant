@@ -49,9 +49,12 @@ Lifecycle:
   destroy             Stop and permanently delete the VM, its disk, and any snapshots
   status              Show the VM's current state and snapshot availability
   provision           Run the Ansible playbook (playbook.yml) against the running VM
-  snapshot            Shut down the VM and save a snapshot of its disk;
-                      VM stays down afterward
-  reset               Destroy the VM and rebuild it from the last snapshot
+  snapshot [path]     Shut down the VM and save a snapshot of its disk; VM
+                      stays down afterward. Without a path, saves to the
+                      default location; a directory builds a timestamped
+                      filename, a full path is used as given
+  reset [path]        Destroy the VM and rebuild it from a snapshot; without a
+                      path, uses the default location
   resize              Grow the VM's disk to match DISK_GB in the Migrantfile;
                       requires the VM to be running
 
@@ -97,6 +100,10 @@ require_config() {
   DISK_PATH="$IMAGES_DIR/${VM_NAME}.qcow2"
   SEED_ISO="$IMAGES_DIR/${VM_NAME}-seed.iso"
   SNAPSHOT_PATH="$IMAGES_DIR/${VM_NAME}-snapshot.qcow2"
+  # Records the basename of whatever image (base image or snapshot, at any
+  # path) the VM was actually built from, so a later 'up' against the same
+  # domain can recognize it as expected rather than as drift.
+  BASE_IMAGE_RECORD="$VM_DIR/.migrant-base-image"
 
   # See docs/usage.md, "Overriding the key path".
   if [[ -n "${SSH_KEY_PATH:-}" && -z "${MIGRANT_KEY_PATH:-}" ]]; then
@@ -899,9 +906,20 @@ cmd_up() {
     current_base=$(qemu-img info "$DISK_PATH" 2>/dev/null \
         | grep '^backing file:' | cut -d' ' -f3- || true)
     current_base=$(basename "$current_base")
+    # The VM may have been built from a snapshot at any path (see 'reset
+    # <path>'), not just the default location, so the tolerated basename is
+    # whatever was actually used at creation — recorded in $BASE_IMAGE_RECORD.
+    # Older VMs predate that record; fall back to the one alternate basename
+    # 'reset' used to always use.
+    local expected_alt
+    if [[ -f "$BASE_IMAGE_RECORD" ]]; then
+      expected_alt=$(<"$BASE_IMAGE_RECORD")
+    else
+      expected_alt=$(basename "$SNAPSHOT_PATH")
+    fi
     if [[ -n "$current_base" \
         && "$current_base" != "$base_image" \
-        && "$current_base" != "$(basename "$SNAPSHOT_PATH")" ]]; then
+        && "$current_base" != "$expected_alt" ]]; then
       echo "[ERROR] VM '$VM_NAME' was built from '$current_base' but Migrantfile" >&2
       echo "  specifies '$base_image'. Run 'migrant destroy' first." >&2
       exit 78
@@ -951,8 +969,11 @@ cmd_up() {
     return
   fi
 
+  # cmd_reset overrides this to rebuild from a snapshot elsewhere; a plain
+  # 'up' falls back to the default location, same as before.
+  local snapshot_source="${_MIGRANT_RESET_SNAPSHOT_PATH:-$SNAPSHOT_PATH}"
   local from_snapshot=false
-  [[ -f "$SNAPSHOT_PATH" ]] && from_snapshot=true
+  [[ -f "$snapshot_source" ]] && from_snapshot=true
 
   if [[ "$from_snapshot" == true ]]; then
     check_managed_key_match reset
@@ -968,8 +989,8 @@ cmd_up() {
 
   local base_image_path
   if [[ "$from_snapshot" == true ]]; then
-    echo "Using snapshot: $SNAPSHOT_PATH"
-    base_image_path="$SNAPSHOT_PATH"
+    echo "Using snapshot: $snapshot_source"
+    base_image_path="$snapshot_source"
   else
     base_image_path="$IMAGES_DIR/$base_image"
     # Always re-copy file:// images (local builds like NixOS) since the
@@ -1003,6 +1024,8 @@ cmd_up() {
       fi
     fi
   fi
+
+  basename "$base_image_path" > "$BASE_IMAGE_RECORD"
 
   qemu-img create -f qcow2 -b "$base_image_path" -F qcow2 "$DISK_PATH" "${DISK_GB}G"
 
@@ -1524,6 +1547,19 @@ cmd_snapshot() {
   _MIGRANT_TRIGGER="snapshot"
   require_vm
 
+  # $1: no arg keeps the default location; an existing directory gets a
+  # timestamped filename built for it; anything else is used as the full path.
+  local target="${1:-$SNAPSHOT_PATH}"
+  if [[ -d "$target" ]]; then
+    target="${target%/}/${VM_NAME}-snapshot-$(date +%Y%m%d-%H%M%S).qcow2"
+  fi
+  local target_dir
+  target_dir=$(dirname "$target")
+  if [[ ! -d "$target_dir" || ! -w "$target_dir" ]]; then
+    echo "[ERROR] cannot write snapshot to '$target_dir': directory does not exist or is not writable." >&2
+    exit 73  # EX_CANTCREAT
+  fi
+
   local state
   state=$(virsh domstate "$VM_NAME")
   if [[ "$state" == "running" ]]; then
@@ -1535,21 +1571,33 @@ cmd_snapshot() {
     exit 1
   fi
 
-  if [[ -f "$SNAPSHOT_PATH" ]]; then
+  if [[ -f "$target" ]]; then
     echo "Overwriting existing snapshot."
   fi
 
   echo "Creating snapshot (this may take a few minutes)..."
-  qemu-img convert -f qcow2 -O qcow2 "$DISK_PATH" "$SNAPSHOT_PATH"
-  echo "Snapshot saved: $SNAPSHOT_PATH"
-  echo "Run 'migrant reset' to rebuild the VM from this snapshot."
+  qemu-img convert -f qcow2 -O qcow2 "$DISK_PATH" "$target"
+  echo "Snapshot saved: $target"
+  if [[ "$target" == "$SNAPSHOT_PATH" ]]; then
+    echo "Run 'migrant reset' to rebuild the VM from this snapshot."
+  else
+    echo "Run 'migrant reset $target' to rebuild the VM from this snapshot."
+  fi
 }
 
 cmd_reset() {
   _MIGRANT_TRIGGER="reset"
-  if [[ ! -f "$SNAPSHOT_PATH" ]]; then
-    echo "[ERROR] no snapshot found for '$VM_NAME'." >&2
-    echo "  Run 'migrant snapshot' to create one." >&2
+
+  # $1: no arg resets from the default location; otherwise from the given
+  # snapshot file, wherever it lives.
+  local snapshot_source="${1:-$SNAPSHOT_PATH}"
+  if [[ ! -f "$snapshot_source" ]]; then
+    if [[ -n "${1:-}" ]]; then
+      echo "[ERROR] no snapshot found at '$snapshot_source'." >&2
+    else
+      echo "[ERROR] no snapshot found for '$VM_NAME'." >&2
+      echo "  Run 'migrant snapshot' to create one." >&2
+    fi
     exit 1
   fi
 
@@ -1573,7 +1621,7 @@ cmd_reset() {
 
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
-  _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
+  _MIGRANT_RESET_SNAPSHOT_PATH="$snapshot_source" _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
 }
 
 cmd_resize() {
@@ -2551,8 +2599,8 @@ case "$SUBCOMMAND" in
   status)       require_config; cmd_status ;;
   mount)        require_config; cmd_mount ;;
   unmount)      require_config; cmd_unmount ;;
-  snapshot)     require_config; cmd_snapshot ;;
-  reset)        require_config; cmd_reset ;;
+  snapshot)     require_config; cmd_snapshot "${@:2}" ;;
+  reset)        require_config; cmd_reset "${@:2}" ;;
   resize)       require_config; cmd_resize ;;
   provision)    require_config; cmd_provision ;;
   storage)      cmd_storage ;;

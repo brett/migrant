@@ -86,13 +86,25 @@ does not exist yet — `test/vm/cloud-init.yml` references it via the
   of silently falling back to agent keys, and a non-managed key correctly
   leaving the agent in charge. `virsh`, `ssh`, and `ansible-playbook` are all
   shadowed on `PATH`
+- **test-snapshot.sh** — `snapshot`/`reset` at the default path: converting
+  directly from a shut-off VM vs. shutting a running one down first, refusing a
+  VM in an unexpected state (e.g. paused) or one that doesn't exist, warning
+  before overwriting an existing snapshot, snapshot content surviving the round
+  trip byte-for-byte, `reset` refusing when no snapshot exists, preserving the
+  old domain's MAC addresses into the rebuild, and still rebuilding (with a
+  warning) when the old domain is already gone. A domain with a real disk is
+  defined straight from XML — no `virt-install` needed for `snapshot`;
+  `virt-install` is shadowed on `PATH` for `reset`'s rebuild leg, and `virsh` is
+  shadowed to turn `shutdown` into an immediate `destroy` since there is no real
+  guest to answer ACPI
 
 `test-resources.sh`, `test-shared-folder-drift.sh`, `test-ssh-key-path.sh`,
-`test-managed-key-placeholder.sh`, and `test-managed-key-ssh-opts.sh` are the
-exception to the above — run them from anywhere (e.g. `test/test-resources.sh`).
-None of them boot a real, working VM: the first two check drift before
-`virsh start` against a diskless domain defined from XML, `test-ssh-key-path.sh`
-only exercises `migrant pubkey`, and the other two shadow
+`test-managed-key-placeholder.sh`, `test-managed-key-ssh-opts.sh`, and
+`test-snapshot.sh` are the exception to the above — run them from anywhere (e.g.
+`test/test-resources.sh`). None of them boot a real, working VM: the first two
+check drift before `virsh start` against a diskless domain defined from XML,
+`test-ssh-key-path.sh` only exercises `migrant pubkey`, `test-snapshot.sh`
+defines its own disk-backed domain from XML, and the remaining two shadow
 `virsh`/`ssh`/`virt-install` on `PATH` to stop short of a real boot. None need a
 VM directory, base image, or `sudo`.
 

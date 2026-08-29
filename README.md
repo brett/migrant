@@ -191,8 +191,8 @@ migrant halt               # Gracefully shut down the VM
 migrant destroy            # Stop and permanently delete the VM, its disk, and any snapshots
 migrant status             # Show the VM's current state and snapshot availability
 migrant provision          # Run the Ansible playbook (playbook.yml) against the running VM
-migrant snapshot           # Shut down the VM and save a snapshot of its disk; VM stays down afterward
-migrant reset              # Destroy the VM and rebuild it from the last snapshot
+migrant snapshot [path]    # Shut down the VM and save a snapshot of its disk; VM stays down afterward. Without a path, saves to the default location; a directory builds a timestamped filename, a full path is used as given
+migrant reset [path]       # Destroy the VM and rebuild it from a snapshot; without a path, uses the default location
 migrant resize             # Grow the VM's disk to match DISK_GB in the Migrantfile; requires the VM to be running
 
 # Shared folder
@@ -227,6 +227,10 @@ migrant halt     # stop when done
 
 # Restore to snapshot
 migrant reset    # wipe and rebuild from snapshot; Ansible does not re-run
+
+# Checkpoint before something risky, without touching the known-good snapshot
+migrant snapshot ~/vm-checkpoints/          # writes a timestamped file there
+migrant reset ~/vm-checkpoints/<file>       # roll back to it later, if needed
 
 # Update provisioning after changing playbook.yml
 migrant up

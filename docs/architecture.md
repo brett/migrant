@@ -81,6 +81,10 @@ The qcow2 overlay means:
   image remains
 - `migrant reset` also deletes the disk and seed ISO but preserves the snapshot,
   then calls `up` to rebuild from it
+- `migrant snapshot <path>` and `migrant reset <path>` can target a snapshot
+  outside `IMAGES_DIR` — e.g. a checkpoint before a risky change, without
+  disturbing the known-good snapshot at the default location. Snapshots outside
+  `IMAGES_DIR` don't appear in `migrant storage`
 
 To free the base image:
 
