@@ -1611,7 +1611,7 @@ cmd_reset() {
     while IFS= read -r mac; do
       [[ -n "$mac" ]] && macs+=("$mac")
     done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
-  else
+  elif [[ -z "${_MIGRANT_RESET_MACS:-}" ]]; then
     echo "[WARNING] VM '$VM_NAME' domain not found; MAC addresses cannot be preserved." >&2
     echo "  Network may not work after reset. Run 'migrant destroy && migrant up' instead." >&2
   fi
@@ -1621,7 +1621,13 @@ cmd_reset() {
 
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."
-  _MIGRANT_RESET_SNAPSHOT_PATH="$snapshot_source" _MIGRANT_RESET_MACS="${macs[*]:-}" cmd_up
+  # No local domain to source MACs from: fall back to whatever the caller
+  # already exported (e.g. a cross-host restore setting this from the
+  # archived domain's MAC) instead of clobbering it with an empty value — a
+  # bare 'VAR=x cmd' prefix shadows an inherited VAR for the duration of the
+  # call it prefixes.
+  local effective_macs="${macs[*]:-${_MIGRANT_RESET_MACS:-}}"
+  _MIGRANT_RESET_SNAPSHOT_PATH="$snapshot_source" _MIGRANT_RESET_MACS="$effective_macs" cmd_up
 }
 
 cmd_resize() {

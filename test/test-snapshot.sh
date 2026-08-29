@@ -308,6 +308,29 @@ else
   fail "reset did not rebuild without the old domain: $OUT"
 fi
 
+# --- 8b. reset honors a caller-supplied _MIGRANT_RESET_MACS when the old domain
+#         is gone, instead of clobbering it with an empty value (regression for
+#         the cross-host restore case, where there's never a local domain to
+#         source MACs from) -----------------------------------------------------
+set +e
+PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" _MIGRANT_RESET_MACS="52:54:00:de:ad:be" \
+  timeout 25 "$MIGRANT" reset > out.log 2>&1
+STATUS=$?
+set -e
+OUT=$(cat out.log)
+
+if grep -q "\[WARNING\] VM '$VM' domain not found; MAC addresses cannot be preserved." <<<"$OUT"; then
+  fail "reset warned about MAC loss despite a caller-supplied _MIGRANT_RESET_MACS: $OUT"
+else
+  pass "reset does not warn when the caller already supplied _MIGRANT_RESET_MACS"
+fi
+if grep -qF -- "--network network=migrant,mac=52:54:00:de:ad:be" "$WORK/virt-install.args" 2>/dev/null; then
+  pass "reset honors a caller-supplied _MIGRANT_RESET_MACS when the old domain is gone"
+else
+  fail "caller-supplied MAC not honored: $(cat "$WORK/virt-install.args" 2>/dev/null || echo missing)"
+fi
+rm -f "$DISK_PATH" "$WORK/virt-install.args"
+
 # --- 9. snapshot writes to a given full path ------------------------------------
 # The default path may still hold scenario 7's leftover stub snapshot; clear it
 # so "custom path leaves the default alone" checks scenario 9's own behavior,
