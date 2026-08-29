@@ -523,6 +523,74 @@ else
 fi
 rm -f "$DISK_PATH" "$WORK/virt-install.args"
 
+# --- 17. reset with a custom path when a local domain already exists -----------
+# The other officially documented use of a custom path (README.md): a
+# checkpoint on a live domain, same host —
+#   migrant snapshot ~/vm-checkpoints/
+#   migrant reset ~/vm-checkpoints/<file>
+# Untested until now: scenario 7 covers domain-exists + the *default* path,
+# scenario 13 covers a custom path but destroys the domain first. This
+# combines domain-exists with a (relative) custom path, and — since a
+# caller-supplied _MIGRANT_RESET_MACS is also set here, to a value that
+# differs from the domain's real MAC — proves the existing domain's real MAC
+# still wins the priority that scenario 8b/16 only checked in the absence of
+# any domain. Also confirms reset updates .migrant-base-image from a real
+# run (scenario 15 fabricates that file by hand rather than exercising the
+# code path that writes it).
+cat > dom-checkpoint.xml <<EOF
+<domain type='kvm'>
+  <name>$VM</name>
+  <memory unit='KiB'>524288</memory>
+  <currentMemory unit='KiB'>524288</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type></os>
+  <devices>
+    <interface type='ethernet'>
+      <mac address='52:54:00:11:22:33'/>
+      <model type='virtio'/>
+    </interface>
+    <console type='pty'/>
+  </devices>
+</domain>
+EOF
+virsh define dom-checkpoint.xml > /dev/null
+virsh start "$VM" > /dev/null
+
+VM_SUBDIR="$WORK/layout/$VM"
+mkdir -p "$VM_SUBDIR"
+cp Migrantfile cloud-init.yml "$VM_SUBDIR/"
+CHECKPOINT_SNAP="$WORK/layout/${VM}-checkpoint.qcow2"
+qemu-img create -f qcow2 "$CHECKPOINT_SNAP" 10M > /dev/null
+
+cd "$VM_SUBDIR"
+PATH="$WORK/fakebin:$PATH" _MIGRANT_RESET_MACS="52:54:00:ba:ad:00" \
+  run_migrant reset "../$(basename "$CHECKPOINT_SNAP")"
+cd "$WORK"
+
+if grep -qF "Using snapshot: $CHECKPOINT_SNAP" <<<"$OUT"; then
+  pass "reset with an existing domain resolves a relative custom path against the caller's CWD"
+else
+  fail "reset (domain exists) did not resolve the relative snapshot path correctly: $OUT"
+fi
+if [[ -f "$DISK_PATH" ]] && qemu-img info "$DISK_PATH" | grep -qF "backing file: $CHECKPOINT_SNAP"; then
+  pass "disk is backed by the checkpoint, not the default snapshot"
+else
+  fail "checkpoint reset backing file wrong: $(qemu-img info "$DISK_PATH" 2>&1 || true)"
+fi
+if grep -qF -- "--network network=migrant,mac=52:54:00:11:22:33" "$WORK/virt-install.args" 2>/dev/null; then
+  pass "reset with a custom path still preserves the existing domain's real MAC over a caller-supplied one"
+else
+  fail "existing-domain MAC not preserved alongside a custom path: $(cat "$WORK/virt-install.args" 2>/dev/null || echo missing)"
+fi
+if [[ -f "$VM_SUBDIR/.migrant-base-image" ]] && grep -qF "$(basename "$CHECKPOINT_SNAP")" "$VM_SUBDIR/.migrant-base-image"; then
+  pass "reset records the checkpoint's basename in .migrant-base-image"
+else
+  fail ".migrant-base-image not updated to the checkpoint: $(cat "$VM_SUBDIR/.migrant-base-image" 2>/dev/null || echo missing)"
+fi
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH" "$WORK/virt-install.args"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 (( FAIL == 0 ))
