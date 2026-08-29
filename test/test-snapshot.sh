@@ -481,6 +481,48 @@ fi
 virsh destroy "$VM" &>/dev/null || true
 rm -f .migrant-base-image "$DISK_PATH"
 
+# --- 16. the real cross-host restore command: no local domain, a relative
+#         snapshot path typed from inside the VM directory, and a
+#         caller-supplied _MIGRANT_RESET_MACS, all together ------------------
+# This is the exact shape 'migrant-archive's restore instructions use:
+#   cd <vm-dir>
+#   _MIGRANT_RESET_MACS="$(cat ../mac-address.txt)" migrant reset ../<vm>-snapshot.qcow2
+# Two things distinguish it from scenarios 8b and 13, which each cover half
+# of this: the snapshot path is relative, and it's typed from a CWD that
+# differs from IMAGES_DIR — the case where a relative path is easy to get
+# subtly wrong (qcow2 resolves a relative backing-file path against the
+# *overlay's* directory, i.e. IMAGES_DIR, not the CWD it was typed from).
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$SNAPSHOT_PATH"
+
+LAYOUT_DIR="$WORK/layout"
+VM_SUBDIR="$LAYOUT_DIR/$VM"
+mkdir -p "$VM_SUBDIR"
+cp Migrantfile cloud-init.yml "$VM_SUBDIR/"
+REL_SNAP_TARGET="$LAYOUT_DIR/${VM}-snapshot.qcow2"
+qemu-img create -f qcow2 "$REL_SNAP_TARGET" 10M > /dev/null
+
+cd "$VM_SUBDIR"
+PATH="$WORK/fakebin:$PATH" _MIGRANT_RESET_MACS="52:54:00:c0:ff:ee" run_migrant reset "../$(basename "$REL_SNAP_TARGET")"
+cd "$WORK"
+
+if grep -qF "Using snapshot: $REL_SNAP_TARGET" <<<"$OUT"; then
+  pass "reset resolves a relative snapshot path against the caller's CWD, not IMAGES_DIR"
+else
+  fail "reset did not resolve the relative snapshot path correctly: $OUT"
+fi
+if [[ -f "$DISK_PATH" ]] && qemu-img info "$DISK_PATH" | grep -qF "backing file: $REL_SNAP_TARGET"; then
+  pass "disk built from a relative snapshot path is backed by the correct absolute file"
+else
+  fail "relative-path reset backing file wrong: $(qemu-img info "$DISK_PATH" 2>&1 || true)"
+fi
+if grep -qF -- "--network network=migrant,mac=52:54:00:c0:ff:ee" "$WORK/virt-install.args" 2>/dev/null; then
+  pass "the full cross-host restore command honors _MIGRANT_RESET_MACS with a relative path and no local domain"
+else
+  fail "MAC not honored in the full restore-command scenario: $(cat "$WORK/virt-install.args" 2>/dev/null || echo missing)"
+fi
+rm -f "$DISK_PATH" "$WORK/virt-install.args"
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 (( FAIL == 0 ))

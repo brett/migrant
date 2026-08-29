@@ -973,7 +973,17 @@ cmd_up() {
   # 'up' falls back to the default location, same as before.
   local snapshot_source="${_MIGRANT_RESET_SNAPSHOT_PATH:-$SNAPSHOT_PATH}"
   local from_snapshot=false
-  [[ -f "$snapshot_source" ]] && from_snapshot=true
+  if [[ -f "$snapshot_source" ]]; then
+    from_snapshot=true
+    # A relative path is resolved against the CWD for this existence check,
+    # but qcow2 stores a backing-file path as-is and later resolves it
+    # against the *overlay's own* directory (DISK_PATH, always in
+    # IMAGES_DIR) — not the CWD at creation time. Left relative, this would
+    # silently point somewhere unintended once used as the backing file
+    # below. Absolutize now, while it's still relative to the CWD the
+    # caller actually meant.
+    snapshot_source=$(realpath "$snapshot_source")
+  fi
 
   if [[ "$from_snapshot" == true ]]; then
     check_managed_key_match reset
