@@ -78,9 +78,20 @@ EOF
 
 OUT=""
 STATUS=0
+# Pass --timeout N before the migrant subcommand to override the default 25s
+# (e.g. a call with no way to succeed, bounded only to outlast startup on a
+# slow box). A PATH override to shadow virt-install, if needed, works
+# unmodified as a caller-side prefix — 'PATH=... run_migrant ...' — since a
+# temporary environment assignment on a function call propagates to any
+# external command the function goes on to invoke.
 run_migrant() {
+  local timeout_s=25
+  if [[ "${1:-}" == --timeout ]]; then
+    timeout_s="$2"
+    shift 2
+  fi
   set +e
-  LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 25 "$MIGRANT" "$@" > out.log 2>&1
+  LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout "$timeout_s" "$MIGRANT" "$@" > out.log 2>&1
   STATUS=$?
   set -e
   OUT=$(cat out.log)
@@ -168,11 +179,7 @@ exec /usr/bin/virsh "$@"
 WRAP
 chmod +x fakebin/virsh
 
-set +e
-PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 25 "$MIGRANT" snapshot > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+PATH="$WORK/fakebin:$PATH" run_migrant snapshot
 
 if (( STATUS == 0 )) && grep -q "Shutting down '$VM' for snapshot" <<<"$OUT"; then
   pass "snapshot from a running VM shuts it down first"
@@ -259,11 +266,7 @@ exit 1
 WRAP
 chmod +x fakebin/virt-install
 
-set +e
-PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 25 "$MIGRANT" reset > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+PATH="$WORK/fakebin:$PATH" run_migrant reset
 
 if grep -q "Using snapshot: $SNAPSHOT_PATH" <<<"$OUT"; then
   pass "reset rebuilds from the default snapshot path"
@@ -291,11 +294,7 @@ rm -f "$DISK_PATH" "$WORK/virt-install.args"
 virsh destroy "$VM" &>/dev/null || true
 virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
 
-set +e
-PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 25 "$MIGRANT" reset > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+PATH="$WORK/fakebin:$PATH" run_migrant reset
 
 if grep -q "\[WARNING\] VM '$VM' domain not found; MAC addresses cannot be preserved." <<<"$OUT"; then
   pass "reset warns when the old domain is gone"
@@ -312,12 +311,7 @@ fi
 #         is gone, instead of clobbering it with an empty value (regression for
 #         the cross-host restore case, where there's never a local domain to
 #         source MACs from) -----------------------------------------------------
-set +e
-PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" _MIGRANT_RESET_MACS="52:54:00:de:ad:be" \
-  timeout 25 "$MIGRANT" reset > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+PATH="$WORK/fakebin:$PATH" _MIGRANT_RESET_MACS="52:54:00:de:ad:be" run_migrant reset
 
 if grep -q "\[WARNING\] VM '$VM' domain not found; MAC addresses cannot be preserved." <<<"$OUT"; then
   fail "reset warned about MAC loss despite a caller-supplied _MIGRANT_RESET_MACS: $OUT"
@@ -412,11 +406,7 @@ qemu-img create -f qcow2 "$EXT_SNAP" 10M > /dev/null
 virsh destroy "$VM" &>/dev/null || true
 virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
 
-set +e
-PATH="$WORK/fakebin:$PATH" LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 25 "$MIGRANT" reset "$EXT_SNAP" > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+PATH="$WORK/fakebin:$PATH" run_migrant reset "$EXT_SNAP"
 
 if grep -q "Using snapshot: $EXT_SNAP" <<<"$OUT"; then
   pass "reset with a given path reports using that snapshot"
@@ -479,11 +469,7 @@ virsh define dom.xml > /dev/null
 # until something kills it. The pass/fail signal below is already decided
 # within the first fraction of a second, so a short timeout is plenty; it
 # only needs to outlast virsh/shell startup on a slow box, not a real boot.
-set +e
-LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 8 "$MIGRANT" up > out.log 2>&1
-STATUS=$?
-set -e
-OUT=$(cat out.log)
+run_migrant --timeout 8 up
 
 if grep -q "was built from" <<<"$OUT"; then
   fail "custom-snapshot VM falsely flagged as base-image drift: $OUT"
