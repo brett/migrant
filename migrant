@@ -21,7 +21,10 @@ MANAGED_KEY_PATH="$(expand_home "${MIGRANT_KEY_PATH:-$HOME/.ssh/migrant}")"
 # Resolve the VM directory: MIGRANT_DIR env var takes precedence over CWD.
 if [[ -n "${MIGRANT_DIR:-}" ]]; then
   _migrant_dir="$(expand_home "$MIGRANT_DIR")"
-  VM_DIR="$(realpath "$_migrant_dir")"
+  # -m: 'restore' may legitimately name a directory that does not exist yet,
+  # and for every other subcommand require_config's "No Migrantfile found in
+  # X" beats realpath's bare "No such file or directory".
+  VM_DIR="$(realpath -m "$_migrant_dir")"
 else
   VM_DIR="$(pwd)"
 fi
@@ -55,6 +58,22 @@ Lifecycle:
                       filename, a full path is used as given
   reset [path]        Destroy the VM and rebuild it from a snapshot; without a
                       path, uses the default location
+  archive <dest>      Snapshot the VM and bundle it (Migrantfile, playbook.yml,
+                      cloud-init.yml, hooks/, shared folders inside the VM
+                      directory, the snapshot, and the domain's MAC addresses)
+                      into one tarball, for moving it to a different host.
+                      Halts the VM first if it's running, and it stays down
+                      afterward, same as 'snapshot'; this fires the same
+                      pre-down/post-down hooks a snapshot-triggered shutdown
+                      does. <dest> a directory builds a timestamped filename
+                      there; a full path is used as given
+  restore [--force] <tarball> [dest]
+                      Extract an archive produced by 'migrant archive' and
+                      rebuild the VM from it. [dest] is the exact directory to
+                      restore into, defaulting to the current directory.
+                      Refuses if [dest] already exists and is non-empty, or if
+                      a VM of the archived name already exists on this host;
+                      --force destroys that VM, its disk, and its snapshot
   resize              Grow the VM's disk to match DISK_GB in the Migrantfile;
                       requires the VM to be running
 
@@ -121,6 +140,13 @@ require_config() {
       LIBVIRT_NETWORKS+=("${BASH_REMATCH[2]}")
     fi
   done
+}
+
+# The domain's MAC addresses, one per line, in NIC order. Empty for a domain
+# with no NICs, or none at all.
+domain_macs() {
+  virsh domiflist "$1" 2>/dev/null \
+    | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }'
 }
 
 require_vm() {
@@ -1041,10 +1067,11 @@ cmd_up() {
 
   local cloud_init_dir=""
   cloud_init_dir=$(mktemp -d)
-  # SC2064: double quotes are intentional — cloud_init_dir is local and
-  # will be out of scope when EXIT fires, so we expand the path now.
+  # SC2064: double quotes are intentional — cloud_init_dir is local and gone by the time
+  # EXIT fires, so expand now. printf %q, not bare quotes: an apostrophe in the
+  # path would leave the trap unparseable, failing when it is all that is left.
   # shellcheck disable=SC2064
-  trap "rm -rf '$cloud_init_dir'" EXIT
+  trap "rm -rf $(printf %q "$cloud_init_dir")" EXIT
 
   render_user_data "$cloud_init_dir/user-data"
   cat > "$cloud_init_dir/meta-data" <<EOF
@@ -1588,10 +1615,15 @@ cmd_snapshot() {
   echo "Creating snapshot (this may take a few minutes)..."
   qemu-img convert -f qcow2 -O qcow2 "$DISK_PATH" "$target"
   echo "Snapshot saved: $target"
-  if [[ "$target" == "$SNAPSHOT_PATH" ]]; then
-    echo "Run 'migrant reset' to rebuild the VM from this snapshot."
-  else
-    echo "Run 'migrant reset $target' to rebuild the VM from this snapshot."
+  # cmd_archive calls this internally with a throwaway scratch path — the
+  # reset hint below would be actively misleading there, since that path
+  # gets deleted once the archive tarball is built.
+  if [[ "${_MIGRANT_ARCHIVE_TRIGGER:-}" != true ]]; then
+    if [[ "$target" == "$SNAPSHOT_PATH" ]]; then
+      echo "Run 'migrant reset' to rebuild the VM from this snapshot."
+    else
+      echo "Run 'migrant reset $target' to rebuild the VM from this snapshot."
+    fi
   fi
 }
 
@@ -1618,9 +1650,7 @@ cmd_reset() {
   local macs=()
   if virsh dominfo "$VM_NAME" &>/dev/null; then
     _MIGRANT_VM_IP=$(get_vm_ip 2>/dev/null || true)
-    while IFS= read -r mac; do
-      [[ -n "$mac" ]] && macs+=("$mac")
-    done < <(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }')
+    mapfile -t macs < <(domain_macs "$VM_NAME")
   elif [[ -z "${_MIGRANT_RESET_MACS:-}" ]]; then
     echo "[WARNING] VM '$VM_NAME' domain not found; MAC addresses cannot be preserved." >&2
     echo "  Network may not work after reset. Run 'migrant destroy && migrant up' instead." >&2
@@ -1638,6 +1668,341 @@ cmd_reset() {
   # call it prefixes.
   local effective_macs="${macs[*]:-${_MIGRANT_RESET_MACS:-}}"
   _MIGRANT_RESET_SNAPSHOT_PATH="$snapshot_source" _MIGRANT_RESET_MACS="$effective_macs" cmd_up
+}
+
+cmd_archive() {
+  require_vm
+
+  local dest="${1:-}"
+  if [[ -z "$dest" ]]; then
+    echo "[ERROR] 'migrant archive' requires a destination." >&2
+    echo "  Usage: migrant archive <dest>" >&2
+    exit 64  # EX_USAGE
+  fi
+  dest=$(expand_home "$dest")
+  # realpath strips a trailing slash, so note the caller's intent first: a
+  # non-existent path would otherwise become a regular file of that name.
+  local dest_meant_dir=false
+  if [[ "$dest" == */ ]]; then
+    dest_meant_dir=true
+  fi
+  # Absolutize before deriving dest_dir: scratch_dir is created under it and
+  # reaches tar as a second -C, which GNU tar resolves against the *first* -C,
+  # not the CWD. A relative dest sent tar hunting under the VM directory's
+  # parent, and only after the slow snapshot had run.
+  dest=$(realpath -m "$dest")
+  if [[ -d "$dest" ]]; then
+    dest="$dest/${VM_NAME}-$(date +%Y%m%d-%H%M%S).tar.zst"
+  elif [[ "$dest_meant_dir" == true ]]; then
+    echo "[ERROR] cannot write archive to '$dest/': directory does not exist." >&2
+    exit 73  # EX_CANTCREAT
+  fi
+  local dest_dir
+  dest_dir=$(dirname "$dest")
+  if [[ ! -d "$dest_dir" || ! -w "$dest_dir" ]]; then
+    echo "[ERROR] cannot write archive to '$dest_dir': directory does not exist or is not writable." >&2
+    exit 73  # EX_CANTCREAT
+  fi
+
+  # See docs/snapshots.md, "migrant archive <dest>". Caught here rather than by
+  # tar, whose own "file is the archive" guard cannot fire through
+  # --use-compress-program. Both sides are resolved because VM_DIR is physical
+  # from MIGRANT_DIR but logical from the CWD, and a raw comparison would miss
+  # every VM directory reached through a symlink.
+  local resolved_vm_dir resolved_dest_dir
+  resolved_vm_dir=$(realpath -m "$VM_DIR")
+  resolved_dest_dir=$(realpath -m "$dest_dir")
+  if [[ "$resolved_dest_dir" == "$resolved_vm_dir" || "$resolved_dest_dir" == "$resolved_vm_dir"/* ]]; then
+    echo "[ERROR] archive destination '$dest_dir' is inside the VM directory ('$VM_DIR') — this would try to bundle the archive into itself." >&2
+    echo "  Choose a destination outside the VM directory." >&2
+    exit 64  # EX_USAGE
+  fi
+
+  # tar shells out to the zstd binary. Guaranteed on Arch (qemu-img depends on
+  # it), but Debian and Ubuntu package the CLI apart from the library, so check
+  # before the halt-and-snapshot below rather than dying in tar with the VM
+  # already down and the snapshot discarded.
+  if ! command -v zstd &>/dev/null; then
+    echo "[ERROR] 'zstd' is required to build an archive but is not installed." >&2
+    echo "  Install it (Arch: pacman -S zstd; Debian/Ubuntu: apt install zstd)." >&2
+    exit 69  # EX_UNAVAILABLE
+  fi
+
+  if [[ -f "$dest" ]]; then
+    echo "Overwriting existing archive."
+  fi
+
+  # Scratch dir rooted next to the eventual output, not system /tmp: the
+  # snapshot inside it can be many GB, and this keeps it on the same
+  # filesystem the final archive already needs room for.
+  local scratch_dir
+  scratch_dir=$(mktemp -d -p "$dest_dir")
+  # SC2064: double quotes are intentional — scratch_dir is local and gone by the time
+  # EXIT fires, so expand now. printf %q, not bare quotes: an apostrophe in the
+  # path would leave the trap unparseable, failing when it is all that is left.
+  # shellcheck disable=SC2064
+  trap "rm -rf $(printf %q "$scratch_dir")" EXIT
+
+  local snap_target="$scratch_dir/${VM_NAME}-snapshot.qcow2"
+  local macs_file="$scratch_dir/${VM_NAME}-mac-addresses.txt"
+
+  # See docs/snapshots.md, "migrant archive <dest>" (Shared folders). Resolved
+  # on both sides for the same reason as the guard above; the warning names the
+  # path as configured, matching the Migrantfile.
+  local shared_folder host_path
+  for shared_folder in "${SHARED_FOLDERS[@]+"${SHARED_FOLDERS[@]}"}"; do
+    host_path=$(shared_folder_host_path "$shared_folder")
+    if [[ "$(realpath -m "$host_path")" != "$resolved_vm_dir"/* ]]; then
+      echo "[WARNING] shared folder '$host_path' is outside the VM directory and will not be included in the archive." >&2
+    fi
+  done
+
+  echo "Snapshotting '$VM_NAME'..."
+  _MIGRANT_ARCHIVE_TRIGGER=true cmd_snapshot "$snap_target"
+
+  local macs=() declared_nics=()
+  mapfile -t macs < <(domain_macs "$VM_NAME")
+  declared_nics=("${NETWORKS[@]+"${NETWORKS[@]}"}")
+  # A VM with no NICs is legal — NETWORKS may be empty or unset — so an empty
+  # MAC list is only a problem when the Migrantfile actually declares networks.
+  if (( ${#macs[@]} == 0 && ${#declared_nics[@]} > 0 )); then
+    echo "[ERROR] could not determine a MAC address for '$VM_NAME'." >&2
+    exit 1
+  fi
+  if (( ${#macs[@]} > 0 )); then
+    printf '%s\n' "${macs[@]}" > "$macs_file"
+  else
+    : > "$macs_file"
+  fi
+
+  echo "Building archive..."
+  # Created ahead of tar with restrictive permissions, and set even when
+  # overwriting: the bundle holds the guest's entire disk and, for a WireGuard
+  # VM, wireguard.conf's private key. tar's own O_TRUNC leaves the mode alone,
+  # so this sticks, with no window where the file is world-readable.
+  install -m 600 /dev/null "$dest"
+  tar --sparse --use-compress-program="zstd -T0" -cf "$dest" \
+    -C "$(dirname "$VM_DIR")" "$(basename "$VM_DIR")" \
+    -C "$scratch_dir" "$(basename "$snap_target")" "$(basename "$macs_file")"
+
+  echo
+  echo "Archive ready: $dest"
+}
+
+cmd_restore() {
+  # --force may appear anywhere among the arguments; everything else is
+  # positional, in order.
+  local force=false
+  local -a positional=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=true ;;
+      -*)
+        echo "[ERROR] unknown option '$arg' for 'migrant restore'." >&2
+        echo "  Usage: migrant restore [--force] <tarball> [dest]" >&2
+        exit 64  # EX_USAGE
+        ;;
+      *) positional+=("$arg") ;;
+    esac
+  done
+  if (( ${#positional[@]} > 2 )); then
+    echo "[ERROR] 'migrant restore' takes at most a tarball and a destination." >&2
+    echo "  Usage: migrant restore [--force] <tarball> [dest]" >&2
+    exit 64  # EX_USAGE
+  fi
+
+  local tarball="${positional[0]:-}"
+  if [[ -z "$tarball" ]]; then
+    echo "[ERROR] 'migrant restore' requires a tarball path." >&2
+    echo "  Usage: migrant restore [--force] <tarball> [dest]" >&2
+    exit 64  # EX_USAGE
+  fi
+  if [[ ! -f "$tarball" ]]; then
+    echo "[ERROR] no archive found at '$tarball'." >&2
+    exit 66  # EX_NOINPUT
+  fi
+
+  # Checked before anything is extracted or created, so a host that never ran
+  # 'migrant setup' fails the way 'up' would rather than partway through.
+  if [[ ! -d "$IMAGES_DIR" || ! -w "$IMAGES_DIR" ]]; then
+    echo "[ERROR] images directory '$IMAGES_DIR' does not exist or is not writable." >&2
+    echo "  Run 'migrant setup' on this host first." >&2
+    exit 73  # EX_CANTCREAT
+  fi
+
+  # VM_DIR is already "MIGRANT_DIR, or the current directory", resolved once at
+  # startup — the same default every other subcommand operates on.
+  local dest="${positional[1]:-$VM_DIR}"
+  dest=$(expand_home "$dest")
+  # Resolved once, and not from $0: a caller may have invoked us by a relative
+  # path or a PATH-found name, neither of which survives the MIGRANT_DIR change
+  # the re-invocations below make.
+  local self
+  self=$(realpath "${BASH_SOURCE[0]}")
+  dest=$(realpath -m "$dest")
+
+  if [[ -e "$dest" ]]; then
+    if [[ ! -d "$dest" ]]; then
+      echo "[ERROR] '$dest' exists and is not a directory." >&2
+      exit 66  # EX_NOINPUT
+    fi
+    if [[ -n "$(ls -A "$dest" 2>/dev/null)" ]]; then
+      echo "[ERROR] '$dest' already contains files — refusing to restore over an existing directory." >&2
+      echo "  Remove or move it first if you want to replace it, or restore into a new/empty directory." >&2
+      exit 73  # EX_CANTCREAT
+    fi
+  else
+    mkdir -p "$dest"
+  fi
+
+  # Rooted next to dest, not system /tmp: the VM directory (workspace.img
+  # included) and the snapshot inside it can together be many GB.
+  local extract_dir
+  extract_dir=$(mktemp -d -p "$(dirname "$dest")")
+  # SC2064: double quotes are intentional — extract_dir is local and gone by the time
+  # EXIT fires, so expand now. printf %q, not bare quotes: an apostrophe in the
+  # path would leave the trap unparseable, failing when it is all that is left.
+  # shellcheck disable=SC2064
+  trap "rm -rf $(printf %q "$extract_dir")" EXIT
+  tar --sparse -xf "$tarball" -C "$extract_dir"
+
+  # The VM directory is the archive's only top-level directory; the snapshot
+  # and MAC file sit beside it as plain files. Read from the extracted tree
+  # rather than a second 'tar -t', which would decompress the whole archive
+  # again. Its name (whatever the directory was called when archived — not
+  # necessarily VM_NAME) is discarded: [dest] is the exact target, not a
+  # container to nest a same-named subdirectory under.
+  local vm_entry
+  vm_entry=$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+  if [[ -z "$vm_entry" ]] || [[ "$(wc -l <<<"$vm_entry")" -ne 1 ]]; then
+    echo "[ERROR] '$tarball' does not look like a migrant archive (expected exactly one VM directory)." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  if [[ ! -f "$extract_dir/$vm_entry/Migrantfile" ]]; then
+    echo "[ERROR] '$tarball' is missing a Migrantfile in '$vm_entry/'." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  # One subshell, two values: SSH_KEY_PATH is needed alongside VM_NAME for the
+  # managed-key preflight below, and sourcing the archived Migrantfile twice
+  # would run its side effects twice.
+  local extracted_meta=()
+  mapfile -t extracted_meta < <(
+    # shellcheck source=/dev/null
+    source "$extract_dir/$vm_entry/Migrantfile"
+    printf '%s\n%s\n' "${VM_NAME:-}" "${SSH_KEY_PATH:-}"
+  )
+  local extracted_vm_name="${extracted_meta[0]:-}"
+  local extracted_key_path="${extracted_meta[1]:-}"
+  if [[ -z "$extracted_vm_name" ]]; then
+    echo "[ERROR] '$tarball''s Migrantfile sets no VM_NAME." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  local snap_file="$extract_dir/${extracted_vm_name}-snapshot.qcow2"
+  local macs_file="$extract_dir/${extracted_vm_name}-mac-addresses.txt"
+  if [[ ! -f "$snap_file" ]]; then
+    echo "[ERROR] '$tarball' is missing '${extracted_vm_name}-snapshot.qcow2'." >&2
+    exit 65  # EX_DATAERR
+  fi
+  if [[ ! -f "$macs_file" ]]; then
+    echo "[ERROR] '$tarball' is missing '${extracted_vm_name}-mac-addresses.txt'." >&2
+    exit 65  # EX_DATAERR
+  fi
+
+  # See docs/snapshots.md, "Replacing a VM that already exists". 'reset' may
+  # assume the domain it tears down is the one its own Migrantfile describes;
+  # 'restore' cannot, since the name arrives from a foreign tarball.
+  if virsh dominfo "$extracted_vm_name" &>/dev/null; then
+    local existing_state
+    existing_state=$(virsh domstate "$extracted_vm_name" 2>/dev/null || echo "unknown")
+    if [[ "$force" != true ]]; then
+      echo "[ERROR] a VM named '$extracted_vm_name' already exists on this host (state: $existing_state)." >&2
+      echo "  Restoring would destroy it and delete its disk." >&2
+      echo "  Pass --force to replace it, or restore an archive whose Migrantfile" >&2
+      echo "  uses a different VM_NAME." >&2
+      exit 1
+    fi
+    # Torn down here, not by the reset leg: cmd_reset prefers a live local
+    # domain's MACs over the ones it was handed, which would give the restored
+    # guest the old VM's MACs and leave its snapshot-baked netplan rules
+    # matching nothing. Driven through 'migrant destroy' so the teardown cannot
+    # drift from it, and before the move so a failure leaves [dest] untouched.
+    echo "Replacing existing VM '$extracted_vm_name' (state: $existing_state) — --force given."
+    MIGRANT_DIR="$extract_dir/$vm_entry" "$self" destroy
+  fi
+
+  # See docs/snapshots.md, "The managed SSH key must be copied across
+  # separately". Not left to cmd_up's check_managed_key_match on the reset leg:
+  # by then [dest] is populated, and that check's advice ('destroy && up')
+  # would discard the restore. The helpers read $CLOUD_INIT_FILE, so point it
+  # at the archived copy — the file the move below puts in place anyway.
+  CLOUD_INIT_FILE="$extract_dir/$vm_entry/cloud-init.yml"
+  # Mirrors require_config: a Migrantfile SSH_KEY_PATH overrides the default
+  # key location unless MIGRANT_KEY_PATH is set in the environment.
+  local restore_key_path="$MANAGED_KEY_PATH"
+  if [[ -n "$extracted_key_path" && -z "${MIGRANT_KEY_PATH:-}" ]]; then
+    restore_key_path=$(expand_home "$extracted_key_path")
+  fi
+  if [[ -f "$CLOUD_INIT_FILE" ]]; then
+    local archived_key_material
+    archived_key_material=$(cloud_init_managed_key_material)
+    if [[ -n "$archived_key_material" ]]; then
+      if [[ ! -f "${restore_key_path}.pub" ]]; then
+        echo "[ERROR] the archived VM authenticates with the managed SSH key, but" >&2
+        echo "  '${restore_key_path}.pub' was not found on this host." >&2
+        echo "  Copy '${restore_key_path}' and '${restore_key_path}.pub' from the source" >&2
+        echo "  host, then re-run 'migrant restore'. The archive carries no private key," >&2
+        echo "  and 'migrant pubkey' cannot help: the guest's authorized_keys is baked" >&2
+        echo "  into the snapshot and cloud-init does not re-run on a restore." >&2
+        exit 66  # EX_NOINPUT
+      fi
+      local host_key_material
+      host_key_material=$(awk '{print $2}' "${restore_key_path}.pub")
+      if [[ "$archived_key_material" != "$host_key_material" ]]; then
+        echo "[ERROR] '${restore_key_path}.pub' does not match the managed key the archived" >&2
+        echo "  VM was built with — SSH into the restored VM would fail." >&2
+        echo "  Copy the matching key pair from the source host, then re-run" >&2
+        echo "  'migrant restore'." >&2
+        exit 78  # EX_CONFIG
+      fi
+    elif cloud_init_uses_managed_key && [[ ! -f "${restore_key_path}.pub" ]]; then
+      # The __MIGRANT_PUBKEY__ placeholder leaves no literal key material to
+      # compare against — whatever the source host rendered in at create time
+      # is what the snapshot's authorized_keys holds. A missing key here is
+      # still definitely broken; a present one cannot be verified, so it
+      # passes quietly rather than warning on every legitimate restore.
+      echo "[WARNING] the archived cloud-init.yml uses the __MIGRANT_PUBKEY__ placeholder," >&2
+      echo "  but '${restore_key_path}.pub' does not exist on this host — SSH into the" >&2
+      echo "  restored VM will not work. Copy the key pair from the source host if you" >&2
+      echo "  need SSH access." >&2
+    fi
+  fi
+
+  # Move the VM directory's *contents*, not the directory itself: [dest] is
+  # the exact target, not a parent to nest a same-named subdirectory under.
+  shopt -s dotglob
+  mv "$extract_dir/$vm_entry"/* "$dest"/
+  shopt -u dotglob
+
+  # Into IMAGES_DIR's default slot, not [dest]: cmd_up makes this the disk's
+  # backing file, so it stays load-bearing for the life of the VM. See
+  # docs/snapshots.md, "Where the archived snapshot ends up".
+  local snap_dest="$IMAGES_DIR/${extracted_vm_name}-snapshot.qcow2"
+  if [[ -f "$snap_dest" ]]; then
+    echo "Overwriting existing snapshot."
+  fi
+  # Usually cross-filesystem, hence a real copy — the same I/O 'migrant
+  # snapshot' already pays to write there.
+  mv "$snap_file" "$snap_dest"
+
+  local macs
+  macs=$(paste -sd' ' "$macs_file")
+
+  echo "Restoring '$extracted_vm_name' into '$dest'..."
+  MIGRANT_DIR="$dest" _MIGRANT_RESET_MACS="$macs" "$self" reset "$snap_dest"
 }
 
 cmd_resize() {
@@ -2617,6 +2982,8 @@ case "$SUBCOMMAND" in
   unmount)      require_config; cmd_unmount ;;
   snapshot)     require_config; cmd_snapshot "${@:2}" ;;
   reset)        require_config; cmd_reset "${@:2}" ;;
+  archive)      require_config; cmd_archive "${@:2}" ;;
+  restore)      cmd_restore "${@:2}" ;;
   resize)       require_config; cmd_resize ;;
   provision)    require_config; cmd_provision ;;
   storage)      cmd_storage ;;

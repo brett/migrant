@@ -10,6 +10,8 @@ _migrant() {
     "provision:Run the Ansible playbook against the running VM"
     "snapshot:Shut down the VM and save a snapshot of its disk"
     "reset:Destroy the VM and rebuild it from the last snapshot"
+    "archive:Snapshot the VM and bundle it into one tarball, for moving it to a different host"
+    "restore:Extract an archive produced by 'migrant archive' and rebuild the VM from it"
     "resize:Grow the VM's disk to match DISK_GB in the Migrantfile"
     "status:Show the VM's current state and snapshot availability"
     "mount:Mount the shared folder loop image for host-side access"
@@ -30,6 +32,9 @@ _migrant() {
     [[ $PREFIX == um* ]] && compadd -U -- unmount
   elif [[ $words[2] == ssh ]] && (( CURRENT == 3 )); then
     compadd -- '--'
+  elif [[ $words[2] == restore ]]; then
+    compadd -- '--force'
+    _files
   fi
 }
 

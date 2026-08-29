@@ -57,6 +57,11 @@ Each hook receives these variables in its environment:
 | `MIGRANT_TRIGGER` | Command that caused this hook (`up`, `halt`, `snapshot`, `destroy`, `reset`)      |
 | `MIGRANT_VM_IP`   | VM IP address (set when available; empty for `pre-up` and console-only `post-up`) |
 
+`archive` and `restore` add no trigger values of their own. `archive` shuts the
+VM down through the same path `snapshot` does, so its hooks see
+`MIGRANT_TRIGGER=snapshot`; `restore` fires none itself, and the `destroy` and
+`reset` it drives report themselves. See [snapshots.md](snapshots.md).
+
 All `Migrantfile` variables (`VM_NAME`, `RAM_MB`, `NETWORKS`, etc.) are also
 present in the environment, since the `Migrantfile` is sourced before hooks run.
 

@@ -85,6 +85,12 @@ The qcow2 overlay means:
   outside `IMAGES_DIR` — e.g. a checkpoint before a risky change, without
   disturbing the known-good snapshot at the default location. Snapshots outside
   `IMAGES_DIR` don't appear in `migrant storage`
+- `migrant archive`/`migrant restore` build on the same mechanism to move a VM's
+  full state to a different host: `archive` bundles a fresh snapshot with the VM
+  directory and the domain's MAC addresses, and `restore` unpacks that bundle,
+  drops the snapshot into the default slot, and rebuilds from it — so a restored
+  VM is indistinguishable from a locally snapshotted one. See
+  [snapshots.md](snapshots.md)
 
 To free the base image:
 

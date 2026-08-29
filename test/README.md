@@ -96,7 +96,19 @@ does not exist yet — `test/vm/cloud-init.yml` references it via the
   defined straight from XML — no `virt-install` needed for `snapshot`;
   `virt-install` is shadowed on `PATH` for `reset`'s rebuild leg, and `virsh` is
   shadowed to turn `shutdown` into an immediate `destroy` since there is no real
-  guest to answer ACPI
+  guest to answer ACPI. `archive` bundles a snapshot, the VM directory, shared
+  folders, and every NIC's MAC address into one tarball (warning on and
+  excluding an absolute-path shared folder), for both relative and absolute
+  `<dest>` paths; `restore` extracts one back out, refusing to run into an
+  existing non-empty directory, onto a host that lacks the managed SSH key the
+  archived guest was built with, or onto a host where a domain of the archived
+  name already exists (which it leaves defined and disk intact, unless `--force`
+  is given), and re-invokes `reset` against the enclosed snapshot, landing the
+  archived snapshot in `IMAGES_DIR`'s default slot rather than the VM directory.
+  A VM directory reached through a symlink, a destination path containing an
+  apostrophe, restore's argument parsing, an unwritable `IMAGES_DIR`, the
+  tarball's 0600 mode, a VM with no NICs, and `MIGRANT_DIR` as restore's default
+  destination are all covered
 
 `test-resources.sh`, `test-shared-folder-drift.sh`, `test-ssh-key-path.sh`,
 `test-managed-key-placeholder.sh`, `test-managed-key-ssh-opts.sh`, and

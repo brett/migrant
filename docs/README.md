@@ -8,6 +8,8 @@ for installation and basic usage; the pages here go deeper on specific topics.
   image caching, firmware (BIOS vs UEFI)
 - [usage.md](usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics, network
   lifecycle, SSH key management, port tunneling, `storage`
+- [snapshots.md](snapshots.md) — Checkpointing with `snapshot`/`reset`, and
+  moving a VM between hosts with `archive`/`restore`
 - [resize.md](resize.md) — Growing the VM's disk with `migrant resize`; changing
   RAM and vCPUs by rebuilding
 - [hooks.md](hooks.md) — Lifecycle hooks (`pre-up`, `post-up`, `pre-down`,

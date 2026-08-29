@@ -206,6 +206,26 @@ migrant snapshot [path]    # Shut down the VM and save a snapshot of its disk;
                            # timestamped filename, a full path is used as given
 migrant reset [path]       # Destroy the VM and rebuild it from a snapshot;
                            # without a path, uses the default location
+migrant archive <dest>     # Snapshot the VM and bundle it (Migrantfile,
+                           # playbook.yml, cloud-init.yml, hooks/, shared
+                           # folders inside the VM directory, the snapshot, and
+                           # the domain's MAC addresses) into one tarball, for
+                           # moving it to a different host. Halts the VM first
+                           # if it's running, and it stays down afterward, same
+                           # as 'snapshot'; this fires the same
+                           # pre-down/post-down hooks a snapshot-triggered
+                           # shutdown does. <dest> a directory builds a
+                           # timestamped filename there; a full path is used as
+                           # given
+migrant restore [--force] <tarball> [dest]
+                           # Extract an archive produced by 'migrant archive'
+                           # and rebuild the VM from it. [dest] is the exact
+                           # directory to restore into, defaulting to the
+                           # current directory. Refuses if [dest] already
+                           # exists and is non-empty, or if a VM of the
+                           # archived name already exists on this host;
+                           # --force destroys that VM, its disk, and its
+                           # snapshot
 migrant resize             # Grow the VM's disk to match DISK_GB in the
                            # Migrantfile; requires the VM to be running
 
@@ -256,6 +276,11 @@ migrant reset    # wipe and rebuild from snapshot; Ansible does not re-run
 migrant snapshot ~/vm-checkpoints/          # writes a timestamped file there
 migrant reset ~/vm-checkpoints/<file>       # roll back to it later, if needed
 
+# Move a VM's full state (not just its shared folder) to a different host.
+# The managed SSH key must be copied across separately — see docs/snapshots.md
+migrant archive ~/backups/                  # on the source host
+migrant restore backup.tar.zst ~/vms/mine   # on the destination host
+
 # Update provisioning after changing playbook.yml
 migrant up
 migrant provision   # re-run the Ansible playbook; VM stays running
@@ -277,6 +302,8 @@ Further detail lives in [docs/](docs/):
   work, disk image caching, firmware (BIOS vs UEFI)
 - [docs/usage.md](docs/usage.md) — `MIGRANT_DIR`, waiting-for-ready semantics,
   network lifecycle, SSH key management, port tunneling, `storage`
+- [docs/snapshots.md](docs/snapshots.md) — Checkpointing with
+  `snapshot`/`reset`, and moving a VM between hosts with `archive`/`restore`
 - [docs/resize.md](docs/resize.md) — Growing the VM's disk with
   `migrant resize`; changing RAM and vCPUs via `migrant up`
 - [docs/hooks.md](docs/hooks.md) — Lifecycle hooks (`pre-up`, `post-up`,
