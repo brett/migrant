@@ -474,7 +474,17 @@ cat > dom.xml <<EOF
 EOF
 virsh define dom.xml > /dev/null
 
-run_migrant up
+# Not run_migrant's default timeout 25: this VM has no network interface, so
+# 'up' can never succeed — it just spins in wait_for_ip (120s, no override)
+# until something kills it. The pass/fail signal below is already decided
+# within the first fraction of a second, so a short timeout is plenty; it
+# only needs to outlast virsh/shell startup on a slow box, not a real boot.
+set +e
+LIBVIRT_IMAGES_DIR="$IMAGES_DIR" timeout 8 "$MIGRANT" up > out.log 2>&1
+STATUS=$?
+set -e
+OUT=$(cat out.log)
+
 if grep -q "was built from" <<<"$OUT"; then
   fail "custom-snapshot VM falsely flagged as base-image drift: $OUT"
 elif grep -q "exists but is not running. Starting" <<<"$OUT"; then
