@@ -183,32 +183,56 @@ Run commands from the project directory containing `Migrantfile`, or set
 
 ```bash
 # Setup
-migrant setup              # One-time host setup: configures libvirt networking and installs firewall hooks
+migrant setup              # One-time host setup: configures libvirt networking
+                           # and installs firewall hooks
 
 # Lifecycle
-migrant up                 # Create the VM if it does not exist, or start it if stopped; warns if RAM_MB/VCPUS differ from the defined VM; runs Ansible provisioning (if playbook.yml exists) on first create; waits until the VM is fully ready; connects automatically if AUTOCONNECT is set in the Migrantfile
+migrant up                 # Create the VM if it does not exist, or start it if
+                           # stopped; warns if RAM_MB/VCPUS differ from the
+                           # defined VM; runs Ansible provisioning (if
+                           # playbook.yml exists) on first create; waits until
+                           # the VM is fully ready; connects automatically if
+                           # AUTOCONNECT is set in the Migrantfile
 migrant halt               # Gracefully shut down the VM
-migrant destroy            # Stop and permanently delete the VM, its disk, and any snapshots
-migrant status             # Show the VM's current state and snapshot availability
-migrant provision          # Run the Ansible playbook (playbook.yml) against the running VM
-migrant snapshot [path]    # Shut down the VM and save a snapshot of its disk; VM stays down afterward. Without a path, saves to the default location; a directory builds a timestamped filename, a full path is used as given
-migrant reset [path]       # Destroy the VM and rebuild it from a snapshot; without a path, uses the default location
-migrant resize             # Grow the VM's disk to match DISK_GB in the Migrantfile; requires the VM to be running
+migrant destroy            # Stop and permanently delete the VM, its disk, and
+                           # any snapshots
+migrant status             # Show the VM's current state and snapshot
+                           # availability
+migrant provision          # Run the Ansible playbook (playbook.yml) against
+                           # the running VM
+migrant snapshot [path]    # Shut down the VM and save a snapshot of its disk;
+                           # VM stays down afterward. Without a path, saves to
+                           # the default location; a directory builds a
+                           # timestamped filename, a full path is used as given
+migrant reset [path]       # Destroy the VM and rebuild it from a snapshot;
+                           # without a path, uses the default location
+migrant resize             # Grow the VM's disk to match DISK_GB in the
+                           # Migrantfile; requires the VM to be running
 
 # Shared folder
-migrant mount              # Mount the shared folder loop image for host-side access; creates the image if it does not exist
+migrant mount              # Mount the shared folder loop image for host-side
+                           # access; creates the image if it does not exist
 migrant unmount            # Unmount the shared folder loop image
 
 # Access
-migrant ssh [-- cmd...]    # SSH into the VM as the configured user; optionally run a remote command (e.g. migrant ssh -- sudo cloud-init status)
-migrant tunnel [PORT...]   # Open SSH local-forwards from host to VM. Without args, uses TUNNEL_PORTS from Migrantfile.
+migrant ssh [-- cmd...]    # SSH into the VM as the configured user; optionally
+                           # run a remote command (e.g. migrant ssh -- sudo
+                           # cloud-init status)
+migrant tunnel [PORT...]   # Open SSH local-forwards from host to VM. Without
+                           # args, uses TUNNEL_PORTS from Migrantfile.
 migrant console            # Open a serial console session (exit with Ctrl+])
-migrant ip [-6]            # Print the VM's IPv4 address (what SSH uses). With -6, print the IPv6 (ULA) address when NETWORK_IPV6=nat is set
-migrant pubkey             # Generate the managed SSH key if needed and print its public key
+migrant ip [-6]            # Print the VM's IPv4 address (what SSH uses). With
+                           # -6, print the IPv6 (ULA) address when
+                           # NETWORK_IPV6=nat is set
+migrant pubkey             # Generate the managed SSH key if needed and print
+                           # its public key
 
 # Diagnostics
-migrant storage            # List IMAGES_DIR contents grouped by base images and VMs, with file sizes; works without a Migrantfile
-migrant wg                 # Show live WireGuard interface status, including transfer stats and latest handshake; requires sudo
+migrant storage            # List IMAGES_DIR contents grouped by base images
+                           # and VMs, with file sizes; works without a
+                           # Migrantfile
+migrant wg                 # Show live WireGuard interface status, including
+                           # transfer stats and latest handshake; requires sudo
 migrant dominfo            # Show detailed libvirt domain info for the VM
 ```
 
