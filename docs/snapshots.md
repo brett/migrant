@@ -21,13 +21,14 @@ None of these commands need `sudo`.
 Shuts the VM down and saves a flattened copy of its disk. The VM stays down
 afterward.
 
-The optional argument has three forms:
+The optional argument has four forms:
 
-| Argument              | Result                                                   |
-| --------------------- | -------------------------------------------------------- |
-| *(none)*              | `$IMAGES_DIR/<VM_NAME>-snapshot.qcow2`, the default slot |
-| An existing directory | `<dir>/<VM_NAME>-snapshot-<YYYYmmdd-HHMMSS>.qcow2`       |
-| Anything else         | Used verbatim as the full output path                    |
+| Argument                                     | Result                                                   |
+| -------------------------------------------- | -------------------------------------------------------- |
+| *(none)*                                     | `$IMAGES_DIR/<VM_NAME>-snapshot.qcow2`, the default slot |
+| An existing directory                        | `<dir>/<VM_NAME>-snapshot-<YYYYmmdd-HHMMSS>.qcow2`       |
+| A path ending in `/` that is not a directory | Refused with exit 73                                     |
+| Anything else                                | Used verbatim as the full output path                    |
 
 ```console
 $ migrant snapshot
@@ -44,7 +45,13 @@ is refused with exit 1 rather than snapshotted mid-flight.
 
 Re-running against an existing file prints `Overwriting existing snapshot.`
 before converting. An output directory that doesn't exist or isn't writable is
-refused with exit 73, before the VM is touched.
+refused with exit 73, before the VM is touched — as is a trailing slash on a
+path that is not a directory, which would otherwise be taken as a filename and
+fail in `qemu-img` with `Is a directory` once the VM was already down.
+
+A leading `~` is expanded even when quoted (`migrant snapshot '~/snaps'`), here
+and in every path argument to `reset`, `archive`, and `restore`, since the shell
+leaves a quoted one alone.
 
 Only the default slot appears in `migrant status` and `migrant storage`; both
 look in `IMAGES_DIR` and nowhere else. A checkpoint written elsewhere is

@@ -9,8 +9,9 @@ set -euo pipefail
 export LIBVIRT_DEFAULT_URI="qemu:///system"
 
 # Tilde in an env var override is not expanded by the shell when the variable
-# is set via a prefix (e.g. MIGRANT_DIR='~/foo' cmd), so every overridable
-# path routes through this to expand '~' manually.
+# is set via a prefix (e.g. MIGRANT_DIR='~/foo' cmd), nor in a path argument
+# the caller quoted, so every overridable path and every path a subcommand
+# accepts routes through this to expand '~' manually.
 expand_home() {
   echo "${1/#\~/$HOME}"
 }
@@ -1586,9 +1587,20 @@ cmd_snapshot() {
 
   # $1: no arg keeps the default location; an existing directory gets a
   # timestamped filename built for it; anything else is used as the full path.
-  local target="${1:-$SNAPSHOT_PATH}"
+  local target
+  target=$(expand_home "${1:-$SNAPSHOT_PATH}")
+  # A trailing slash says the caller meant a directory. Noted before the -d
+  # test so an absent one is refused here, rather than taken as a full path and
+  # left to fail in qemu-img with 'Is a directory' once the VM is already down.
+  local target_meant_dir=false
+  if [[ "$target" == */ ]]; then
+    target_meant_dir=true
+  fi
   if [[ -d "$target" ]]; then
     target="${target%/}/${VM_NAME}-snapshot-$(date +%Y%m%d-%H%M%S).qcow2"
+  elif [[ "$target_meant_dir" == true ]]; then
+    echo "[ERROR] cannot write snapshot to '$target': directory does not exist." >&2
+    exit 73  # EX_CANTCREAT
   fi
   local target_dir
   target_dir=$(dirname "$target")
@@ -1652,7 +1664,8 @@ cmd_reset() {
 
   # $1: no arg resets from the default location; otherwise from the given
   # snapshot file, wherever it lives.
-  local snapshot_source="${1:-$SNAPSHOT_PATH}"
+  local snapshot_source
+  snapshot_source=$(expand_home "${1:-$SNAPSHOT_PATH}")
   if [[ ! -f "$snapshot_source" ]]; then
     if [[ -n "${1:-}" ]]; then
       echo "[ERROR] no snapshot found at '$snapshot_source'." >&2
@@ -1838,6 +1851,7 @@ cmd_restore() {
     echo "  Usage: migrant restore [--force] <tarball> [dest]" >&2
     exit 64  # EX_USAGE
   fi
+  tarball=$(expand_home "$tarball")
   if [[ ! -f "$tarball" ]]; then
     echo "[ERROR] no archive found at '$tarball'." >&2
     exit 66  # EX_NOINPUT

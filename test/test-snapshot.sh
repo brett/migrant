@@ -438,6 +438,59 @@ else
 fi
 chmod 755 "$READONLY_DIR"
 
+# --- 12b. snapshot refuses a trailing-slash path that is not a directory -------
+# A trailing slash means the caller meant a directory. With that intent not
+# recorded, the path was taken as a full filename, 'dirname' stripped it back to
+# a writable parent, the check passed, and qemu-img failed with 'Is a directory'
+# — by which point the VM had already been shut down. 'archive' guards this.
+virsh start "$VM" > /dev/null 2>&1 || true
+run_migrant snapshot "$WORK/no-such-snapshot-dir/"
+if (( STATUS == 73 )) && grep -qF "directory does not exist" <<<"$OUT"; then
+  pass "snapshot rejects a trailing-slash path that is not a directory"
+else
+  fail "snapshot did not reject a trailing-slash non-directory: status=$STATUS output=$OUT"
+fi
+if [[ ! -e "$WORK/no-such-snapshot-dir" ]]; then
+  pass "snapshot created no file for the rejected trailing-slash path"
+else
+  fail "snapshot created '$WORK/no-such-snapshot-dir' instead of refusing"
+fi
+if [[ "$(virsh domstate "$VM")" == "running" ]]; then
+  pass "a rejected trailing-slash path leaves a running VM untouched"
+else
+  fail "VM state changed despite the trailing-slash path being rejected: $(virsh domstate "$VM")"
+fi
+virsh destroy "$VM" &>/dev/null || true
+
+# --- 12c. snapshot and reset expand a quoted '~' in their path argument --------
+# The shell expands a bare '~' itself but not one the caller quoted, so both
+# route their argument through expand_home, as 'archive' already did.
+FAKE_HOME="$WORK/fakehome"
+mkdir -p "$FAKE_HOME/snaps"
+define_domain
+# SC2088: the quoting is the point — an unexpanded '~' reaching the subcommand
+# is exactly what expand_home has to handle, so $HOME here would test nothing.
+# shellcheck disable=SC2088
+HOME="$FAKE_HOME" run_migrant snapshot '~/snaps'
+TILDE_SNAP=$(find "$FAKE_HOME/snaps" -maxdepth 1 -type f \
+  -name "${VM}-snapshot-*.qcow2" | head -1)
+if (( STATUS == 0 )) && [[ -n "$TILDE_SNAP" ]]; then
+  pass "snapshot expands a quoted '~' in its path argument"
+else
+  fail "snapshot did not expand '~': status=$STATUS output=$OUT"
+fi
+# shellcheck disable=SC2088  # quoted deliberately, as above
+HOME="$FAKE_HOME" run_migrant reset '~/snaps/no-such-file.qcow2'
+if (( STATUS == 1 )) && grep -qF "$FAKE_HOME/snaps/no-such-file.qcow2" <<<"$OUT"; then
+  pass "reset expands a quoted '~' in its path argument"
+else
+  fail "reset did not expand '~': status=$STATUS output=$OUT"
+fi
+rm -rf "$FAKE_HOME"
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH" "$SNAPSHOT_PATH"
+
 # --- 13. reset rebuilds from a given path, ignoring the default snapshot -------
 qemu-img create -f qcow2 "$SNAPSHOT_PATH" 10M > /dev/null
 EXT_SNAP="$EXT_DIR/checkpoint.qcow2"
@@ -1241,6 +1294,16 @@ if (( STATUS == 64 )) && grep -qF "requires a tarball path" <<<"$OUT"; then
   pass "restore with only --force still reports the missing tarball"
 else
   fail "restore did not report a missing tarball: status=$STATUS output=$OUT"
+fi
+# <tarball> gets the same expand_home treatment as [dest] and as the path
+# arguments to snapshot/reset/archive; see the note on SC2088 above.
+# shellcheck disable=SC2088
+HOME="$WORK/fakehome-restore" run_migrant restore '~/no-such-archive.tar.zst'
+if (( STATUS == 66 )) \
+    && grep -qF "$WORK/fakehome-restore/no-such-archive.tar.zst" <<<"$OUT"; then
+  pass "restore expands a quoted '~' in its tarball argument"
+else
+  fail "restore did not expand '~' in <tarball>: status=$STATUS output=$OUT"
 fi
 rm -rf "$ARGS_DEST"
 
