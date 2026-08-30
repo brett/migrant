@@ -150,6 +150,14 @@ domain_macs() {
     | awk 'NR>2 && $5 ~ /^([0-9a-f]{2}:){5}/ { print $5 }'
 }
 
+# The resolved path of a disk image's backing file, empty when it has none or
+# cannot be read. JSON, not the human-readable form: that appends
+# ' (actual path: ...)' to a relative entry, which no basename survives.
+disk_backing_file() {
+  qemu-img info --output=json "$1" 2>/dev/null \
+    | sed -n 's/.*"full-backing-filename": "\(.*\)".*/\1/p' | head -1 || true
+}
+
 require_vm() {
   if ! virsh dominfo "$VM_NAME" &>/dev/null; then
     echo "[ERROR] VM '$VM_NAME' has not been created. Run 'migrant up' to create it." >&2
@@ -930,8 +938,7 @@ cmd_up() {
     domain_xml=$(LC_ALL=C virsh dumpxml --inactive "$VM_NAME" 2>/dev/null) || domain_xml=""
 
     local current_base
-    current_base=$(qemu-img info "$DISK_PATH" 2>/dev/null \
-        | grep '^backing file:' | cut -d' ' -f3- || true)
+    current_base=$(disk_backing_file "$DISK_PATH")
     current_base=$(basename "$current_base")
     # The VM may have been built from a snapshot at any path (see 'reset
     # <path>'), not just the default location, so the tolerated basename is
@@ -1621,12 +1628,9 @@ cmd_snapshot() {
   # See docs/snapshots.md, "Re-snapshotting a VM that was rebuilt from a
   # snapshot". Detected before the shutdown below rather than left to qemu-img,
   # which declines the overwrite with an opaque 'Failed to get "write" lock'
-  # once the VM has already been halted for nothing. Read as JSON because the
-  # human-readable form appends '(actual path: ...)' to a backing entry that
-  # was stored relative, which no basename survives.
+  # once the VM has already been halted for nothing.
   local backing_file commit_in_place=false
-  backing_file=$(qemu-img info --output=json "$DISK_PATH" 2>/dev/null \
-      | sed -n 's/.*"full-backing-filename": "\(.*\)".*/\1/p' | head -1 || true)
+  backing_file=$(disk_backing_file "$DISK_PATH")
   if [[ -n "$backing_file" \
       && "$(realpath -m "$backing_file")" == "$(realpath -m "$target")" ]]; then
     commit_in_place=true

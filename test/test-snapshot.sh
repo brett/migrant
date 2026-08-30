@@ -634,6 +634,41 @@ fi
 virsh destroy "$VM" &>/dev/null || true
 rm -f .migrant-base-image "$DISK_PATH"
 
+# --- 15b. drift check survives a backing file that was stored relative --------
+# 'qemu-img info' appends ' (actual path: ...)' to a relative backing entry,
+# and only when the CWD is not the image's own directory — which is exactly how
+# this script calls it, from the VM directory against IMAGES_DIR. Parsing the
+# human-readable line left a trailing ')' on the basename, matching neither the
+# base image nor the record, so a healthy VM was refused with exit 78 and told
+# to destroy itself. Only VMs built before 'reset' absolutized its path can
+# have such an entry, but nothing stops a hand-rebased image from having one.
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+REL_SNAP_NAME="rel-checkpoint.qcow2"
+qemu-img create -f qcow2 "$IMAGES_DIR/$REL_SNAP_NAME" 10M > /dev/null
+# Created from inside IMAGES_DIR so the backing entry is stored as a bare name.
+( cd "$IMAGES_DIR" && qemu-img create -f qcow2 -b "$REL_SNAP_NAME" -F qcow2 \
+    "$DISK_PATH" 1G > /dev/null )
+chmod 666 "$DISK_PATH"
+echo "$REL_SNAP_NAME" > .migrant-base-image
+if qemu-img info "$DISK_PATH" | grep -qF "(actual path:"; then
+  pass "fixture reproduces the parenthesised backing-file line"
+else
+  fail "fixture did not produce a relative backing entry: $(qemu-img info "$DISK_PATH" | grep '^backing file')"
+fi
+virsh define dom.xml > /dev/null
+run_migrant --timeout 8 up
+if grep -q "was built from" <<<"$OUT"; then
+  fail "a relative backing entry was falsely flagged as drift: $OUT"
+elif grep -q "exists but is not running. Starting" <<<"$OUT"; then
+  pass "'up' does not flag drift for a relatively-stored backing file"
+else
+  fail "'up' did not reach the start path: status=$STATUS output=$OUT"
+fi
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f .migrant-base-image "$DISK_PATH" "$IMAGES_DIR/$REL_SNAP_NAME"
+
 # --- 16. the real cross-host restore command: no local domain, a relative
 #         snapshot path typed from inside the VM directory, and a
 #         caller-supplied _MIGRANT_RESET_MACS, all together ------------------
