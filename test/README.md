@@ -1,142 +1,72 @@
 # test/
 
-Integration tests for migrant. All tests require a working `migrant setup` and
+Integration tests for migrant. Every test needs a working `migrant setup` and
 KVM support on the host.
 
----
+Each test script's header comment is its own spec: what it asserts, why, and the
+tricks it uses to get there. This README covers how to run them and what they
+need, not what they check — open the file for that.
 
-## Shell test scripts
+## Shell tests
 
-Run from `test/vm`, a bare VM directory kept for these scripts (e.g.
-`cd test/vm && ../test-hooks.sh`).
+| Script                            | Covers                                | Run from  | Needs                                  |
+| --------------------------------- | ------------------------------------- | --------- | -------------------------------------- |
+| `test-hooks.sh`                   | lifecycle hook order and environment  | `test/vm` | boots a VM                             |
+| `test-extra-args.sh`              | `.virt-install-extra-args` convention | `test/vm` | boots a VM                             |
+| `test-managed-config.sh`          | managed config, HOST_ACCESS rules     | `test/vm` | boots a VM, sudo                       |
+| `test-multi-nic.sh`               | per-tap rules on a two-NIC VM         | `test/vm` | boots a VM, sudo                       |
+| `test-forward-port.sh`            | `forward-port` mappings               | `test/vm` | boots a VM, sudo                       |
+| `test-shared-folder.sh`           | shared folder isolation and sizing    | `test/vm` | boots a VM, sudo                       |
+| `test-wireguard.sh`               | WireGuard mode end to end             | `test/vm` | boots a VM, sudo, wireguard-tools, DNS |
+| `test-resources.sh`               | `RAM_MB`/`VCPUS` drift and validation | anywhere  | libvirt                                |
+| `test-shared-folder-drift.sh`     | `SHARED_FOLDERS` path drift           | anywhere  | libvirt                                |
+| `test-snapshot.sh`                | snapshot, reset, archive, restore     | anywhere  | libvirt                                |
+| `test-managed-key-placeholder.sh` | `__MIGRANT_PUBKEY__` in the seed ISO  | anywhere  | qemu-img, xorriso                      |
+| `test-managed-key-ssh-opts.sh`    | managed key in ssh/provision opts     | anywhere  | —                                      |
+| `test-ssh-key-path.sh`            | `SSH_KEY_PATH` precedence             | anywhere  | —                                      |
+
+**`test/vm`** scripts drive a real VM through its lifecycle and must be run from
+the fixture directory:
+
+```bash
+cd test/vm && ../test-hooks.sh
+```
+
+Run `migrant pubkey` before the first one, to generate `~/.ssh/migrant` if it
+does not exist yet — `test/vm/cloud-init.yml` references it via the
+`__MIGRANT_PUBKEY__` placeholder, which `up` fills in automatically.
 
 Do **not** run them from `examples/`. Every example sets `AUTOCONNECT`, which
 leaves `migrant up` sitting in an interactive session — each script calls `up`
 and then keeps going, so the run hangs. The examples also provision a full
 toolchain over Ansible, which adds minutes to a test that only needs SSH.
 
-Run `migrant pubkey` before the first run, to generate `~/.ssh/migrant` if it
-does not exist yet — `test/vm/cloud-init.yml` references it via the
-`__MIGRANT_PUBKEY__` placeholder, which `up` fills in automatically.
+**anywhere** scripts never boot a guest — they define a domain straight from
+XML, or shadow `virsh`/`ssh`/`virt-install` on `PATH` — so they need no VM
+directory, base image, or sudo:
 
-- **test-hooks.sh** — lifecycle hook execution, ordering, and environment
-  variables
-- **test-managed-config.sh** — managed config files, HOST_ACCESS validation,
-  iptables rule creation and cleanup, `allow-host-port` DNAT scoping, and the
-  `route_localnet` refcount. The last of these creates a second, short-lived VM
-  named `<VM_NAME>-rl2` in a temp directory
-- **test-wireguard.sh** — WireGuard mode against a peer in a network namespace,
-  with keys generated per run. Proves the tunnel carries the traffic by having
-  the peer report the source address it saw, checks the per-tap marks and DNS
-  interception, the allow-lan-host exclusion, teardown, that allow-lan-host and
-  forward-port entries naming the same target host don't collide in the
-  exclusion-route table, and that a bad key leaves nothing behind. Needs `sudo`,
-  wireguard-tools, and working DNS. The VM must not order sshd behind
-  `time-sync.target`: a tunnelled guest never completes an NTP sync, so
-  `systemd-time-wait-sync` blocks the whole boot past migrant's SSH wait.
-  `test/vm/cloud-init.yml` masks the NTP units in `bootcmd` to prevent this — it
-  cannot be done from a playbook, which runs after SSH
-- **test-multi-nic.sh** — a VM with two NICs: every per-tap rule reaches every
-  tap, the shared per-VM chain is filled once rather than once per tap, and
-  teardown clears both. Needs `sudo` to read the rules
-- **test-forward-port.sh** — the `forward-port` directive: the mapping reaches
-  the target through the gateway and by no other route, and two rules forwarding
-  different ports to the same target host install, resolve, and tear down
-  independently. Needs `sudo` to stand up a routed target in a network namespace
-- **test-shared-folder.sh** — shared folder isolation: the loop image is mounted
-  with `nosymfollow` and recorded, and the VM refuses to start when the image
-  will not mount or the mount point is backed by something else. Also covers
-  per-entry `SHARED_FOLDERS` size overrides — validation of the size value
-  (including that one bad entry is still caught behind a valid one) and of
-  pairing a size with `SHARED_FOLDER_ISOLATION=false`, and that two shares in
-  one Migrantfile get independently sized images, the correct `guest_tag` in the
-  domain XML for a 3-field entry, and are both recorded and torn down on halt.
-  Also covers a failed image allocation (`truncate`, forced by putting a
-  directory at the image path) reporting a clean error and leaving nothing
-  behind, rather than a corrupt image that confuses the next `up`. Needs `sudo`
-  to stage a foreign mount
-- **test-extra-args.sh** — `$VM_DIR/.virt-install-extra-args` file convention:
-  pre-up hook contributes args to virt-install on first create, file is consumed
-  on read, absent file is a no-op
-- **test-resources.sh** — `RAM_MB`/`VCPUS` drift warnings on `up`: the warning a
-  stopped, running, or paused VM gets, that the domain definition is never
-  modified, drift in the current allocation rather than the maximum, silence
-  when the two agree, degrading to no warning when the domain cannot be read, a
-  paused VM being resumed rather than started, validation rejections, that
-  `reset` refuses an invalid or incomplete `Migrantfile` without destroying the
-  VM first, that the check costs exactly one `virsh` call, and the matching
-  `resources:` row in `status`
-- **test-shared-folder-drift.sh** — `SHARED_FOLDERS` path drift on `up` and
-  `status`: a moved VM directory is caught and refuses to start (exit 78) with
-  the entry and both paths named, a matching path starts silently, only the
-  entry that actually drifted is reported when there is more than one, the check
-  applies the same with `SHARED_FOLDER_ISOLATION=false`, degrading to no error
-  when the domain cannot be read, and the matching `loop:` row in `status`
-- **test-ssh-key-path.sh** — the `SSH_KEY_PATH` Migrantfile variable and its
-  precedence against the `MIGRANT_KEY_PATH` env var, via `migrant pubkey`
-- **test-managed-key-placeholder.sh** — the `__MIGRANT_PUBKEY__` placeholder in
-  `cloud-init.yml`: `up` errors before building the seed ISO when the managed
-  key does not exist yet, substitutes the real public key into the seed ISO when
-  it does, and a literal key (no placeholder) still passes through unmodified.
-  `virt-install` is shadowed on `PATH` so this never boots a VM
-- **test-managed-key-ssh-opts.sh** — `build_ssh_opts` and `cmd_provision`
-  recognizing the placeholder the same way they recognize a literal
-  `migrant`-tagged key: `-i $MANAGED_KEY_PATH`/`IdentitiesOnly=yes` for `ssh`
-  and `tunnel`, `--private-key` for `provision`, a missing key erroring instead
-  of silently falling back to agent keys, and a non-managed key correctly
-  leaving the agent in charge. `virsh`, `ssh`, and `ansible-playbook` are all
-  shadowed on `PATH`
-- **test-snapshot.sh** — `snapshot`/`reset` at the default path: converting
-  directly from a shut-off VM vs. shutting a running one down first, refusing a
-  VM in an unexpected state (e.g. paused) or one that doesn't exist, warning
-  before overwriting an existing snapshot, snapshot content surviving the round
-  trip byte-for-byte, `reset` refusing when no snapshot exists, preserving the
-  old domain's MAC addresses into the rebuild, and still rebuilding (with a
-  warning) when the old domain is already gone. A domain with a real disk is
-  defined straight from XML — no `virt-install` needed for `snapshot`;
-  `virt-install` is shadowed on `PATH` for `reset`'s rebuild leg, and `virsh` is
-  shadowed to turn `shutdown` into an immediate `destroy` since there is no real
-  guest to answer ACPI. `archive` bundles a snapshot, the VM directory, shared
-  folders, and every NIC's MAC address into one tarball (warning on and
-  excluding an absolute-path shared folder), for both relative and absolute
-  `<dest>` paths; `restore` extracts one back out, refusing to run into an
-  existing non-empty directory, onto a host that lacks the managed SSH key the
-  archived guest was built with, or onto a host where a domain of the archived
-  name already exists (which it leaves defined and disk intact, unless `--force`
-  is given), and re-invokes `reset` against the enclosed snapshot, landing the
-  archived snapshot in `IMAGES_DIR`'s default slot rather than the VM directory.
-  A VM directory reached through a symlink, a destination path containing an
-  apostrophe, restore's argument parsing, an unwritable `IMAGES_DIR`, the
-  tarball's 0600 mode, a VM with no NICs, and `MIGRANT_DIR` as restore's default
-  destination are all covered
+```bash
+test/test-resources.sh
+```
 
-`test-resources.sh`, `test-shared-folder-drift.sh`, `test-ssh-key-path.sh`,
-`test-managed-key-placeholder.sh`, `test-managed-key-ssh-opts.sh`, and
-`test-snapshot.sh` are the exception to the above — run them from anywhere (e.g.
-`test/test-resources.sh`). None of them boot a real, working VM: the first two
-check drift before `virsh start` against a diskless domain defined from XML,
-`test-ssh-key-path.sh` only exercises `migrant pubkey`, `test-snapshot.sh`
-defines its own disk-backed domain from XML, and the remaining two shadow
-`virsh`/`ssh`/`virt-install` on `PATH` to stop short of a real boot. None need a
-VM directory, base image, or `sudo`.
-
-### `vm/` — the directory the scripts run from
+### `vm/` — the fixture the first group runs from
 
 A bare VM (`test-vm`): no `AUTOCONNECT`, no shared folder, one NIC, and no
 `playbook.yml`, so Ansible never runs. The scripts probe with bash's `/dev/tcp`
 rather than `netcheck.py`, so nothing needs installing in the guest.
 
-Scripts that need a different shape — extra NICs, a shared folder, HOST_ACCESS
+Scripts that need a different shape — extra NICs, a shared folder, `HOST_ACCESS`
 entries — back this Migrantfile up and write their own over it, restoring it on
 exit. Keep the fixture minimal so they have a predictable base.
 
----
+`vm/cloud-init.yml` masks the NTP units in `bootcmd` on purpose; the comment
+there explains why removing it breaks `test-wireguard.sh`.
 
 ## VM test configs
 
 Self-contained VM directories that verify HOST_ACCESS and network isolation
-end-to-end. Each runs netcheck.py inside the VM to confirm connectivity matches
-the Migrantfile configuration.
+end-to-end. Each runs `netcheck.py` inside the VM to confirm connectivity
+matches the Migrantfile.
 
 ```bash
 cd test/<config>
@@ -145,37 +75,25 @@ cd test/<config>
 ../../migrant destroy # remove VM when done
 ```
 
-| Config                 | What it tests                                                                                                                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tcp-host-port/`       | `allow-host-port tcp/9999` against a listener bound to `0.0.0.0` — covers the easy case, and that the port is mapped from the gateway only rather than hijacked from every address |
-| `udp-host-port/`       | `allow-host-port udp/9999` — UDP listener on host, VM sends datagram through isolation                                                                                             |
-| `localhost-host-port/` | `allow-host-port tcp/9998` against a listener bound to **`127.0.0.1`** — exercises the DNAT leg                                                                                    |
-| `lan-host/`            | `allow-lan-host` — VM reaches the host's default router (auto-detected)                                                                                                            |
-| `multi-rule/`          | Combined `allow-host-port tcp/9999` + `allow-lan-host` in a single config                                                                                                          |
-| `isolation-only/`      | Default isolation with no HOST_ACCESS — verifies the VM cannot reach the host                                                                                                      |
-| `no-isolation/`        | `NETWORK_ISOLATION=false` — verifies the VM can reach the host freely                                                                                                              |
-| `ipv6-nat/`            | `NETWORK_IPV6=nat` — verifies NAT66 egress works while the host stays unreachable over IPv6                                                                                        |
+| Config                 | What it tests                                                                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `tcp-host-port/`       | `allow-host-port tcp/9999` to a `0.0.0.0` listener — and that the port is mapped from the gateway only, not hijacked from every address |
+| `udp-host-port/`       | `allow-host-port udp/9999` — datagram to a host listener                                                                                |
+| `localhost-host-port/` | `allow-host-port tcp/9998` to a **`127.0.0.1`** listener — the DNAT leg                                                                 |
+| `lan-host/`            | `allow-lan-host` — the host's default router, auto-detected                                                                             |
+| `multi-rule/`          | `allow-host-port tcp/9999` and `allow-lan-host` in one config                                                                           |
+| `isolation-only/`      | default isolation, no HOST_ACCESS — the VM cannot reach the host                                                                        |
+| `no-isolation/`        | `NETWORK_ISOLATION=false` — the VM reaches the host freely                                                                              |
+| `ipv6-nat/`            | `NETWORK_IPV6=nat` — NAT66 egress works, host stays unreachable over IPv6                                                               |
 
-### Hook pattern
+### How a config is put together
 
-Configs that start a host-side service use this hook layout:
-
-| Hook       | Purpose                                             |
-| ---------- | --------------------------------------------------- |
-| `pre-up`   | Start a listener on the host before the VM boots    |
-| `post-up`  | Run netcheck.py inside the VM and verify the result |
-| `pre-down` | Kill the listener before the VM stops               |
-
-Configs without a host-side service (`lan-host/`, `isolation-only/`,
-`no-isolation/`) only have a `post-up` hook.
-
-### File delivery via Ansible
-
-Each config's `playbook.yml` copies `tools/netcheck.py` into the VM home
-directory. Migrant.sh runs the playbook automatically once SSH and cloud-init
-are ready, so the post-up hook can assume `~/netcheck.py` exists and just runs
-it.
-
-### Shared cloud-init
-
-All configs use a copy of `test/cloud-init.yml` (Arch Linux, python3, uv).
+- **Hooks.** `pre-up` starts a host-side listener before the VM boots, `post-up`
+  runs `netcheck.py` in the guest and checks the result, `pre-down` kills the
+  listener. Configs with no host-side service (`lan-host/`, `isolation-only/`,
+  `no-isolation/`) have only `post-up`.
+- **Delivery.** `playbook.yml` copies `tools/netcheck.py` into the guest home
+  directory. Migrant runs the playbook once SSH and cloud-init are ready, so
+  `post-up` can assume `~/netcheck.py` is there.
+- **Base image.** Every config uses a copy of `test/cloud-init.yml` (Arch Linux,
+  python3, uv).
