@@ -1597,6 +1597,20 @@ cmd_snapshot() {
     exit 73  # EX_CANTCREAT
   fi
 
+  # See docs/snapshots.md, "Re-snapshotting a VM that was rebuilt from a
+  # snapshot". Detected before the shutdown below rather than left to qemu-img,
+  # which declines the overwrite with an opaque 'Failed to get "write" lock'
+  # once the VM has already been halted for nothing. Read as JSON because the
+  # human-readable form appends '(actual path: ...)' to a backing entry that
+  # was stored relative, which no basename survives.
+  local backing_file commit_in_place=false
+  backing_file=$(qemu-img info --output=json "$DISK_PATH" 2>/dev/null \
+      | sed -n 's/.*"full-backing-filename": "\(.*\)".*/\1/p' | head -1 || true)
+  if [[ -n "$backing_file" \
+      && "$(realpath -m "$backing_file")" == "$(realpath -m "$target")" ]]; then
+    commit_in_place=true
+  fi
+
   local state
   state=$(virsh domstate "$VM_NAME")
   if [[ "$state" == "running" ]]; then
@@ -1608,12 +1622,18 @@ cmd_snapshot() {
     exit 1
   fi
 
-  if [[ -f "$target" ]]; then
-    echo "Overwriting existing snapshot."
+  if [[ "$commit_in_place" == true ]]; then
+    # The overlay is left in place and stays valid: merging does not change
+    # what it reads, so the VM boots from the same disk it had before.
+    echo "Updating snapshot in place (this may take a few minutes)..."
+    qemu-img commit -q "$DISK_PATH"
+  else
+    if [[ -f "$target" ]]; then
+      echo "Overwriting existing snapshot."
+    fi
+    echo "Creating snapshot (this may take a few minutes)..."
+    qemu-img convert -f qcow2 -O qcow2 "$DISK_PATH" "$target"
   fi
-
-  echo "Creating snapshot (this may take a few minutes)..."
-  qemu-img convert -f qcow2 -O qcow2 "$DISK_PATH" "$target"
   echo "Snapshot saved: $target"
   # cmd_archive calls this internally with a throwaway scratch path — the
   # reset hint below would be actively misleading there, since that path

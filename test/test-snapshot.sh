@@ -106,9 +106,13 @@ head -c 65536 /dev/urandom > marker.bin
 
 # Scratch paths are $WORK-anchored, not CWD-relative: archive/restore
 # scenarios call this from inside a VM directory.
+# Usage: extracted_matches_marker IMAGE [MARKER]   (MARKER defaults to marker.bin)
 extracted_matches_marker() {
+  local marker="${2:-$WORK/marker.bin}"
   qemu-img convert -O raw "$1" "$WORK/extracted.raw"
-  cmp -s "$WORK/marker.bin" "$WORK/extracted.raw"
+  # Only the marker's own length is compared: an image rebuilt by 'up' is sized
+  # to DISK_GB, so its raw form is far larger than the marker written into it.
+  head -c "$(stat -c %s "$marker")" "$WORK/extracted.raw" | cmp -s "$marker" -
 }
 
 # Domain: a real disk backed by the marker content, no boot media. QEMU has no
@@ -1499,6 +1503,123 @@ virsh destroy "$VM" &>/dev/null || true
 virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
 rm -f "$DISK_PATH" "$SNAPSHOT_PATH" "$WORK/virt-install.args"
 rm -rf "$MD_SRC" "$MD_ARCHIVES" "$WORK/md-dest" "$MD_EXPLICIT"
+
+# --- 37. snapshot into the slot the VM is built on commits, rather than failing
+# A VM rebuilt by 'reset' — or by 'restore', which ends in one — sits on top of
+# its snapshot as a copy-on-write backing file. A second bare 'migrant
+# snapshot' therefore asks qemu-img to overwrite the very image it is reading
+# through, which it refuses with 'Failed to get "write" lock', after the VM has
+# already been halted for nothing. The slot has to be committed to instead, and
+# the commit has to carry down writes made since the rebuild.
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH" "$SNAPSHOT_PATH" "$WORK/virt-install.args"
+
+define_domain
+run_migrant snapshot
+PATH="$WORK/fakebin:$PATH" run_migrant reset
+if [[ -f "$DISK_PATH" ]] \
+    && qemu-img info "$DISK_PATH" | grep -qF "backing file: $SNAPSHOT_PATH"; then
+  pass "reset leaves the disk as an overlay on the default slot"
+else
+  fail "reset did not produce an overlay on the default slot: $(qemu-img info "$DISK_PATH" 2>&1 || true)"
+fi
+
+# Stand in for guest writes after the rebuild. 'convert -n' writes into the
+# existing overlay instead of replacing it, so the backing chain survives and
+# there is a real delta for the commit to carry down.
+head -c 65536 /dev/urandom > "$WORK/marker2.bin"
+qemu-img convert -n -f raw -O qcow2 "$WORK/marker2.bin" "$DISK_PATH"
+chmod 666 "$DISK_PATH"
+
+# The rebuild ran under the fake virt-install and so defined no domain. Stand a
+# real one up on the overlay it created, leaving things where a real 'up' would.
+cat > "$WORK/dom-commit.xml" <<EOF
+<domain type='kvm'>
+  <name>$VM</name>
+  <memory unit='KiB'>524288</memory>
+  <currentMemory unit='KiB'>524288</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type></os>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='$DISK_PATH'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <console type='pty'/>
+  </devices>
+</domain>
+EOF
+virsh define "$WORK/dom-commit.xml" > /dev/null
+
+run_migrant snapshot
+if (( STATUS == 0 )); then
+  pass "snapshot into the slot the VM is built on succeeds"
+else
+  fail "snapshot onto its own backing file failed: status=$STATUS output=$OUT"
+fi
+if grep -qF "Updating snapshot in place" <<<"$OUT"; then
+  pass "snapshot commits in place rather than converting"
+else
+  fail "snapshot did not take the commit path: status=$STATUS output=$OUT"
+fi
+if extracted_matches_marker "$SNAPSHOT_PATH" "$WORK/marker2.bin"; then
+  pass "the committed slot holds the writes made since the rebuild"
+else
+  fail "the committed slot lost the post-rebuild writes"
+fi
+if [[ "$(qemu-img info "$SNAPSHOT_PATH" | grep -c '^backing file:')" == 0 ]]; then
+  pass "the committed slot is still flattened, valid as a future reset source"
+else
+  fail "the committed slot gained a backing file of its own"
+fi
+if extracted_matches_marker "$DISK_PATH" "$WORK/marker2.bin"; then
+  pass "the VM's disk still reads correctly after the commit"
+else
+  fail "the VM's disk no longer reads correctly after the commit"
+fi
+
+# The committed slot must still drive a rebuild, so the checkpoint loop closes.
+virsh destroy "$VM" &>/dev/null || true
+PATH="$WORK/fakebin:$PATH" run_migrant reset
+if grep -q "fake virt-install invoked" <<<"$OUT" \
+    && qemu-img info "$DISK_PATH" | grep -qF "backing file: $SNAPSHOT_PATH"; then
+  pass "reset rebuilds from the committed slot"
+else
+  fail "reset could not rebuild from the committed slot: status=$STATUS output=$OUT"
+fi
+
+# A VM on a plain base image is untouched by all this: it still converts, and
+# the shared base image must not be written to.
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH" "$SNAPSHOT_PATH" "$WORK/virt-install.args"
+BASE_IMG="$IMAGES_DIR/commit-base.qcow2"
+qemu-img convert -f raw -O qcow2 "$WORK/marker.bin" "$BASE_IMG"
+qemu-img create -f qcow2 -b "$BASE_IMG" -F qcow2 "$DISK_PATH" 10M > /dev/null
+chmod 666 "$DISK_PATH"
+sed "s|<source file='.*'/>|<source file='$DISK_PATH'/>|" "$WORK/dom-commit.xml" \
+  > "$WORK/dom-base.xml"
+virsh define "$WORK/dom-base.xml" > /dev/null
+run_migrant snapshot
+if (( STATUS == 0 )) && grep -qF "Creating snapshot" <<<"$OUT" \
+    && ! grep -qF "Updating snapshot in place" <<<"$OUT"; then
+  pass "a base-image VM still takes the convert path"
+else
+  fail "a base-image VM took the wrong path: status=$STATUS output=$OUT"
+fi
+if extracted_matches_marker "$BASE_IMG" && \
+    [[ "$(qemu-img info "$BASE_IMG" | grep -c '^backing file:')" == 0 ]]; then
+  pass "the shared base image is left untouched by the snapshot"
+else
+  fail "the shared base image was modified by the snapshot"
+fi
+
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH" "$SNAPSHOT_PATH" "$BASE_IMG" "$WORK/virt-install.args" \
+  "$WORK/marker2.bin" "$WORK/dom-commit.xml" "$WORK/dom-base.xml"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

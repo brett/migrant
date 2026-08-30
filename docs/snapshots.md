@@ -50,6 +50,33 @@ Only the default slot appears in `migrant status` and `migrant storage`; both
 look in `IMAGES_DIR` and nowhere else. A checkpoint written elsewhere is
 invisible to them, so keep track of it yourself.
 
+### Re-snapshotting a VM that was rebuilt from a snapshot
+
+Once `reset` — or `restore`, which ends in one — has rebuilt a VM, its disk is a
+copy-on-write overlay whose backing file *is* that snapshot. Snapshotting back
+into the same file therefore cannot be a copy: it would mean overwriting the
+image the disk is reading through. `migrant snapshot` recognises this and
+commits instead, merging the overlay's accumulated writes down into the
+snapshot:
+
+```console
+$ migrant snapshot
+Shutting down 'arch-claude' for snapshot...
+Updating snapshot in place (this may take a few minutes)...
+Snapshot saved: /var/lib/libvirt/images/arch-claude-snapshot.qcow2
+Run 'migrant reset' to rebuild the VM from this snapshot.
+```
+
+The outcome is the same either way — the file ends up holding the VM's current
+disk state and stays flattened, so it remains a valid source for the next
+`reset`. Committing is also cheaper than converting, since only the overlay's
+changed clusters are written, and it grows the snapshot if `DISK_GB` was raised
+since the VM was built.
+
+This is the ordinary path for any VM that came from `reset` or `restore`. A VM
+built from a base image shares nothing with its snapshot and is converted as
+before, leaving the cached base image untouched.
+
 One caveat for custom paths: once `reset` points a VM at a snapshot, that file
 becomes the disk's backing file, and **qemu** — not you — has to open it for as
 long as the VM exists. It runs under its own uid, so every directory on the way
