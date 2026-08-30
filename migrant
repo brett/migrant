@@ -461,6 +461,18 @@ wg_iface_and_table() {
   wg_table=$(( 16#$(printf '%s' "$1" | md5sum | head -c7) ))
 }
 
+# True when the policy-routing rule that sends this table's marked traffic into
+# the tunnel is installed. Usage: wg_rule_present WG_TABLE
+#
+# Anchored at the end of the mark: the hex is variable-length (leading zeros in
+# the hash shorten it), so a bare substring match would accept a longer mark
+# that merely starts with this one, and report another VM's rule as this VM's.
+wg_rule_present() {
+  local hex
+  hex=$(printf '%x' "$1")
+  ip rule show | grep -qE "fwmark 0x${hex}([[:space:]]|$)"
+}
+
 is_valid_port() {
   # 10# so a leading zero is read as decimal rather than octal; the digit bound
   # keeps the arithmetic away from overflow.
@@ -869,9 +881,8 @@ verify_wireguard_tunnel() {
   # No-op if WireGuard is not configured for this VM
   [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]] || return 0
 
-  local wg_iface wg_table wg_table_hex
+  local wg_iface wg_table
   wg_iface_and_table "$VM_NAME"
-  wg_table_hex=$(printf '%x' "$wg_table")
 
   # Synchronous checks: interface and ip rule are created in prepare, which
   # completes before virsh start returns.
@@ -883,7 +894,7 @@ verify_wireguard_tunnel() {
     exit 70  # EX_SOFTWARE
   fi
 
-  if ! ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+  if ! wg_rule_present "$wg_table"; then
     echo "[ERROR] WireGuard routing rule for $wg_iface is missing after VM start." >&2
     echo "  Traffic is NOT tunneled. Halting VM." >&2
     echo "  Check: cat /run/migrant/hook.log" >&2
@@ -2750,9 +2761,8 @@ cmd_status() {
     fi
   fi
 
-  local wg_iface wg_table wg_table_hex
+  local wg_iface wg_table
   wg_iface_and_table "$VM_NAME"
-  wg_table_hex=$(printf '%x' "$wg_table")
 
   if [[ -f "/etc/migrant/${VM_NAME}/wireguard.conf" ]]; then
     local wg_endpoint wg_dns
@@ -2760,7 +2770,7 @@ cmd_status() {
     wg_dns=$(cat "/etc/migrant/${VM_NAME}/wireguard-dns" 2>/dev/null || true)
 
     if ip link show "$wg_iface" &>/dev/null \
-        && ip rule show | grep -q "fwmark 0x${wg_table_hex}"; then
+        && wg_rule_present "$wg_table"; then
       if [[ -f "/run/migrant/${VM_NAME}.wgbadkey" ]]; then
         printf '%-*s%s\n' "$w" 'tunnel:' 'active [ERROR]'
         printf '  %-*s%s\n' "$sw" 'iface:' "$wg_iface"
