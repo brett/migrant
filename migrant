@@ -1010,6 +1010,15 @@ cmd_up() {
     # below. Absolutize now, while it's still relative to the CWD the
     # caller actually meant.
     snapshot_source=$(realpath "$snapshot_source")
+  elif [[ -n "${_MIGRANT_RESET_SNAPSHOT_PATH:-}" ]]; then
+    # See docs/snapshots.md, "migrant reset [path]". Guarded on the variable
+    # rather than on every missing snapshot: for a plain 'up' an empty default
+    # slot legitimately means "build from the base image", but a caller that
+    # named a path is asking for that disk specifically.
+    echo "[ERROR] snapshot '$snapshot_source' is gone; '$VM_NAME' cannot be rebuilt from it." >&2
+    echo "  The old VM has already been torn down. Restore the snapshot and re-run" >&2
+    echo "  'migrant reset $snapshot_source', or run 'migrant up' to build a fresh VM." >&2
+    exit 1
   fi
 
   if [[ "$from_snapshot" == true ]]; then
@@ -1691,6 +1700,18 @@ cmd_reset() {
 
   # Before teardown: cmd_up validates too, but only after the VM is already gone.
   validate_vm_config
+
+  # See docs/snapshots.md, "migrant reset [path]". Before the teardown for the
+  # same reason as validate_vm_config above. Both sides are resolved because the
+  # caller's path may reach the same file by a symlink or a relative route.
+  local doomed
+  for doomed in "$DISK_PATH" "$SEED_ISO"; do
+    if [[ "$(realpath -m "$snapshot_source")" == "$(realpath -m "$doomed")" ]]; then
+      echo "[ERROR] '$snapshot_source' is deleted by the teardown that 'reset' performs, so it cannot also be the source." >&2
+      echo "  Run 'migrant snapshot <path>' first, then reset from that." >&2
+      exit 64  # EX_USAGE
+    fi
+  done
 
   teardown_vm keep_snapshot
   echo "VM '$VM_NAME' wiped. Rebuilding..."

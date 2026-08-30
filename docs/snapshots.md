@@ -108,7 +108,14 @@ Using snapshot: /var/lib/libvirt/images/arch-claude-snapshot.qcow2
 
 The `Migrantfile` is validated *before* the teardown, so an invalid or
 incomplete config fails with the VM still intact rather than halfway through a
-rebuild.
+rebuild. Checked at the same point: the VM's own disk and seed ISO are refused
+as the source (exit 64), since the teardown deletes both — they would vanish
+mid-rebuild. Take a snapshot first and reset from that.
+
+If the snapshot disappears between that check and the rebuild — a `pre-down`
+hook removing it, say — `reset` stops with exit 1 rather than falling back to
+the base image. The old VM is gone by then, so a silent fallback would replace
+it with a fresh, unprovisioned one and report success.
 
 Reset preserves the old domain's MAC addresses, one per NIC. This matters more
 than it looks: cloud-init writes netplan rules that match interfaces **by MAC**,
@@ -319,11 +326,11 @@ trust.
 
 Following `sysexits.h`, as elsewhere in `migrant`:
 
-| Code | Meaning                                                                                                         |
-| ---- | --------------------------------------------------------------------------------------------------------------- |
-| 1    | VM in an unsnapshottable state, no snapshot found, no MAC found, or a domain-name collision on restore          |
-| 64   | Usage — missing `<dest>`, unknown option, too many arguments, or an archive destination inside the VM directory |
-| 65   | The tarball is not a well-formed migrant archive                                                                |
-| 66   | Tarball not found, `[dest]` is not a directory, or the managed key is missing                                   |
-| 73   | Output directory missing or unwritable, `[dest]` is non-empty, or `IMAGES_DIR` is missing or unwritable         |
-| 78   | The host's managed key does not match the archived VM's                                                         |
+| Code | Meaning                                                                                                                                                   |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | VM in an unsnapshottable state, no snapshot found, no MAC found, or a domain-name collision on restore                                                    |
+| 64   | Usage — missing `<dest>`, unknown option, too many arguments, an archive destination inside the VM directory, or a reset source the teardown would delete |
+| 65   | The tarball is not a well-formed migrant archive                                                                                                          |
+| 66   | Tarball not found, `[dest]` is not a directory, or the managed key is missing                                                                             |
+| 73   | Output directory missing or unwritable, `[dest]` is non-empty, or `IMAGES_DIR` is missing or unwritable                                                   |
+| 78   | The host's managed key does not match the archived VM's                                                                                                   |

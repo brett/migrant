@@ -527,6 +527,66 @@ else
   fail "reset with missing custom path: status=$STATUS output=$OUT"
 fi
 
+# --- 14b. reset refuses a source its own teardown deletes ---------------------
+# 'reset' tears the VM down before rebuilding, and that teardown removes
+# DISK_PATH and SEED_ISO. Naming either as the source passed the existence
+# check, was deleted mid-flight, and left cmd_up to quietly fetch the base image
+# and hand back a fresh, unprovisioned VM — with the original already gone.
+# Refused up front instead, while the VM is still intact.
+cd "$WORK"
+define_domain
+run_migrant reset "$DISK_PATH"
+if (( STATUS == 64 )) && grep -qF "is deleted by the teardown" <<<"$OUT"; then
+  pass "reset refuses the live disk as its own source"
+else
+  fail "reset did not refuse DISK_PATH: status=$STATUS output=$OUT"
+fi
+if virsh dominfo "$VM" &>/dev/null && [[ -f "$DISK_PATH" ]]; then
+  pass "the refused reset left the domain and its disk intact"
+else
+  fail "reset tore the VM down despite refusing"
+fi
+
+SEED_ISO_PATH="$IMAGES_DIR/${VM}-seed.iso"
+: > "$SEED_ISO_PATH"
+run_migrant reset "$SEED_ISO_PATH"
+if (( STATUS == 64 )) && grep -qF "is deleted by the teardown" <<<"$OUT"; then
+  pass "reset refuses the seed ISO as its own source"
+else
+  fail "reset did not refuse SEED_ISO: status=$STATUS output=$OUT"
+fi
+
+# Both sides are resolved, so an indirect route to the same file is caught too.
+ln -sf "$DISK_PATH" "$WORK/disk-link.qcow2"
+run_migrant reset "$WORK/disk-link.qcow2"
+if (( STATUS == 64 )) && grep -qF "is deleted by the teardown" <<<"$OUT"; then
+  pass "reset refuses a symlink that resolves to the live disk"
+else
+  fail "reset did not refuse a symlink to DISK_PATH: status=$STATUS output=$OUT"
+fi
+rm -f "$WORK/disk-link.qcow2" "$SEED_ISO_PATH"
+virsh destroy "$VM" &>/dev/null || true
+virsh undefine "$VM" --remove-all-storage --nvram &>/dev/null || true
+rm -f "$DISK_PATH"
+
+# --- 14c. a snapshot that vanishes before the rebuild is an error -------------
+# Whatever removed it — a pre-down hook, a concurrent process — cmd_up must not
+# read "the file the caller named is missing" as "no snapshot, build fresh".
+# The old VM is already gone by that point, so falling through would replace it
+# with an unprovisioned stranger and report success.
+_MIGRANT_RESET_SNAPSHOT_PATH="$WORK/vanished.qcow2" run_migrant up
+if (( STATUS == 1 )) && grep -qF "is gone" <<<"$OUT" \
+    && grep -qF "$WORK/vanished.qcow2" <<<"$OUT"; then
+  pass "up refuses when a caller-named snapshot has vanished"
+else
+  fail "up did not refuse a vanished snapshot: status=$STATUS output=$OUT"
+fi
+if ! grep -qF "Copying base image" <<<"$OUT"; then
+  pass "a vanished snapshot does not fall back to a base-image build"
+else
+  fail "up fell back to fetching the base image: $OUT"
+fi
+
 # --- 15. 'up' does not flag a custom-snapshot VM as base-image drift -----------
 # The base-image drift check on an existing domain used to tolerate only the
 # Migrantfile's base image or the default snapshot's basename. A VM 'reset'
