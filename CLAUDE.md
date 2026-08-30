@@ -107,6 +107,13 @@ corresponding doc in the same change. These describe enforced behavior
 (isolation guarantees, hook semantics, lifecycle internals), not just narrative,
 so they go stale silently if left behind.
 
+Comments in the script reference those pages rather than restating them: a
+`# See docs/<page>, "<Section>".` line, carrying on with only the rationale the
+doc does not — why a check sits where it does, why a technique was chosen over
+the obvious one. The behavior itself has one canonical location, so an
+explanation cannot drift out of sync with it. Comments in `test/` are exempt:
+each test's comment is its own spec.
+
 ## Provisioning architecture
 
 cloud-init runs before SSH and cannot be re-run without `destroy` + `up`.
