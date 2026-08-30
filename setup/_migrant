@@ -9,7 +9,7 @@ _migrant() {
     "destroy:Stop and permanently delete the VM, its disk, and any snapshots"
     "provision:Run the Ansible playbook against the running VM"
     "snapshot:Shut down the VM and save a snapshot of its disk"
-    "reset:Destroy the VM and rebuild it from the last snapshot"
+    "reset:Destroy the VM and rebuild it from a snapshot"
     "archive:Snapshot the VM and bundle it into one tarball, for moving it to a different host"
     "restore:Extract an archive produced by 'migrant archive' and rebuild the VM from it"
     "resize:Grow the VM's disk to match DISK_GB in the Migrantfile"
@@ -30,12 +30,31 @@ _migrant() {
     _describe 'command' subcommands
     # 'umount' is a common typo; complete it as 'unmount'
     [[ $PREFIX == um* ]] && compadd -U -- unmount
-  elif [[ $words[2] == ssh ]] && (( CURRENT == 3 )); then
-    compadd -- '--'
-  elif [[ $words[2] == restore ]]; then
-    compadd -- '--force'
-    _files
+    return
   fi
+
+  case $words[2] in
+    ssh)
+      (( CURRENT == 3 )) && compadd -- '--'
+      ;;
+    # One optional path each, so nothing is offered past it. Plain _files
+    # rather than a '*.qcow2'/'*.tar.zst' glob: every one of these accepts any
+    # path, and the file's extension is not what makes it valid — a glob would
+    # hide a checkpoint the tool itself was told to write under another name.
+    snapshot|reset|archive)
+      (( CURRENT == 3 )) && _files
+      ;;
+    restore)
+      # '--force' may appear anywhere, so it stays on offer until it is given.
+      # The rest is <tarball> then an optional [dest]. Only the positionals
+      # already *finished* are counted — the word being typed is excluded, since
+      # an unquoted array expansion would drop it while it is still empty.
+      (( ${words[(I)--force]} )) || compadd -- '--force'
+      local -a filled
+      filled=(${words[3,CURRENT-1]:#--force})
+      (( ${#filled} < 2 )) && _files
+      ;;
+  esac
 }
 
 _migrant "$@"
