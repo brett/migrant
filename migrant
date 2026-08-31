@@ -1418,6 +1418,14 @@ net.bridge.bridge-nf-call-ip6tables = 1"
     printf '%-*s%s\n' "$kw" "bridge netfilter:" "ok"
   fi
 
+  # A qemu.d hook only takes effect for VMs started after libvirtd itself
+  # (re)starts — libvirt discovers which hooks exist once, at daemon startup,
+  # not by re-scanning the directory per domain launch. Installing or changing
+  # one on an already-running daemon leaves it silently invoking no hooks at
+  # all until restarted, same as the "firewall backend" restart above and for
+  # the same reason.
+  local qemu_hooks_changed=false
+
   # --- qemu hook (network isolation + WireGuard) ---
   if [[ -f "$qemu_hook" ]] && cmp -s "$setup_dir/qemu-hook" "$qemu_hook"; then
     printf '%-*s%s\n' "$kw" "qemu hook:" "ok"
@@ -1426,6 +1434,7 @@ net.bridge.bridge-nf-call-ip6tables = 1"
     [[ -f "$qemu_hook" ]] && qemu_hook_verb="reinstalled"
     install_hook "$setup_dir/qemu-hook" "$qemu_hook"
     printf '%-*s%s\n' "$kw" "qemu hook:" "${qemu_hook_verb} [changed]"
+    qemu_hooks_changed=true
     (( changes++ )) || true
   fi
 
@@ -1440,7 +1449,15 @@ net.bridge.bridge-nf-call-ip6tables = 1"
     [[ -f "$loop_hook" ]] && loop_hook_verb="reinstalled"
     install_hook "$setup_dir/loop-hook" "$loop_hook"
     printf '%-*s%s\n' "$kw" "loop hook:" "${loop_hook_verb} [changed]"
+    qemu_hooks_changed=true
     (( changes++ )) || true
+  fi
+
+  # One restart covers both hooks above, rather than one per hook — the
+  # common case (first-ever 'migrant setup') changes both at once.
+  if [[ "$qemu_hooks_changed" == true ]]; then
+    sudo systemctl restart libvirtd
+    printf '  %-*s%s\n' "$skw" "note:" "libvirtd restarted to pick up the hook change(s)"
   fi
 
   # --- network hook (rp_filter) ---
