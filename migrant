@@ -1224,6 +1224,14 @@ EOF
       echo "  Monitor progress : migrant ssh -- sudo tail -f /var/log/cloud-init-output.log" >&2
       echo "  Wait for finish  : migrant ssh -- sudo cloud-init status --wait" >&2
     fi
+  elif vm_has_ssh && [[ "${AUTOCONNECT:-}" != "ssh" ]]; then
+    # from_snapshot == true: already provisioned, so no cloud-init wait is
+    # needed, but wait_for_ip above only confirms a DHCP lease, not that sshd
+    # has finished starting. Without this, a post-up hook that shells out via
+    # 'migrant ssh' can race sshd and fail silently.
+    local user ssh_opts ip
+    resolve_ssh_conn user ssh_opts ip
+    wait_for_ssh "$user" "$ip" "${ssh_opts[@]}"
   fi
 
   run_hook "post-up"
