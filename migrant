@@ -2575,12 +2575,15 @@ cmd_tunnel() {
     forwards+=("-L" "${port}:127.0.0.1:${port}")
   done
 
+  # See docs/usage.md, "Port tunneling (host → VM)". ControlPath=none and not
+  # ControlMaster=no: that one still joins an existing master.
   ssh_opts+=(
     -o ConnectTimeout=10
     -o BatchMode=yes
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=3
     -o ExitOnForwardFailure=yes
+    -o ControlPath=none
   )
 
   printf "Tunneling %s -> %s@%s\n\n" "${ports[*]}" "$user" "$ip"

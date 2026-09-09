@@ -234,8 +234,13 @@ Then `migrant tunnel` with no args opens all of them. Ctrl-C closes the session
 and removes the forwards — no persistent state, no firewall rules, no cleanup.
 Internally this just runs `ssh -N -L PORT:127.0.0.1:PORT` using the same base
 connection settings as `migrant ssh`, plus a few options suited to a long-lived
-background tunnel: connection timeout, keepalives, and exiting if a forward
-fails to bind.
+background tunnel: connection timeout, keepalives, exiting if a forward fails to
+bind, and connection sharing disabled.
+
+Connection sharing is disabled because it would break that guarantee. Where
+`ControlMaster` and `ControlPersist` are set — commonly in a `Host *` block —
+ssh gives the forwards to a background master and the foreground process exits
+once they are established, leaving the tunnel running with nothing to Ctrl-C.
 
 ## storage
 

@@ -9,21 +9,22 @@ need, not what they check — open the file for that.
 
 ## Shell tests
 
-| Script                            | Covers                                | Run from  | Needs                                  |
-| --------------------------------- | ------------------------------------- | --------- | -------------------------------------- |
-| `test-hooks.sh`                   | lifecycle hook order and environment  | `test/vm` | boots a VM                             |
-| `test-extra-args.sh`              | `.virt-install-extra-args` convention | `test/vm` | boots a VM                             |
-| `test-managed-config.sh`          | managed config, HOST_ACCESS rules     | `test/vm` | boots a VM, sudo                       |
-| `test-multi-nic.sh`               | per-tap rules on a two-NIC VM         | `test/vm` | boots a VM, sudo                       |
-| `test-forward-port.sh`            | `forward-port` mappings               | `test/vm` | boots a VM, sudo                       |
-| `test-shared-folder.sh`           | shared folder isolation and sizing    | `test/vm` | boots a VM, sudo                       |
-| `test-wireguard.sh`               | WireGuard mode end to end             | `test/vm` | boots a VM, sudo, wireguard-tools, DNS |
-| `test-resources.sh`               | `RAM_MB`/`VCPUS` drift and validation | anywhere  | libvirt                                |
-| `test-shared-folder-drift.sh`     | `SHARED_FOLDERS` path drift           | anywhere  | libvirt                                |
-| `test-snapshot.sh`                | snapshot, reset, archive, restore     | anywhere  | libvirt                                |
-| `test-managed-key-placeholder.sh` | `__MIGRANT_PUBKEY__` in the seed ISO  | anywhere  | qemu-img, xorriso                      |
-| `test-managed-key-ssh-opts.sh`    | managed key in ssh/provision opts     | anywhere  | —                                      |
-| `test-ssh-key-path.sh`            | `SSH_KEY_PATH` precedence             | anywhere  | —                                      |
+| Script                              | Covers                                  | Run from  | Needs                                  |
+| ----------------------------------- | --------------------------------------- | --------- | -------------------------------------- |
+| `test-hooks.sh`                     | lifecycle hook order and environment    | `test/vm` | boots a VM                             |
+| `test-extra-args.sh`                | `.virt-install-extra-args` convention   | `test/vm` | boots a VM                             |
+| `test-managed-config.sh`            | managed config, HOST_ACCESS rules       | `test/vm` | boots a VM, sudo                       |
+| `test-multi-nic.sh`                 | per-tap rules on a two-NIC VM           | `test/vm` | boots a VM, sudo                       |
+| `test-forward-port.sh`              | `forward-port` mappings                 | `test/vm` | boots a VM, sudo                       |
+| `test-shared-folder.sh`             | shared folder isolation and sizing      | `test/vm` | boots a VM, sudo                       |
+| `test-wireguard.sh`                 | WireGuard mode end to end               | `test/vm` | boots a VM, sudo, wireguard-tools, DNS |
+| `test-resources.sh`                 | `RAM_MB`/`VCPUS` drift and validation   | anywhere  | libvirt                                |
+| `test-shared-folder-drift.sh`       | `SHARED_FOLDERS` path drift             | anywhere  | libvirt                                |
+| `test-snapshot.sh`                  | snapshot, reset, archive, restore       | anywhere  | libvirt                                |
+| `test-managed-key-placeholder.sh`   | `__MIGRANT_PUBKEY__` in the seed ISO    | anywhere  | qemu-img, xorriso                      |
+| `test-managed-key-ssh-opts.sh`      | managed key in ssh/provision opts       | anywhere  | —                                      |
+| `test-ssh-key-path.sh`              | `SSH_KEY_PATH` precedence               | anywhere  | —                                      |
+| `test-tunnel-connection-sharing.sh` | `tunnel` opts out of connection sharing | anywhere  | —                                      |
 
 **`test/vm`** scripts drive a real VM through its lifecycle and must be run from
 the fixture directory:
