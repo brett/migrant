@@ -33,6 +33,12 @@ NETWORKS=(
   "network=migrant"
 )
 
+# Set to false to share a plain host directory instead of a loop image.
+# The loop image is on by default: it caps how much the VM can write to the
+# shared folder and prevents host processes from following symlinks the VM
+# planted inside the share to reach files elsewhere on the host. Turn it
+# off only if you trust the VM's workload.
+# Changing this after VM creation requires 'migrant destroy && migrant up'.
 #SHARED_FOLDER_ISOLATION=false
 
 # Set to true to create the loop image with an ext4 journal. Off by default.
