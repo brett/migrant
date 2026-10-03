@@ -35,6 +35,14 @@ NETWORKS=(
 
 #SHARED_FOLDER_ISOLATION=false
 
+# Set to true to create the loop image with an ext4 journal. Off by default.
+# Without one, a host crash or a snapshot/backup of the image taken while the
+# VM is writing can leave it needing e2fsck; the journal costs extra metadata
+# writes. Applies only when the image is created, and only with
+# SHARED_FOLDER_ISOLATION on — see docs/security/shared-folder-isolation.md
+# to convert an existing image.
+#SHARED_FOLDER_JOURNAL=true
+
 # Block the VM from initiating connections to the host and from reaching other
 # hosts on the local network. Enabled by default; requires 'migrant setup'
 # to have been run. Set to false to opt out.

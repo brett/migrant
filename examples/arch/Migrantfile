@@ -38,6 +38,14 @@ NETWORKS=(
 # Changing this after VM creation requires 'migrant destroy && migrant up'.
 #SHARED_FOLDER_ISOLATION=false
 
+# Set to true to create the loop image with an ext4 journal. Off by default.
+# Without one, a host crash or a snapshot/backup of the image taken while the
+# VM is writing can leave it needing e2fsck; the journal costs extra metadata
+# writes. Applies only when the image is created, and only with
+# SHARED_FOLDER_ISOLATION on — see docs/security/shared-folder-isolation.md
+# to convert an existing image.
+#SHARED_FOLDER_JOURNAL=true
+
 # Set to "uefi" to use UEFI firmware instead of the default BIOS. Not needed
 # for Arch — the archlinux osinfo-db entry already specifies UEFI and q35,
 # so virt-install selects them automatically.

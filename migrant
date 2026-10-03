@@ -258,6 +258,25 @@ shared_folder_isolation_enabled() {
   [[ "${SHARED_FOLDER_ISOLATION:-true}" != "false" ]]
 }
 
+# See docs/security/shared-folder-isolation.md, "Filesystem journal".
+shared_folder_journal_enabled() {
+  [[ "${SHARED_FOLDER_JOURNAL:-false}" == "true" ]]
+}
+
+# See docs/security/shared-folder-isolation.md, "Filesystem journal". debugfs
+# exits 0 even when it fails to open the image, so only a "Filesystem
+# features:" line counts as an answer.
+shared_folder_image_has_journal() {
+  local out features
+  out=$(LC_ALL=C debugfs -R features "$1" 2>/dev/null) || return 0
+  features=$(grep -m1 '^Filesystem features:' <<< "$out") || return 0
+  if [[ " ${features#*:} " == *" has_journal "* ]]; then
+    echo true
+  else
+    echo false
+  fi
+}
+
 shared_folder_host_path() {
   local p="${1%%:*}"          # strip :guest_tag[:size_gb] suffix, leaving only the host path
   [[ "$p" != /* ]] && p="$VM_DIR/$p"  # resolve relative paths against the VM directory
@@ -422,6 +441,17 @@ ensure_shared_folder_images() {
         echo "  To resize: halt the VM, back up ${host_path##*/}/ contents," \
           "run 'rm $img_path', then 'migrant up'." >&2
       fi
+      local has_journal
+      has_journal=$(shared_folder_image_has_journal "$img_path")
+      if [[ "$has_journal" == true ]] && ! shared_folder_journal_enabled; then
+        echo "[NOTE] $img_path has an ext4 journal but SHARED_FOLDER_JOURNAL is not true." >&2
+        echo "  To remove it: halt the VM, run 'migrant unmount'," \
+          "'e2fsck -f $img_path', then 'tune2fs -O ^has_journal $img_path'." >&2
+      elif [[ "$has_journal" == false ]] && shared_folder_journal_enabled; then
+        echo "[NOTE] $img_path has no ext4 journal but SHARED_FOLDER_JOURNAL=true." >&2
+        echo "  To add one: halt the VM, run 'migrant unmount'," \
+          "'e2fsck -f $img_path', then 'tune2fs -O has_journal $img_path'." >&2
+      fi
     else
       echo "Creating ${size_gb}G shared folder image at $img_path..."
       if ! truncate -s "${size_gb}G" "$img_path"; then
@@ -433,10 +463,13 @@ ensure_shared_folder_images() {
         exit 74
       fi
       # root_owner: image is created as root so the guest can write to it.
-      # ^has_journal: no benefit for a loopback image.
+      # has_journal: see docs/security/shared-folder-isolation.md, "Filesystem
+      # journal"; always named, so mke2fs.conf never decides.
       # ^resize_inode: image is destroyed and recreated rather than resized;
       # disabling it avoids reserving inode table space for online resize.
-      if ! mkfs.ext4 -F -q -E root_owner -O ^has_journal,^resize_inode "$img_path"; then
+      local features="^has_journal,^resize_inode"
+      shared_folder_journal_enabled && features="has_journal,^resize_inode"
+      if ! mkfs.ext4 -F -q -E root_owner -O "$features" "$img_path"; then
         rm -f "$img_path"
         echo "[ERROR] mkfs.ext4 failed for $img_path." >&2
         exit 74
@@ -512,6 +545,7 @@ validate_vm_config() {
     fi
   done
   validate_resources
+  validate_shared_folder_journal
   validate_shared_folder_paths
 }
 
@@ -565,6 +599,18 @@ forward_port_target_ok() {
   local first="${ip%%.*}"
   (( 10#$first >= 224 )) && return 1  # multicast and reserved
   return 0
+}
+
+# See docs/security/shared-folder-isolation.md, "Filesystem journal". Kept out
+# of validate_shared_folder_paths so cmd_mount can run it ahead of its early
+# returns.
+validate_shared_folder_journal() {
+  if shared_folder_journal_enabled && ! shared_folder_isolation_enabled; then
+    echo "[ERROR] SHARED_FOLDER_JOURNAL=true but SHARED_FOLDER_ISOLATION=false." >&2
+    echo "  The journal only applies to loop-image-backed shares. Remove" >&2
+    echo "  SHARED_FOLDER_JOURNAL=true, or drop SHARED_FOLDER_ISOLATION=false." >&2
+    exit 65  # EX_DATAERR
+  fi
 }
 
 # See docs/security/shared-folder-isolation.md, "Restrictions" and
@@ -2627,6 +2673,8 @@ cmd_provision() {
 }
 
 cmd_mount() {
+  validate_shared_folder_journal
+
   if [[ -z "${SHARED_FOLDERS[*]+"${SHARED_FOLDERS[*]}"}" ]]; then
     echo "No shared folders configured in Migrantfile."
     return

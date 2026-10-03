@@ -121,6 +121,33 @@ during a compromised session carries forward into the rebuilt VM right along
 with the legitimate history. Treat this as an opt-in convenience for trusted
 sessions, not a default.
 
+## Filesystem journal
+
+Loop images are created without an ext4 journal by default, so a host crash, or
+a snapshot or backup of the image taken while the VM is writing, can capture an
+inconsistent filesystem that needs `e2fsck` before it mounts cleanly, and files
+can be lost. A crash-consistent snapshot of the dataset holding the image does
+not help: it preserves whatever ext4 had on disk at that instant. Set
+`SHARED_FOLDER_JOURNAL=true` in the `Migrantfile` to create images with a
+journal instead, which recovers by replay at the cost of extra metadata writes
+and some space inside the image. Pairing it with `SHARED_FOLDER_ISOLATION=false`
+is a validation error, since a plain host directory has no image to journal.
+
+The setting only applies when an image is created. If an existing image's
+journal state differs, `migrant up` and `migrant mount` print a `[NOTE]`; this
+is skipped silently if the image can't be read or `debugfs` is unavailable. To
+convert it, halt the VM, run `migrant unmount`, then:
+
+```bash
+# add a journal
+e2fsck -f workspace.img
+tune2fs -O has_journal workspace.img
+
+# remove a journal
+e2fsck -f workspace.img
+tune2fs -O ^has_journal workspace.img
+```
+
 ## Restrictions
 
 A shared folder may not contain the VM directory's `hooks/`. Hooks run on the
@@ -131,5 +158,5 @@ any parent of it, is refused for the same reason — share a subdirectory.
 ## Setup notes
 
 Add `*.img` to `.gitignore` to avoid committing the loop image to source
-control. The `e2fsprogs` package (`mkfs.ext4`) must be installed on the host; it
-is standard on all Linux distributions.
+control. The `e2fsprogs` package (`mkfs.ext4`, `debugfs`) must be installed on
+the host; it is standard on all Linux distributions.

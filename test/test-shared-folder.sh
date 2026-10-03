@@ -32,6 +32,9 @@ SIZED_WS="$PWD/sized"
 SIZED_IMG="$PWD/sized.img"
 EXTRA_WS="$PWD/extrafs"
 EXTRA_IMG="$PWD/extrafs.img"
+JOURNAL_WS="$PWD/journal"
+JOURNAL_IMG="$PWD/journal.img"
+WORK=""
 RECORD="/run/migrant/${VM_NAME}.shared"
 HOOKS_DIR="./hooks"
 TEST_HOOK="$HOOKS_DIR/pre-up"
@@ -56,8 +59,9 @@ cleanup() {
     rm -f "$TEST_HOOK"
   fi
   virsh dominfo "$VM_NAME" &>/dev/null && "$MIGRANT" destroy 2>/dev/null || true
-  rm -f "$EXTRA_IMG" "$SIZED_IMG"
-  rmdir "$EXTRA_WS" "$SIZED_WS" 2>/dev/null || true
+  rm -f "$EXTRA_IMG" "$SIZED_IMG" "$JOURNAL_IMG"
+  rmdir "$EXTRA_WS" "$SIZED_WS" "$JOURNAL_WS" 2>/dev/null || true
+  [[ -n "$WORK" ]] && rm -rf "$WORK" || true
   # A directory placed at $IMG to force a truncate failure (below) is only
   # ever empty, so this is a no-op unless that test was interrupted before
   # its own cleanup ran — never remove a real workspace.img this way. One
@@ -187,6 +191,225 @@ EOF
   fi
 done
 
+# Like a per-entry size, a journal has nothing to apply to without a loop
+# image, so asking for one with isolation off is an error, not a silent no-op.
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("workspace:workspace")
+SHARED_FOLDER_ISOLATION=false
+SHARED_FOLDER_JOURNAL=true
+EOF
+set +e
+out=$("$MIGRANT" up 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] SHARED_FOLDER_JOURNAL=true but SHARED_FOLDER_ISOLATION=false" <<<"$out" \
+    && (( rc == 65 )); then
+  pass "rejects SHARED_FOLDER_JOURNAL=true with SHARED_FOLDER_ISOLATION=false"
+else
+  fail "journal + SHARED_FOLDER_ISOLATION=false: status=$rc output=$out"
+  "$MIGRANT" destroy 2>/dev/null || true
+fi
+
+# ============================================================
+# Part 0b: SHARED_FOLDER_JOURNAL at image creation (no VM needed)
+# ============================================================
+# 'up' and 'mount' create missing images through the same function, but only
+# 'mount' gets there without building a domain. Stubbing sudo and virsh on
+# PATH stops it there: virsh reports no domain, so the VM is "not running",
+# and the stubbed sudo makes the final loop mount a no-op — so no root and no
+# VM. Journal state is read with dumpe2fs, not the debugfs probe migrant
+# itself uses, so a bug in that probe cannot make these agree with it.
+
+echo "--- test: SHARED_FOLDER_JOURNAL at image creation ---"
+
+WORK=$(mktemp -d)
+mkdir -p "$WORK/fakebin"
+cat > "$WORK/fakebin/virsh" <<'WRAP'
+#!/usr/bin/env bash
+exit 1
+WRAP
+cat > "$WORK/fakebin/sudo" <<'WRAP'
+#!/usr/bin/env bash
+exit 0
+WRAP
+chmod +x "$WORK/fakebin/virsh" "$WORK/fakebin/sudo"
+
+has_journal() { LC_ALL=C dumpe2fs -h "$1" 2>/dev/null | grep -qE '^Filesystem features:.* has_journal( |$)'; }
+
+# Usage: run_journal_mount [journal_value [mke2fs_config]]
+# An empty journal_value leaves SHARED_FOLDER_JOURNAL unset. mke2fs_config, if
+# given, is exported as MKE2FS_CONFIG for this run only.
+run_journal_mount() {
+  cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("journal:journal:1")
+${1:+SHARED_FOLDER_JOURNAL=$1}
+EOF
+  set +e
+  if [[ -n "${2:-}" ]]; then
+    out=$(PATH="$WORK/fakebin:$PATH" MKE2FS_CONFIG="$2" "$MIGRANT" mount 2>&1); rc=$?
+  else
+    out=$(PATH="$WORK/fakebin:$PATH" "$MIGRANT" mount 2>&1); rc=$?
+  fi
+  set -e
+}
+
+# An mke2fs.conf whose ext4 defaults leave out has_journal. A host with one
+# must still get a journal when SHARED_FOLDER_JOURNAL=true asks for it, so
+# migrant has to request the feature, not just stop refusing it.
+NOJOURNAL_CONF="$WORK/mke2fs-nojournal.conf"
+cat > "$NOJOURNAL_CONF" <<'EOF'
+[defaults]
+	base_features = sparse_super,large_file,filetype,resize_inode,dir_index,ext_attr
+	blocksize = 4096
+	inode_size = 256
+	inode_ratio = 16384
+[fs_types]
+	ext4 = {
+		features = extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize
+	}
+EOF
+
+rm -f "$JOURNAL_IMG"
+run_journal_mount ""
+if (( rc == 0 )) && [[ -f "$JOURNAL_IMG" ]] && ! has_journal "$JOURNAL_IMG"; then
+  pass "default creates the image without a journal"
+else
+  fail "default image: status=$rc journal=$(has_journal "$JOURNAL_IMG" && echo yes || echo no) output=$out"
+fi
+
+# The image already exists, so the setting changes nothing on disk — it only
+# earns a NOTE naming the command to convert it.
+run_journal_mount true
+if (( rc == 0 )) \
+    && grep -q "\[NOTE\] $JOURNAL_IMG has no ext4 journal but SHARED_FOLDER_JOURNAL=true" <<<"$out" \
+    && grep -q "run 'migrant unmount', 'e2fsck -f $JOURNAL_IMG', then 'tune2fs -O has_journal $JOURNAL_IMG'" <<<"$out"; then
+  pass "an existing journal-less image with SHARED_FOLDER_JOURNAL=true gets a NOTE"
+else
+  fail "no-journal mismatch note: status=$rc output=$out"
+fi
+if has_journal "$JOURNAL_IMG"; then
+  fail "SHARED_FOLDER_JOURNAL=true modified an existing image"
+else
+  pass "SHARED_FOLDER_JOURNAL=true leaves an existing image untouched"
+fi
+
+# Control: the config must actually withhold the journal from a plain mkfs,
+# or the case after it proves nothing.
+rm -f "$JOURNAL_IMG"
+truncate -s 64M "$JOURNAL_IMG"
+if ! MKE2FS_CONFIG="$NOJOURNAL_CONF" mkfs.ext4 -F -q "$JOURNAL_IMG" >/dev/null 2>&1; then
+  fail "control: mkfs.ext4 with the no-journal mke2fs.conf failed"
+elif ! sb=$(LC_ALL=C dumpe2fs -h "$JOURNAL_IMG" 2>&1); then
+  fail "control: dumpe2fs could not read the superblock it just created: $sb"
+elif grep -qE '^Filesystem features:.* has_journal( |$)' <<<"$sb"; then
+  fail "control: the no-journal mke2fs.conf still produced a journal"
+else
+  pass "control: the no-journal mke2fs.conf withholds the journal from a plain mkfs"
+fi
+
+rm -f "$JOURNAL_IMG"
+run_journal_mount true "$NOJOURNAL_CONF"
+if (( rc == 0 )) && [[ -f "$JOURNAL_IMG" ]] && has_journal "$JOURNAL_IMG"; then
+  pass "SHARED_FOLDER_JOURNAL=true creates the image with a journal, even when mke2fs.conf omits it"
+else
+  fail "journaled image: status=$rc journal=$(has_journal "$JOURNAL_IMG" && echo yes || echo no) output=$out"
+fi
+if grep -q "\[NOTE\].*journal" <<<"$out"; then
+  fail "a freshly created image matching the setting got a journal NOTE: $out"
+else
+  pass "no journal NOTE when the image matches the setting"
+fi
+
+run_journal_mount ""
+if (( rc == 0 )) \
+    && grep -q "\[NOTE\] $JOURNAL_IMG has an ext4 journal but SHARED_FOLDER_JOURNAL is not true" <<<"$out" \
+    && grep -q "run 'migrant unmount', 'e2fsck -f $JOURNAL_IMG', then 'tune2fs -O ^has_journal $JOURNAL_IMG'" <<<"$out"; then
+  pass "an existing journaled image with the default setting gets a NOTE"
+else
+  fail "journal mismatch note: status=$rc output=$out"
+fi
+
+# The probe is advisory: when it gets no answer there must be no NOTE under
+# either setting. Each case runs under both, so a probe that falls back to
+# either answer prints a NOTE in one of them.
+#
+# Unreadable here means an image with no ext4 superblock. debugfs fails on it
+# exactly as on a permission-denied image — exit 0, no features line — and
+# unlike mode 000 that holds for root too.
+#
+# For the missing debugfs case the image is real ext4 whose journal state
+# contradicts the setting, so a probe that read it anyway would print a NOTE.
+for journal in true ""; do
+  setting="${journal:-default}"
+
+  rm -f "$JOURNAL_IMG"
+  truncate -s 1G "$JOURNAL_IMG"
+  run_journal_mount "$journal"
+  if (( rc == 0 )) && ! grep -q "\[NOTE\].*journal" <<<"$out"; then
+    pass "an unreadable image gets no journal NOTE ($setting setting)"
+  else
+    fail "unreadable image, $setting setting: status=$rc output=$out"
+  fi
+
+  if [[ "$journal" == true ]]; then
+    mkfs.ext4 -F -q -O ^has_journal "$JOURNAL_IMG" >/dev/null 2>&1
+  else
+    mkfs.ext4 -F -q -O has_journal "$JOURNAL_IMG" >/dev/null 2>&1
+  fi
+  cat > "$WORK/fakebin/debugfs" <<'WRAP'
+#!/usr/bin/env bash
+exit 127
+WRAP
+  chmod +x "$WORK/fakebin/debugfs"
+  run_journal_mount "$journal"
+  rm -f "$WORK/fakebin/debugfs"
+  if (( rc == 0 )) && ! grep -q "\[NOTE\].*journal" <<<"$out"; then
+    pass "a missing debugfs gets no journal NOTE ($setting setting)"
+  else
+    fail "missing debugfs, $setting setting: status=$rc output=$out"
+  fi
+done
+
+rm -f "$JOURNAL_IMG"
+
+# 'mount' returns early when isolation is off or no share is configured. The
+# journal setting must be checked ahead of both, as 'up' checks it, or the same
+# Migrantfile is an error on one command and silently accepted on the other.
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDERS=("journal:journal")
+SHARED_FOLDER_ISOLATION=false
+SHARED_FOLDER_JOURNAL=true
+EOF
+set +e
+out=$(PATH="$WORK/fakebin:$PATH" "$MIGRANT" mount 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] SHARED_FOLDER_JOURNAL=true but SHARED_FOLDER_ISOLATION=false" <<<"$out" \
+    && (( rc == 65 )); then
+  pass "mount rejects SHARED_FOLDER_JOURNAL=true with SHARED_FOLDER_ISOLATION=false"
+else
+  fail "mount, journal + SHARED_FOLDER_ISOLATION=false: status=$rc output=$out"
+fi
+
+cat > Migrantfile <<EOF
+$(cat Migrantfile.test-backup)
+SHARED_FOLDER_ISOLATION=false
+SHARED_FOLDER_JOURNAL=true
+EOF
+set +e
+out=$(PATH="$WORK/fakebin:$PATH" "$MIGRANT" mount 2>&1); rc=$?
+set -e
+if grep -q "\[ERROR\] SHARED_FOLDER_JOURNAL=true but SHARED_FOLDER_ISOLATION=false" <<<"$out" \
+    && (( rc == 65 )); then
+  pass "mount rejects SHARED_FOLDER_JOURNAL=true with SHARED_FOLDER_ISOLATION=false and no shares"
+else
+  fail "mount, journal + SHARED_FOLDER_ISOLATION=false, no shares: status=$rc output=$out"
+fi
+rmdir "$JOURNAL_WS" 2>/dev/null || true
+rm -rf "$WORK"
+WORK=""
+
 reset_migrantfile
 
 # ============================================================
@@ -214,6 +437,13 @@ if [[ "$(backing_of "$WS" 2>/dev/null || true)" == "$IMG" ]]; then
   pass "workspace is backed by $IMG"
 else
   fail "workspace is backed by '$(backing_of "$WS" 2>/dev/null || true)', expected $IMG"
+fi
+
+# Part 0b covers this through 'mount'; this is the 'up' path itself.
+if has_journal "$IMG"; then
+  fail "up created $IMG with a journal though SHARED_FOLDER_JOURNAL is unset"
+else
+  pass "up creates $IMG without a journal by default"
 fi
 
 if [[ -f "$RECORD" ]]; then

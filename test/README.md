@@ -16,7 +16,7 @@ need, not what they check — open the file for that.
 | `test-managed-config.sh`          | managed config, HOST_ACCESS rules     | `test/vm` | boots a VM, sudo                       |
 | `test-multi-nic.sh`               | per-tap rules on a two-NIC VM         | `test/vm` | boots a VM, sudo                       |
 | `test-forward-port.sh`            | `forward-port` mappings               | `test/vm` | boots a VM, sudo                       |
-| `test-shared-folder.sh`           | shared folder isolation and sizing    | `test/vm` | boots a VM, sudo                       |
+| `test-shared-folder.sh`           | share isolation, sizing and journal   | `test/vm` | boots a VM, sudo, e2fsprogs            |
 | `test-wireguard.sh`               | WireGuard mode end to end             | `test/vm` | boots a VM, sudo, wireguard-tools, DNS |
 | `test-resources.sh`               | `RAM_MB`/`VCPUS` drift and validation | anywhere  | libvirt                                |
 | `test-shared-folder-drift.sh`     | `SHARED_FOLDERS` path drift           | anywhere  | libvirt                                |
